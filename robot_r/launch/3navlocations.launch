@@ -1,0 +1,10 @@
+<launch>
+
+ 
+
+
+  <node pkg="x2bot_teleop" type="runnav" name="runnav" output="screen">
+  </node>
+
+
+</launch>

@@ -1,0 +1,14 @@
+<launch>
+
+ 
+  <node name="base_tf" pkg="tf" type="static_transform_publisher" args="-0.33 0 0 0 0 0 body base_link 100" />
+
+  <node name="livox_tf" pkg="tf" type="static_transform_publisher" args="0.33 0 0 0 0 0 base_link livox_frame 100" />
+
+
+
+
+
+
+
+</launch>

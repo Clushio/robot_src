@@ -1,0 +1,28 @@
+# ROS build outputs
+build/
+devel/
+install/
+log/
+logs/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# VSCode
+.vscode/
+
+# compressed files
+*.zip
+*.tar.gz
+*.rar
+
+# ROS bags and maps / point clouds
+*.bag
+*.pcd
+
+# temporary files
+*.swp
+*~
+.DS_Store

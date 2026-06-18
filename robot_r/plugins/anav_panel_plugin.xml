@@ -1,0 +1,9 @@
+<library path="lib/librobot_r_anav_panel">
+  <class name="robot_r/ANavPanel"
+         type="robot_r::ANavPanel"
+         base_class_type="rviz::Panel">
+    <description>
+      aNAV control panel for starting simulator, relocalization, and MoveBase.
+    </description>
+  </class>
+</library>

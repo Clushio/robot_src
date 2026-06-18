@@ -1,0 +1,19 @@
+<launch>
+
+
+   <include file="$(find livx2pcl)/launch/repub_ang.launch" />
+<!-- move base plan and control -->
+	  <node pkg="mxb_move_base" type="mxb_move_base" respawn="false" name="mxb_move_base" output="screen">
+	    <rosparam file="$(find jgl_dwa_local_planner)/param/costmap_common_params.yaml"       command="load" ns="global_costmap" />
+	    <rosparam file="$(find jgl_dwa_local_planner)/param/costmap_common_params.yaml"       command="load" ns="local_costmap" />
+	    <rosparam file="$(find jgl_dwa_local_planner)/param/dwa_local_planner_params.yaml"    command="load" />
+	    <rosparam file="$(find jgl_dwa_local_planner)/param/local_costmap_params.yaml"        command="load" />
+	    <rosparam file="$(find jgl_dwa_local_planner)/param/global_costmap_params.yaml"       command="load" />
+	    <rosparam file="$(find jgl_dwa_local_planner)/param/global_planner_params.yaml"       command="load" />
+	    <rosparam file="$(find jgl_dwa_local_planner)/param/move_base_params.yaml"            command="load" />
+	    <rosparam file="$(find jgl_dwa_local_planner)/param/navfn_global_planner_params.yaml" command="load" />
+	  </node>
+
+         <!--node name="joyctl" pkg="teleop_joy_mavros" type="ctlcmdvel_D" /-->
+
+</launch>

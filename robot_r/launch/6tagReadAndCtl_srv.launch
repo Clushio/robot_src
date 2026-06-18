@@ -1,0 +1,6 @@
+<launch>
+
+  <node pkg="x2bot_teleop" type="TagCtl" name="TagCtl_service" output="screen">
+  </node>
+
+</launch>

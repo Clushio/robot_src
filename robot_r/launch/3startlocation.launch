@@ -1,0 +1,28 @@
+<launch>
+
+    <arg name="rviz_enable" default="true"/>
+
+    <include file="$(find robot_r)/launch/robottf.launch" />
+
+    <include file="$(find robot_r)/launch_ROS1/msg_MID360.launch" /> 
+    <!-- 加载地图 -->
+    <arg name="map_file" default="/home/nav/maps/map.yaml"/>
+    <node name="map_server" pkg="map_server" type="map_server"  required="true" args="$(arg map_file)" />
+    <include file="$(find robot_r)/lio/launch/location_360_nrviz.launch"/>
+
+    <!--include file="$(find robot_r)/launch/5nav.launch" /-->
+
+    
+    <group if="$(arg rviz_enable)">
+		<node name="map_rviz" pkg="rviz" type="rviz" respawn="false"
+				args="-d $(find robot_r)/rviz/nav_rviz.rviz"/>
+    </group>
+
+    <include file="$(find x2bot_teleop)/launch/x2bot_joy_PXN.launch" />
+    <!--include file="$(find mavros)/launch/px4.launch" /-->
+
+    <!--node name="joyctl" pkg="teleop_joy_mavros" type="ctlcmdvel_D" /-->
+
+
+
+</launch>

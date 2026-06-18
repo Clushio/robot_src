@@ -1,0 +1,6 @@
+<launch>
+
+
+    <include file="$(find robot_r)/lio/launch/mapping_360.launch" />
+
+</launch>

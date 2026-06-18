@@ -1,0 +1,14 @@
+<launch>
+
+    <include file="$(find robot_r)/launch_ROS1/msg_MID360.launch" />
+
+    <include file="$(find robot_r)/lio/launch/mapping_360.launch" />
+
+    <!--include file="$(find x2bot_teleop)/launch/x2bot_joy_PXN.launch" /-->
+    <!--include file="$(find mavros)/launch/px4.launch" /-->
+
+    <!--node name="joyctl" pkg="teleop_joy_mavros" type="ctlcmdvel_D" /-->
+
+
+
+</launch>

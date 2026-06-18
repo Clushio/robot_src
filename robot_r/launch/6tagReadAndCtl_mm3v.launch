@@ -1,0 +1,27 @@
+<launch>
+  <arg name="port" default="/dev/ttyUSB0"/>
+  <arg name="baudrate" default="38400"/>
+  <arg name="x_sign" default="1.0"/>
+  <arg name="y_sign" default="1.0"/>
+  <arg name="yaw_sign" default="-1.0"/>
+  <arg name="xp_bias" default="0.0"/>
+  <arg name="yp_bias" default="0.0"/>
+  <arg name="angle_bias" default="90.0"/>
+
+  <node pkg="x2bot_teleop" type="TagCtl" name="TagCtl_service" output="screen"/>
+
+  <node pkg="robot_r" type="mm3v_serial_reader.py" name="mm3v_serial_reader" output="screen">
+    <param name="port" value="$(arg port)"/>
+    <param name="baudrate" value="$(arg baudrate)"/>
+    <param name="frame_id" value="map"/>
+    <param name="output_topic" value="/tag_position"/>
+    <param name="output_meter" value="false"/>
+    <param name="publish_no_tag" value="true"/>
+    <param name="x_sign" value="$(arg x_sign)"/>
+    <param name="y_sign" value="$(arg y_sign)"/>
+    <param name="yaw_sign" value="$(arg yaw_sign)"/>
+    <param name="xp_bias" value="$(arg xp_bias)"/>
+    <param name="yp_bias" value="$(arg yp_bias)"/>
+    <param name="angle_bias" value="$(arg angle_bias)"/>
+  </node>
+</launch>

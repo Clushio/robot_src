@@ -1,0 +1,45 @@
+# max_obstacle_height: 0.60  #假设机器人顶部还有其他东西，诸如机械臂
+
+# Obstacle Cost Shaping (http://wiki.ros.org/costmap_2d/hydro/inflation)
+#robot_radius: 0.33
+footprint: [[0.36, 0.45], [0.36, -0.45], [-0.36,-0.45], [-0.36, 0.45]]  # if the robot is not circular
+
+obstacle_layer:
+  enabled:             true
+  observation_sources: scan pointcloud2_topic
+  scan: {sensor_frame: laser_link, data_type: LaserScan, topic: scan, marking: true, clearing: true, inf_is_valid: true}
+  
+  pointcloud2_topic:
+    sensor_frame: livox_frame  # 替换为实际的点云传感器坐标系名称
+    data_type: PointCloud2
+    topic: /livox_pcl0            # 替换为实际的点云话题名称
+    marking: true
+    clearing: true
+    min_obstacle_height: 0.2             # 可选，根据需要设置最小和最大障碍物高度
+    max_obstacle_height: 1.2
+  
+  obstacle_range: 3.0                 # 可选，根据需要设置障碍物检测范围
+  raytrace_range: 3.0                  # 可选，根据需要设置射线追踪范围
+  update_frequency: 5.0  # 高频率更新以快速响应变化
+  publish_frequency: 2.0  # 适当频率发布更新
+
+  sensor_model:
+    hit: 0.70  # 适当降低命中概率
+    miss: 0.30  # 适当提高未命中概率
+
+  update_strategy: predictive  # 如果支持，启用预测性更新策略
+  obstacle_persistence: 0.0  # 较小值表示障碍物快速衰减，可根据实际需求调整
+  track_unknown_space:  true
+
+#cost_scaling_factor and inflation_radius were now moved to the inflation_layer ns
+inflation_layer:
+  enabled:              true
+  cost_scaling_factor:  3 #3
+  inflation_radius:    0.55 #1.2  # max. distance from an obstacle at which costs are incurred for planning paths.
+  update_frequency: 5.0  # 高频率更新以快速响应变化
+  publish_frequency: 2.0  # 适当频率发布更新
+
+
+static_layer:
+   enabled:              true
+   track_unknown_space:  true

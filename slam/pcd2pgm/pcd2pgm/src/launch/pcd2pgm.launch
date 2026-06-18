@@ -1,0 +1,21 @@
+<launch>
+<!-- Launch file for Livox AVIA LiDAR -->
+
+<node pkg="pcd2pgm" type="pcd2topic" name="pcd2topic" output="screen" >
+
+	<param name="file_directory" type="string" value="/home/nav/maps/" />
+  	<param name="thre_z_min" type="double" value="-0.1"/>
+	<param name="thre_z_max" type="double" value="0.3"/>
+	<param name="flag_pass_through" type="int" value="0" />
+	<param name="map_resolution" type="double" value="0.01" />
+	<param name="map_topic_name" type="string" value="map" />
+	<param name="thre_radius" type="double" value="0.1" />
+	<param name="grid_x" type="double" value="0.1" />
+    <param name="grid_y" type="double" value="0.1" />
+    <param name="grid_z" type="double" value="0.1" />
+	<param name="file_name" type="string" value="GlobalMap" />
+
+</node>
+
+
+</launch>

@@ -1,0 +1,36 @@
+object_detector:
+
+  # 激光雷达话题名
+  topic: /livox_pcl0
+
+  # 危险停止区域
+  XLowerBoundary1: 0.2
+  XUpperBoundary1: 5
+  YLowerBoundary1: -2
+  YUpperBoundary1: 2
+
+  # 不可靠减速区域
+  XLowerBoundary2: 0.2
+  XUpperBoundary2: 5
+  YLowerBoundary2: -2
+  YUpperBoundary2: 2
+
+  # z limit
+  use_z_limit: true
+  ZLowerBoundary: 0.3
+  ZUpperBoundary: 1.
+
+  # GroundDectector
+  use_ground_detector: false
+  NumSegments: 3
+  SensorHeight: 0.3
+  NumIter: 3
+  NumLpr: 250
+  SeedTH: 0.2
+  DistanceTH: 0.075
+
+  # DBSCAN
+  use_dbscan_cluster: true
+  NeighbourhoodTH: 0.1
+  MinPts: 8
+  ThreadCount: 4 

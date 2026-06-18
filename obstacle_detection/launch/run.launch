@@ -1,0 +1,13 @@
+<launch>
+
+    <arg name="project" default="obstacle_detection"/>
+
+    <!-- Parameters -->
+    <rosparam file="$(find obstacle_detection)/config/params.yaml" command="load" />
+
+    <!--- obstacle_detection -->
+    <node pkg="$(arg project)" type="$(arg project)" name="$(arg project)" output="screen" respawn="false"/>
+
+    <node pkg="rviz" type="rviz" name="rviz" args="-d $(find obstacle_detection)/launch/od2.rviz" />
+
+</launch>

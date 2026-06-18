@@ -1,0 +1,9 @@
+<launch>
+
+  <node pkg="livx2pcl" type="livox_repub_ang" name="livox_repub_ang" output="screen" >
+  <remap from="/livox/lidar" to="/livox/lidar" />
+   <param name="min_angle_deg" value="-110" />
+    <param name="max_angle_deg" value="110" />
+  </node>
+
+</launch>
