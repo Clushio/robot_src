@@ -1,0 +1,9 @@
+<library path="lib/libjgl_dwa_local_planner">
+  <class name="jgl_dwa_local_planner/BlindClearLayer"
+         type="jgl_dwa_local_planner::BlindClearLayer"
+         base_class_type="costmap_2d::Layer">
+    <description>
+      Clears local costmap cells outside the configured sensor field of view.
+    </description>
+  </class>
+</library>

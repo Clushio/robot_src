@@ -52,7 +52,8 @@ add_library(jgl_dwa_local_planner
 	src/dwa_planner.cpp 
 	src/dwa_planner_ros.cpp
 	src/speedPlan.cpp
-	src/pursuit.cpp)
+	src/pursuit.cpp
+	src/blind_clear_layer.cpp)
 add_dependencies(jgl_dwa_local_planner ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 target_link_libraries(jgl_dwa_local_planner ${catkin_LIBRARIES})
 
@@ -62,7 +63,7 @@ install(TARGETS jgl_dwa_local_planner
        RUNTIME DESTINATION ${CATKIN_GLOBAL_BIN_DESTINATION}
        )
 
-install(FILES blp_plugin.xml
+install(FILES blp_plugin.xml costmap_plugin.xml
     DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
 )
 

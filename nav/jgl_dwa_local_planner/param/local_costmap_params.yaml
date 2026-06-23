@@ -14,5 +14,6 @@ local_costmap:
    plugins:
    #  - {name: static_layer,    type: "costmap_2d::StaticLayer"}
     - {name: obstacle_layer,  type: "costmap_2d::ObstacleLayer"}
+    - {name: blind_clear_layer, type: "jgl_dwa_local_planner/BlindClearLayer"}
     - {name: inflation_layer, type: "costmap_2d::InflationLayer"}
     #

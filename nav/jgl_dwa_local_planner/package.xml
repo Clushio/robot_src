@@ -44,8 +44,8 @@
 
     <export>
         <nav_core plugin="${prefix}/blp_plugin.xml" />
+        <costmap_2d plugin="${prefix}/costmap_plugin.xml" />
     </export>
 
 </package>
-
 
