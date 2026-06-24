@@ -56,8 +56,9 @@ class TCPServer:
             def call_service():
                 nonlocal result
                 try:
+                    request_msg = f"{{data: {id}, currentID: {cid}, run: 1}}"
                     output = subprocess.check_output(
-                        ["rosservice", "call", "/plan_path_and_go", str(id), str(cid), "1"],
+                        ["rosservice", "call", "/plan_path_and_go", request_msg],
                         stderr=subprocess.STDOUT
                     )
                     result = "success" in output.decode('utf-8').lower()

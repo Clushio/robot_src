@@ -414,12 +414,26 @@ class MyWindow(QWidget):
         run = '1'       # 第二个参数
 
         # 构建完整的 ROS 命令
-        ros_command = f'rosservice call {service_name} {data} {curid} {run}'
-       # 构建终端命令，使用 gnome-terminal 打开新的终端窗口并执行 ROS 命令
-        terminal_command = ['gnome-terminal', '--', 'bash', '-c', ros_command]
-            # 使用 subprocess.Popen 启动新的终端
-        self.runGoProcess = subprocess.Popen(terminal_command, preexec_fn=os.setpgrp)  # 记录进程    
-        self.currentID = id
+        request = f"{{data: {data}, currentID: {curid}, run: {run}}}"
+        command = ['rosservice', 'call', service_name, request]
+
+        def call_service():
+            try:
+                result = subprocess.run(
+                    command,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                print("plan_path_and_go successful:", result.stdout)
+                self.currentID = id
+            except subprocess.CalledProcessError as e:
+                print("plan_path_and_go failed:", e.stderr)
+
+        thread = threading.Thread(target=call_service)
+        thread.daemon = True
+        thread.start()
 
     def gotoworkstation(self, station_id):  # go to workstation W1/W2/W3
         self.gotop(-station_id)
