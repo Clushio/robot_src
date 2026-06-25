@@ -5,6 +5,8 @@ import serial
 import time
 import math
 import threading
+import socket
+import json
 
 import rospy
 from geometry_msgs.msg import PoseStamped
@@ -29,6 +31,10 @@ class MM3VSerialReader:
         self.output_meter = rospy.get_param("~output_meter", False)
         self.output_topic = rospy.get_param("~output_topic", "/tag_position")
         self.publish_no_tag = rospy.get_param("~publish_no_tag", True)
+        self.udp_feedback_enable = rospy.get_param("~udp_feedback_enable", True)
+        self.udp_feedback_host = rospy.get_param("~udp_feedback_host", "192.168.3.17")
+        self.udp_feedback_port = rospy.get_param("~udp_feedback_port", 22222)
+        self.udp_feedback_rate = rospy.get_param("~udp_feedback_rate", 2.0)
         self.x_sign = rospy.get_param("~x_sign", 1.0)
         self.y_sign = rospy.get_param("~y_sign", 1.0)
         self.yaw_sign = rospy.get_param("~yaw_sign", -1.0)
@@ -47,6 +53,8 @@ class MM3VSerialReader:
         self.buffer = bytearray()
         self.latest_position = None
         self.lock = threading.Lock()
+        self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.last_udp_feedback_time = rospy.Time(0)
 
         self.pose_pub = rospy.Publisher(self.output_topic, PoseStamped, queue_size=10)
 
@@ -194,6 +202,30 @@ class MM3VSerialReader:
         msg.pose.position.z = -99.0
         self.pose_pub.publish(msg)
 
+    def send_udp_feedback(self, pos, force=False):
+        if not self.udp_feedback_enable:
+            return
+
+        now = rospy.Time.now()
+        min_interval = 1.0 / self.udp_feedback_rate if self.udp_feedback_rate > 0.0 else 0.0
+        if not force and min_interval > 0.0:
+            if (now - self.last_udp_feedback_time).to_sec() < min_interval:
+                return
+
+        message = {
+            "id": pos["id"],
+            "x": pos["x"],
+            "y": pos["y"],
+            "angle": pos["angle"]
+        }
+
+        try:
+            data = json.dumps(message, ensure_ascii=False).encode("utf-8")
+            self.udp_socket.sendto(data, (self.udp_feedback_host, int(self.udp_feedback_port)))
+            self.last_udp_feedback_time = now
+        except OSError as e:
+            rospy.logwarn_throttle(2.0, f"[MM3V] UDP feedback send failed: {e}")
+
     def read_serial_loop(self):
         while not rospy.is_shutdown():
             try:
@@ -275,6 +307,7 @@ class MM3VSerialReader:
                     f"Zx={pos['zx_cm']:.2f}cm, Zy={pos['zy_cm']:.2f}cm, "
                     f"Xp={pos['xp_pixel']}, Yp={pos['yp_pixel']}"
                 )
+                self.send_udp_feedback(pos)
             elif self.publish_no_tag:
                 self.publish_invalid_pose()
                 rospy.loginfo_throttle(1.0, "[MM3V] no tag.")

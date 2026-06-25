@@ -83,7 +83,7 @@ class TCPServer:
 
     def handle_cmd_2(self, client_socket, request):
         target_x = float(request.get('x', 0.0))
-        target_y = float(request.get('y', request.get('id')))
+        target_y = float(request.get('y', request.get('id', 0.0)))
         target_angle = float(request.get('angle', request.get('angel', 0.0)))
         cid = request.get('cid', 0)
 

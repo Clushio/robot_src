@@ -62,7 +62,7 @@ public:
           current_status(0),
           blocked_timeout_(10.0),
           progress_distance_(0.05),
-          waypoint_reached_distance_(0.05),
+          waypoint_reached_distance_(0.20),
           goal_timeout_(120.0),
           block_bidirectional_(true),
           static_map_loaded_(false),
