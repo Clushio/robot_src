@@ -13,6 +13,16 @@ const char* const COLOR_RESET = "\033[0m";
 double degToRad(double deg) {
     return deg * 3.14159265358979323846 / 180.0;
 }
+
+double normalizeAngleRad(double angle) {
+    while (angle > 3.14159265358979323846) {
+        angle -= 2.0 * 3.14159265358979323846;
+    }
+    while (angle < -3.14159265358979323846) {
+        angle += 2.0 * 3.14159265358979323846;
+    }
+    return angle;
+}
 }
 
 class RobotController {
@@ -23,6 +33,7 @@ public:
           current_y_m_(0.0),
           target_x_m_(0.0),
           target_y_m_(0.0),
+          target_yaw_rad_(0.0),
           current_yaw_rad_(0.0),
           current_valid_(-99.0),
           filter_initialized_(false),
@@ -117,6 +128,7 @@ private:
     double current_y_m_;           // 当前 y 偏差，单位 m
     double target_x_m_;            // 目标 x 偏差，单位 m
     double target_y_m_;            // 目标 y 偏差，单位 m
+    double target_yaw_rad_;        // 目标 yaw，单位 rad
     double current_yaw_rad_;       // 当前 yaw，单位 rad
     ros::Time last_update_time_;   // 上次更新时间
     double data_timeout_;          // 数据超时时间（秒）
@@ -248,7 +260,7 @@ private:
         }
 
         last_yaw_stable_seq_ = tag_update_seq_;
-        if (std::abs(current_yaw_rad_) <= rotation_threshold_) {
+        if (std::abs(yawError()) <= rotation_threshold_) {
             ++yaw_stable_count_;
         } else {
             yaw_stable_count_ = 0;
@@ -258,13 +270,14 @@ private:
     }
 
     bool handleFinalYawState(ros::Rate& rate, x2bot_teleop::SetTagY::Response& res) {
-        const double abs_yaw = std::abs(current_yaw_rad_);
+        const double current_yaw_error = yawError();
+        const double abs_yaw = std::abs(current_yaw_error);
 
         if (abs_yaw <= final_yaw_success_threshold_) {
             publishStop(rate, 2);
-            ROS_INFO("[TAGCTL] Final yaw within %.2f deg. Reached target position! x=%.3f m, y=%.3f m, yaw=%.3f rad",
+            ROS_INFO("[TAGCTL] Final yaw within %.2f deg. Reached target position! x=%.3f m, y=%.3f m, yaw=%.3f rad, target_yaw=%.3f rad",
                      final_yaw_success_threshold_ * 180.0 / 3.14159265358979323846,
-                     current_x_m_, current_y_m_, current_yaw_rad_);
+                     current_x_m_, current_y_m_, current_yaw_rad_, target_yaw_rad_);
             res.success = true;
             return true;
         }
@@ -287,8 +300,8 @@ private:
                 final_yaw_wait_time_);
 
             if (wait_time >= final_yaw_wait_time_) {
-                ROS_INFO("[TAGCTL] Final yaw stayed in wait band. Accepting target. x=%.3f m, y=%.3f m, yaw=%.3f rad",
-                         current_x_m_, current_y_m_, current_yaw_rad_);
+                ROS_INFO("[TAGCTL] Final yaw stayed in wait band. Accepting target. x=%.3f m, y=%.3f m, yaw=%.3f rad, target_yaw=%.3f rad",
+                         current_x_m_, current_y_m_, current_yaw_rad_, target_yaw_rad_);
                 res.success = true;
                 return true;
             }
@@ -329,9 +342,13 @@ private:
         return speedFromError(error, kp_x_, arrival_threshold_x_);
     }
 
+    double yawError() const {
+        return normalizeAngleRad(current_yaw_rad_ - target_yaw_rad_);
+    }
+
     double computeYawCommand() {
         const ros::Time now = ros::Time::now();
-        const double yaw_error = current_yaw_rad_;
+        const double yaw_error = yawError();
         double yaw_rate_error = 0.0;
 
         double dt = 0.0;
@@ -373,8 +390,11 @@ private:
 
     // 服务回调函数
     bool handleSetTargetY(x2bot_teleop::SetTagY::Request& req, x2bot_teleop::SetTagY::Response& res) {
+        target_x_m_ = req.target_x;
         target_y_m_ = req.target_y;
-        ROS_INFO("[TAGCTL] Received target y: %.3f m, target x: %.3f m", target_y_m_, target_x_m_);
+        target_yaw_rad_ = degToRad(req.target_angle);
+        ROS_INFO("[TAGCTL] Received target x: %.3f m, target y: %.3f m, target angle: %.2f deg",
+                 target_x_m_, target_y_m_, req.target_angle);
         state_ = ROTATING;
         yaw_pd_initialized_ = false;
         previous_angular_speed_ = 0.0;
@@ -394,7 +414,7 @@ private:
             }
 
             if (state_ == ROTATING) {
-                // 初始旋转阶段：调整方向直到当前角度接近 0
+                // 初始旋转阶段：调整方向直到当前角度接近目标角度
                 if (yawReachedForStableFrames()) {
                     publishStop(rate, 2);
                     ROS_INFO("[TAGCTL] Initial rotation completed after %d stable tag frames. Switching to moving state.",
@@ -411,9 +431,9 @@ private:
                     cmd_vel_msg.linear.y = 0.0;
                     cmd_vel_msg.angular.z = angular_speed;
                     cmd_vel_publisher_.publish(cmd_vel_msg);
-                    ROS_INFO_THROTTLE(1.0, "%s[TAGCTL] Rotating: yaw=%.3f rad, angular.z=%.3f, stable=%d/%d%s",
+                    ROS_INFO_THROTTLE(1.0, "%s[TAGCTL] Rotating: yaw=%.3f rad, target_yaw=%.3f rad, yaw_err=%.3f rad, angular.z=%.3f, stable=%d/%d%s",
                                       COLOR_YELLOW,
-                                      current_yaw_rad_, cmd_vel_msg.angular.z,
+                                      current_yaw_rad_, target_yaw_rad_, yawError(), cmd_vel_msg.angular.z,
                                       yaw_stable_count_, yaw_stable_required_,
                                       COLOR_RESET);
                 }
@@ -451,10 +471,10 @@ private:
 
                 ROS_INFO_THROTTLE(
                     1.0,
-                    "%s[TAGCTL] Published cmd_vel: linear.x=%.3f, linear.y=%.3f, angular.z=%.3f | err_x=%.3f m, err_y=%.3f m, yaw=%.3f rad%s",
+                    "%s[TAGCTL] Published cmd_vel: linear.x=%.3f, linear.y=%.3f, angular.z=%.3f | err_x=%.3f m, err_y=%.3f m, yaw_err=%.3f rad%s",
                     COLOR_YELLOW,
                     cmd_vel_msg.linear.x, cmd_vel_msg.linear.y, cmd_vel_msg.angular.z,
-                    error_x_m, error_y_m, current_yaw_rad_,
+                    error_x_m, error_y_m, yawError(),
                     COLOR_RESET);
             }
 

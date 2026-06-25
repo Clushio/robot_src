@@ -356,7 +356,7 @@ class MyWindow(QWidget):
         service_name = '/set_target_y'
         yy = f"{float(posY):.3f}"
          # 构建完整的 ROS 命令
-        ros_command = f'rosservice call {service_name} "{yy}"'
+        ros_command = f'rosservice call {service_name} "{{target_x: 0.0, target_y: {yy}, target_angle: 0.0}}"'
        # 构建终端命令，使用 gnome-terminal 打开新的终端窗口并执行 ROS 命令
         terminal_command = ['gnome-terminal', '--', 'bash', '-c', ros_command]
             # 使用 subprocess.Popen 启动新的终端

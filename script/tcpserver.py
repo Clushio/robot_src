@@ -82,8 +82,10 @@ class TCPServer:
         threading.Thread(target=execute).start()
 
     def handle_cmd_2(self, client_socket, request):
-        id = request['id']
-        cid = request['cid']
+        target_x = float(request.get('x', 0.0))
+        target_y = float(request.get('y', request.get('id')))
+        target_angle = float(request.get('angle', request.get('angel', 0.0)))
+        cid = request.get('cid', 0)
 
         # Start a thread to call rosservice and monitor execution
         def execute():
@@ -94,8 +96,12 @@ class TCPServer:
             def call_service():
                 nonlocal result
                 try:
+                    service_request = (
+                        f"{{target_x: {target_x}, target_y: {target_y}, "
+                        f"target_angle: {target_angle}}}"
+                    )
                     output = subprocess.check_output(
-                        ["rosservice", "call", "/set_target_y", str(id)],
+                        ["rosservice", "call", "/set_target_y", service_request],
                         stderr=subprocess.STDOUT
                     )
                     result = "success" in output.decode('utf-8').lower()
@@ -108,12 +114,26 @@ class TCPServer:
             # Send execution status every 0.5 seconds
             while service_thread.is_alive():
                 elapsed_time = int(time.time() - start_time)
-                response = {"cmd": 2, "id": id, "cid": cid, "execute": elapsed_time}
+                response = {
+                    "cmd": 2,
+                    "x": target_x,
+                    "y": target_y,
+                    "angle": target_angle,
+                    "cid": cid,
+                    "execute": elapsed_time
+                }
                 client_socket.send(json.dumps(response).encode('utf-8'))
                 time.sleep(0.5)
 
             # Send final result
-            response = {"cmd": 2, "id": id, "cid": cid, "result": result}
+            response = {
+                "cmd": 2,
+                "x": target_x,
+                "y": target_y,
+                "angle": target_angle,
+                "cid": cid,
+                "result": result
+            }
             client_socket.send(json.dumps(response).encode('utf-8'))
 
         threading.Thread(target=execute).start()
