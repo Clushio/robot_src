@@ -282,7 +282,8 @@ bool DWAPlannerROS::mygoalReachPanduan()
    int targetType = linePath.back().pose.position.z;
    std::cout<<"current target type: "<<targetType<<std::endl;
 
-   if((Qtar.pose.position.x<xdis)&&((abs(Qtar.pose.position.y)<xdis))&&(fabs(goal_yaw_err) < angle_err_H))
+   const double xy_error = hypot(Qtar.pose.position.x, Qtar.pose.position.y);
+   if((xy_error < xdis)&&(fabs(goal_yaw_err) < angle_err_H))
    {
       return true;
    }

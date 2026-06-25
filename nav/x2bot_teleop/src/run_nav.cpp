@@ -1286,6 +1286,18 @@ private:
                 const actionlib::SimpleClientGoalState state = global_ac->getState();
                 if (state == actionlib::SimpleClientGoalState::SUCCEEDED)
                 {
+                    geometry_msgs::PoseStamped current_pose;
+                    if (!final_goal && getCurrentRobotPose(current_pose))
+                    {
+                        const double target_distance = distanceToNode(current_pose, target_index);
+                        if (target_distance > waypoint_reached_distance_)
+                        {
+                            ROS_WARN("move_base reported P%d reached, but robot is %.2f m away. Retry same topology goal.",
+                                     target_index, target_distance);
+                            global_ac->sendGoal(mb_goal);
+                            continue;
+                        }
+                    }
                     ROS_INFO_STREAM("Reached topology goal P" << target_index);
                     current_pose_index = target_index;
                     active_next_index_ = -1;
