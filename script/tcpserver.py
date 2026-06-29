@@ -97,7 +97,7 @@ class TCPServer:
                 nonlocal result
                 try:
                     service_request = (
-                        f"{{target_x: {target_x}, target_y: {target_y}, "
+                        f"{{target_x: {target_x/100}, target_y: {target_y/100}, "
                         f"target_angle: {target_angle}}}"
                     )
                     output = subprocess.check_output(

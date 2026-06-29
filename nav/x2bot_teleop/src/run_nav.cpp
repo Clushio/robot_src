@@ -62,6 +62,7 @@ public:
           current_status(0),
           blocked_timeout_(10.0),
           progress_distance_(0.05),
+          progress_yaw_(6.0 * M_PI / 180.0),
           waypoint_reached_distance_(0.20),
           goal_timeout_(120.0),
           block_bidirectional_(true),
@@ -82,6 +83,7 @@ public:
         ROS_INFO_STREAM("Topology navigation maps_dir: " << maps_dir_);
         private_nh.param("blocked_timeout", blocked_timeout_, blocked_timeout_);
         private_nh.param("progress_distance", progress_distance_, progress_distance_);
+        private_nh.param("progress_yaw", progress_yaw_, progress_yaw_);
         private_nh.param("waypoint_reached_distance", waypoint_reached_distance_,
                          waypoint_reached_distance_);
         private_nh.param("goal_timeout", goal_timeout_, goal_timeout_);
@@ -373,6 +375,7 @@ private:
 
     double blocked_timeout_;
     double progress_distance_;
+    double progress_yaw_;
     double waypoint_reached_distance_;
     double goal_timeout_;
     bool block_bidirectional_;
@@ -748,6 +751,21 @@ private:
     {
         return std::hypot(a.pose.position.x - b.pose.position.x,
                           a.pose.position.y - b.pose.position.y);
+    }
+
+    double poseYawDelta(const geometry_msgs::PoseStamped &a,
+                        const geometry_msgs::PoseStamped &b) const
+    {
+        double delta = tf::getYaw(a.pose.orientation) - tf::getYaw(b.pose.orientation);
+        while (delta > M_PI)
+        {
+            delta -= 2.0 * M_PI;
+        }
+        while (delta < -M_PI)
+        {
+            delta += 2.0 * M_PI;
+        }
+        return std::fabs(delta);
     }
 
     double distanceToNode(const geometry_msgs::PoseStamped &pose, int index) const
@@ -1339,7 +1357,8 @@ private:
                 }
 
                 if (!have_progress_pose ||
-                    poseDistance(current_pose, last_progress_pose) >= progress_distance_)
+                    poseDistance(current_pose, last_progress_pose) >= progress_distance_ ||
+                    poseYawDelta(current_pose, last_progress_pose) >= progress_yaw_)
                 {
                     last_progress_pose = current_pose;
                     have_progress_pose = true;
