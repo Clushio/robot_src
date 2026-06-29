@@ -44,10 +44,6 @@ public:
           yaw_stable_required_(5),
           tag_update_seq_(0),
           last_yaw_stable_seq_(0),
-          final_yaw_success_threshold_(degToRad(2.0)),
-          final_yaw_rotate_threshold_(degToRad(3.0)),
-          final_yaw_wait_time_(1.0),
-          final_yaw_waiting_(false),
           last_update_time_(ros::Time(0)) {
         // 初始化参数
         ros::NodeHandle private_nh("~");
@@ -67,13 +63,6 @@ public:
         private_nh.param("max_angular_accel", max_angular_accel_, 0.15); // 最大角加速度
         private_nh.param("filter_alpha", filter_alpha_, 0.5); // 位置/角度低通滤波系数
         private_nh.param("yaw_stable_count", yaw_stable_required_, 5); // 连续多少帧 yaw 达标才切换/成功
-        double final_yaw_success_deg = 2.0;
-        double final_yaw_rotate_deg = 3.0;
-        private_nh.param("final_yaw_success_deg", final_yaw_success_deg, 2.0);
-        private_nh.param("final_yaw_rotate_deg", final_yaw_rotate_deg, 3.0);
-        private_nh.param("final_yaw_wait_time", final_yaw_wait_time_, 1.0);
-        final_yaw_success_threshold_ = degToRad(final_yaw_success_deg);
-        final_yaw_rotate_threshold_ = degToRad(final_yaw_rotate_deg);
 
         sanitizeParameters();
 
@@ -89,12 +78,10 @@ public:
         ROS_INFO(
             "[TAGCTL] Robot controller node initialized. kp=%.3f kp_x=%.3f min_speed=%.3f max_speed=%.3f "
             "arrival_y=%.3f arrival_x=%.3f yaw_kp=%.3f yaw_kd=%.3f max_ang=%.3f max_ang_acc=%.3f "
-            "yaw_stable_count=%d final_yaw_success=%.2fdeg final_yaw_rotate=%.2fdeg final_wait=%.2fs",
+            "yaw_stable_count=%d",
             kp_, kp_x_, min_speed_, max_speed_, arrival_threshold_y_, arrival_threshold_x_,
-            yaw_kp_, yaw_kd_, max_angular_speed_, max_angular_accel_, yaw_stable_required_,
-            final_yaw_success_threshold_ * 180.0 / 3.14159265358979323846,
-            final_yaw_rotate_threshold_ * 180.0 / 3.14159265358979323846,
-            final_yaw_wait_time_);
+            yaw_kp_, yaw_kd_, max_angular_speed_, max_angular_accel_,
+            yaw_stable_required_);
     }
 
     void run() {
@@ -142,13 +129,8 @@ private:
     int yaw_stable_required_;
     unsigned int tag_update_seq_;
     unsigned int last_yaw_stable_seq_;
-    double final_yaw_success_threshold_;
-    double final_yaw_rotate_threshold_;
-    double final_yaw_wait_time_;
-    bool final_yaw_waiting_;
-    ros::Time final_yaw_wait_start_;
 
-    enum State { ROTATING, MOVING, FINAL_ROTATING };
+    enum State { ROTATING, MOVING };
     State state_ = ROTATING;       // 初始状态为旋转
 
     // 订阅回调函数
@@ -235,18 +217,6 @@ private:
             ROS_WARN("[TAGCTL] Invalid yaw_stable_count %d, reset to 5", yaw_stable_required_);
             yaw_stable_required_ = 5;
         }
-        if (final_yaw_success_threshold_ <= 0.0) {
-            ROS_WARN("[TAGCTL] Invalid final_yaw_success threshold, reset to 2 deg");
-            final_yaw_success_threshold_ = degToRad(2.0);
-        }
-        if (final_yaw_rotate_threshold_ <= final_yaw_success_threshold_) {
-            ROS_WARN("[TAGCTL] Invalid final_yaw_rotate threshold, reset to 3 deg");
-            final_yaw_rotate_threshold_ = degToRad(3.0);
-        }
-        if (final_yaw_wait_time_ < 0.0) {
-            ROS_WARN("[TAGCTL] Invalid final_yaw_wait_time %.3f, reset to 1.0", final_yaw_wait_time_);
-            final_yaw_wait_time_ = 1.0;
-        }
     }
 
     void resetYawStableCounter() {
@@ -267,62 +237,6 @@ private:
         }
 
         return yaw_stable_count_ >= yaw_stable_required_;
-    }
-
-    bool handleFinalYawState(ros::Rate& rate, x2bot_teleop::SetTagY::Response& res) {
-        const double current_yaw_error = yawError();
-        const double abs_yaw = std::abs(current_yaw_error);
-
-        if (abs_yaw <= final_yaw_success_threshold_) {
-            publishStop(rate, 2);
-            ROS_INFO("[TAGCTL] Final yaw within %.2f deg. Reached target position! x=%.3f m, y=%.3f m, yaw=%.3f rad, target_yaw=%.3f rad",
-                     final_yaw_success_threshold_ * 180.0 / 3.14159265358979323846,
-                     current_x_m_, current_y_m_, current_yaw_rad_, target_yaw_rad_);
-            res.success = true;
-            return true;
-        }
-
-        if (abs_yaw <= final_yaw_rotate_threshold_) {
-            publishStop(rate, 1);
-            if (!final_yaw_waiting_) {
-                final_yaw_waiting_ = true;
-                final_yaw_wait_start_ = ros::Time::now();
-            }
-
-            const double wait_time = (ros::Time::now() - final_yaw_wait_start_).toSec();
-            ROS_INFO_THROTTLE(
-                1.0,
-                "[TAGCTL] Final yaw %.2f deg is in wait band %.2f~%.2f deg. Stop and observe %.2f/%.2fs.",
-                abs_yaw * 180.0 / 3.14159265358979323846,
-                final_yaw_success_threshold_ * 180.0 / 3.14159265358979323846,
-                final_yaw_rotate_threshold_ * 180.0 / 3.14159265358979323846,
-                wait_time,
-                final_yaw_wait_time_);
-
-            if (wait_time >= final_yaw_wait_time_) {
-                ROS_INFO("[TAGCTL] Final yaw stayed in wait band. Accepting target. x=%.3f m, y=%.3f m, yaw=%.3f rad, target_yaw=%.3f rad",
-                         current_x_m_, current_y_m_, current_yaw_rad_, target_yaw_rad_);
-                res.success = true;
-                return true;
-            }
-
-            return false;
-        }
-
-        final_yaw_waiting_ = false;
-        double angular_speed = computeYawCommand();
-        geometry_msgs::Twist cmd_vel_msg;
-        cmd_vel_msg.angular.z = angular_speed;
-        cmd_vel_publisher_.publish(cmd_vel_msg);
-        ROS_INFO_THROTTLE(
-            1.0,
-            "%s[TAGCTL] Final yaw %.2f deg > %.2f deg. Rotating: angular.z=%.3f%s",
-            COLOR_YELLOW,
-            abs_yaw * 180.0 / 3.14159265358979323846,
-            final_yaw_rotate_threshold_ * 180.0 / 3.14159265358979323846,
-            cmd_vel_msg.angular.z,
-            COLOR_RESET);
-        return false;
     }
 
     double speedFromError(double error, double kp, double arrival_threshold) {
@@ -398,7 +312,6 @@ private:
         state_ = ROTATING;
         yaw_pd_initialized_ = false;
         previous_angular_speed_ = 0.0;
-        final_yaw_waiting_ = false;
         resetYawStableCounter();
 
         ros::Rate rate(30);  // 30 Hz
@@ -437,10 +350,6 @@ private:
                                       yaw_stable_count_, yaw_stable_required_,
                                       COLOR_RESET);
                 }
-            } else if (state_ == FINAL_ROTATING) {
-                if (handleFinalYawState(rate, res)) {
-                    return true;
-                }
             } else if (state_ == MOVING) {
                 const double error_y_m = target_y_m_ - current_y_m_;
                 const double error_x_m = current_x_m_ - target_x_m_;
@@ -449,14 +358,11 @@ private:
                     std::abs(error_x_m) <= arrival_threshold_x_;
 
                 if (xy_reached) {
-                    ROS_INFO("[TAGCTL] XY reached. Switching to final rotation.");
                     publishStop(rate, 2);
-                    state_ = FINAL_ROTATING;
-                    yaw_pd_initialized_ = false;
-                    previous_angular_speed_ = 0.0;
-                    final_yaw_waiting_ = false;
-                    resetYawStableCounter();
-                    continue;
+                    ROS_INFO("[TAGCTL] XY reached. Reached target position! x=%.3f m, y=%.3f m, yaw=%.3f rad, target_yaw=%.3f rad",
+                             current_x_m_, current_y_m_, current_yaw_rad_, target_yaw_rad_);
+                    res.success = true;
+                    return true;
                 }
 
                 const double linear_x_speed = speedFromError(error_y_m, kp_, arrival_threshold_y_);
