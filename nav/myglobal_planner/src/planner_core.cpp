@@ -192,6 +192,7 @@ namespace myglobal_planner
       private_nh.param("distance_behind_obstacle", distance_behind_obstacle, 1.0);
       private_nh.param("wait_time",wait_time,3.0);
       first_line_plan = true;
+      iniStart.header.frame_id = "";
       neardis=1.0;
       res_index=10;
 
@@ -698,10 +699,13 @@ namespace myglobal_planner
   {
     //return makePlan(start, goal, default_tolerance_, plan);
     plan.clear();
-    if (!comparePose(iniGoal, goal))//当传进来的goal与上次不一致时，重新进行直线规划
+    const bool start_changed =
+        iniStart.header.frame_id.empty() || comDistance(iniStart, start) > 0.02;
+    if (start_changed || !comparePose(iniGoal, goal))//当传进来的goal或start与上次不一致时，重新进行直线规划
     {
-      ROS_INFO("new goal" );
+      ROS_INFO("new goal or start" );
       iniGoal = goal;
+      iniStart = start;
       first_line_plan = true;
     }
 
@@ -710,6 +714,7 @@ namespace myglobal_planner
       ROS_INFO("Straight-line planning for the first time ");
       bool gotLine = makePlanLine(start, goal, default_tolerance_, linePath);
       iniGoal = goal;
+      iniStart = start;
       status = 0;
 
       if (!gotLine)

@@ -276,6 +276,7 @@ class MyGlobalPlanner : public nav_core::BaseGlobalPlanner {
         std::vector<geometry_msgs::PoseStamped> linePath;//储存直线
         tf::TransformListener lis;
         geometry_msgs::PoseStamped iniGoal;               //上一次传进来的goal，用于判断goal是否发生了改变
+        geometry_msgs::PoseStamped iniStart;              //上一次传进来的start，用于判断当前位置是否发生了改变
         double neardis;                                   //绕行时机器人当前位置与绕行终点距离
         int status;                                       //规划状态，0直线生成，1出现障碍物等待，2绕行，3直线行驶时终点出现障碍物，4绕行时终点出现障碍物                                    
         bool endOcc;                                      //终点是否被占据
