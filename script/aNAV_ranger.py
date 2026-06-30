@@ -90,7 +90,9 @@ class MyWindow(QWidget):
         self.set_nav_shortcuts_visible(False)
 
         self.currentID = 0
+        self.current_target_x = 0.0
         self.current_target_y = 0.0
+        self.current_target_angle = 0.0
 
         #self.init_reader()
 
@@ -245,32 +247,52 @@ class MyWindow(QWidget):
 
         #lambda: self.gotop5("Hello", "World"
 
+        self.x_label = QLabel('X=', self)
+        self.x_label.move(18, 590)
+        self.x_label.resize(25,30)
+
+        self.x_input = QLineEdit('0.00', self)
+        self.x_input.move(43, 585)
+        self.x_input.resize(75,40)
+        self.x_input.setValidator(QDoubleValidator(-10.0, 10.0, 3, self))
+        self.x_input.returnPressed.connect(self.send_target_input)
+
         self.y_label = QLabel('Y=', self)
-        self.y_label.move(18, 590)
+        self.y_label.move(128, 590)
         self.y_label.resize(25,30)
 
         self.y_input = QLineEdit('0.00', self)
-        self.y_input.move(43, 585)
-        self.y_input.resize(90,40)
+        self.y_input.move(153, 585)
+        self.y_input.resize(75,40)
         self.y_input.setValidator(QDoubleValidator(-10.0, 10.0, 3, self))
-        self.y_input.returnPressed.connect(self.send_y_input)
+        self.y_input.returnPressed.connect(self.send_target_input)
 
-        self.y_send_button = QPushButton('发送Y', self)
-        self.y_send_button.move(143, 585)
-        self.y_send_button.clicked.connect(self.send_y_input)
-        self.y_send_button.resize(75,40)
+        self.angle_label = QLabel('Angle=', self)
+        self.angle_label.move(238, 590)
+        self.angle_label.resize(50,30)
 
-        self.y_value_label = QLabel('当前Y=0.00 m', self)
-        self.y_value_label.move(228, 590)
-        self.y_value_label.resize(160,30)
+        self.angle_input = QLineEdit('0.00', self)
+        self.angle_input.move(288, 585)
+        self.angle_input.resize(75,40)
+        self.angle_input.setValidator(QDoubleValidator(-360.0, 360.0, 3, self))
+        self.angle_input.returnPressed.connect(self.send_target_input)
+
+        self.target_send_button = QPushButton('发送', self)
+        self.target_send_button.move(373, 585)
+        self.target_send_button.clicked.connect(self.send_target_input)
+        self.target_send_button.resize(75,40)
+
+        self.target_value_label = QLabel('目标 X=0.00 Y=0.00 Angle=0.00', self)
+        self.target_value_label.move(18, 630)
+        self.target_value_label.resize(430,25)
 
         quick_y = [(-0.1, 'Y=-0.10'), (0.0, 'Y=0.00'), (0.07, 'Y=0.07'), (0.1, 'Y=0.10'), (0.2, 'Y=0.20')]
         self.y_quick_buttons = []
         for index, (value, text) in enumerate(quick_y):
             button = QPushButton(text, self)
-            button.move(18+index*gapx, 645)
+            button.move(18+index*gapx, 660)
             button.clicked.connect(lambda checked=False, y=value: self.set_y_value(y, True))
-            button.setToolTip(f'设置输入框并调用 /set_target_y，目标 Y={value:.2f} m')
+            button.setToolTip(f'设置 Y 输入框并调用 /set_target_y，目标 Y={value:.2f} m')
             button.resize(75,70)
             self.y_quick_buttons.append(button)
 
@@ -333,30 +355,54 @@ class MyWindow(QWidget):
         ):
             button.setVisible(visible)
 
-    def set_y_value(self, posY, send=False):
-        self.current_target_y = float(posY)
+    def read_target_input(self, line_edit):
+        text = line_edit.text().strip()
+        if not text:
+            return 0.0
+        return float(text)
+
+    def set_target_values(self, target_x, target_y, target_angle, send=False):
+        self.current_target_x = float(target_x)
+        self.current_target_y = float(target_y)
+        self.current_target_angle = float(target_angle)
+        self.x_input.setText(f"{self.current_target_x:.2f}")
         self.y_input.setText(f"{self.current_target_y:.2f}")
-        self.y_value_label.setText(f"当前Y={self.current_target_y:.2f} m")
+        self.angle_input.setText(f"{self.current_target_angle:.2f}")
+        self.target_value_label.setText(
+            f"目标 X={self.current_target_x:.2f} Y={self.current_target_y:.2f} Angle={self.current_target_angle:.2f}"
+        )
         if send:
-            self.slowMove(self.current_target_y)
+            self.slowMove(self.current_target_x, self.current_target_y, self.current_target_angle)
+
+    def set_y_value(self, posY, send=False):
+        try:
+            target_x = self.read_target_input(self.x_input)
+            target_angle = self.read_target_input(self.angle_input)
+        except ValueError:
+            self.target_value_label.setText("目标值输入错误")
+            return
+        self.set_target_values(target_x, posY, target_angle, send)
+
+    def send_target_input(self):
+        try:
+            target_x = self.read_target_input(self.x_input)
+            target_y = self.read_target_input(self.y_input)
+            target_angle = self.read_target_input(self.angle_input)
+        except ValueError:
+            self.target_value_label.setText("目标值输入错误")
+            return
+        self.set_target_values(target_x, target_y, target_angle, True)
 
     def send_y_input(self):
-        text = self.y_input.text().strip()
-        if not text:
-            self.y_value_label.setText("当前Y=未输入")
-            return
-        try:
-            target_y = float(text)
-        except ValueError:
-            self.y_value_label.setText("当前Y=输入错误")
-            return
-        self.set_y_value(target_y, True)
+        self.send_target_input()
     
-    def slowMove(self,posY): #go to work  pose
+    def slowMove(self, posX, posY, posAngle): #go to work  pose
         service_name = '/set_target_y'
+        xx = f"{float(posX):.3f}"
         yy = f"{float(posY):.3f}"
+        aa = f"{float(posAngle):.3f}"
          # 构建完整的 ROS 命令
-        ros_command = f'rosservice call {service_name} "{{target_x: 0.0, target_y: {yy}, target_angle: 0.0}}"'
+        ros_command = f'rosservice call {service_name} "{{target_x: {xx}, target_y: {yy}, target_angle: {aa}}}"'
        # 构建终端命令，使用 gnome-terminal 打开新的终端窗口并执行 ROS 命令
         terminal_command = ['gnome-terminal', '--', 'bash', '-c', ros_command]
             # 使用 subprocess.Popen 启动新的终端

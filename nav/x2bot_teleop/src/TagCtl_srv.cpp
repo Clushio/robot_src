@@ -63,6 +63,9 @@ public:
         private_nh.param("max_angular_accel", max_angular_accel_, 0.15); // 最大角加速度
         private_nh.param("filter_alpha", filter_alpha_, 0.5); // 位置/角度低通滤波系数
         private_nh.param("yaw_stable_count", yaw_stable_required_, 5); // 连续多少帧 yaw 达标才切换/成功
+        private_nh.param("final_yaw_kp", final_yaw_kp_, 0.2); // Y+Yaw 阶段角度 P，独立于初始旋转
+        private_nh.param("final_yaw_cmd_deadband", final_yaw_cmd_deadband_, rotation_threshold_); // 最后 Y+Yaw 阶段的角速度死区
+        private_nh.param("enable_final_y_yaw_after_x_check", enable_final_y_yaw_after_x_check_, false); // 最终 X 后是否再补一轮 Y+Yaw
 
         sanitizeParameters();
 
@@ -78,10 +81,10 @@ public:
         ROS_INFO(
             "[TAGCTL] Robot controller node initialized. kp=%.3f kp_x=%.3f min_speed=%.3f max_speed=%.3f "
             "arrival_y=%.3f arrival_x=%.3f yaw_kp=%.3f yaw_kd=%.3f max_ang=%.3f max_ang_acc=%.3f "
-            "yaw_stable_count=%d",
+            "yaw_stable_count=%d final_yaw_kp=%.3f final_yaw_cmd_deadband=%.3f enable_final_y_yaw_after_x_check=%d",
             kp_, kp_x_, min_speed_, max_speed_, arrival_threshold_y_, arrival_threshold_x_,
             yaw_kp_, yaw_kd_, max_angular_speed_, max_angular_accel_,
-            yaw_stable_required_);
+            yaw_stable_required_, final_yaw_kp_, final_yaw_cmd_deadband_, enable_final_y_yaw_after_x_check_);
     }
 
     void run() {
@@ -110,6 +113,9 @@ private:
     double max_angular_speed_;
     double max_angular_accel_;
     double filter_alpha_;
+    double final_yaw_kp_;
+    double final_yaw_cmd_deadband_;
+    bool enable_final_y_yaw_after_x_check_;
 
     double current_x_m_;           // 当前 x 偏差，单位 m
     double current_y_m_;           // 当前 y 偏差，单位 m
@@ -154,7 +160,8 @@ private:
             } else {
                 current_x_m_ = filter_alpha_ * measured_x_m + (1.0 - filter_alpha_) * current_x_m_;
                 current_y_m_ = filter_alpha_ * measured_y_m + (1.0 - filter_alpha_) * current_y_m_;
-                current_yaw_rad_ = filter_alpha_ * yaw + (1.0 - filter_alpha_) * current_yaw_rad_;
+                const double yaw_diff = normalizeAngleRad(yaw - current_yaw_rad_);
+                current_yaw_rad_ = normalizeAngleRad(current_yaw_rad_ + filter_alpha_ * yaw_diff);
             }
             ++tag_update_seq_;
         }
@@ -217,6 +224,15 @@ private:
             ROS_WARN("[TAGCTL] Invalid yaw_stable_count %d, reset to 5", yaw_stable_required_);
             yaw_stable_required_ = 5;
         }
+        if (final_yaw_kp_ <= 0.0) {
+            ROS_WARN("[TAGCTL] Invalid final_yaw_kp %.3f, reset to 0.1", final_yaw_kp_);
+            final_yaw_kp_ = 0.1;
+        }
+        if (final_yaw_cmd_deadband_ <= 0.0) {
+            ROS_WARN("[TAGCTL] Invalid final_yaw_cmd_deadband %.3f, reset to rotation_threshold %.3f",
+                     final_yaw_cmd_deadband_, rotation_threshold_);
+            final_yaw_cmd_deadband_ = rotation_threshold_;
+        }
     }
 
     void resetYawStableCounter() {
@@ -260,7 +276,7 @@ private:
         return normalizeAngleRad(current_yaw_rad_ - target_yaw_rad_);
     }
 
-    double computeYawCommand() {
+    double computeYawCommandWithKp(double yaw_kp) {
         const ros::Time now = ros::Time::now();
         const double yaw_error = yawError();
         double yaw_rate_error = 0.0;
@@ -277,7 +293,7 @@ private:
         previous_yaw_time_ = now;
 
         const double raw_angular_speed =
-            clamp(yaw_kp_ * yaw_error + yaw_kd_ * yaw_rate_error,
+            clamp(yaw_kp * yaw_error + yaw_kd_ * yaw_rate_error,
                   -max_angular_speed_, max_angular_speed_);
 
         double angular_speed = raw_angular_speed;
@@ -292,6 +308,10 @@ private:
         previous_angular_speed_ = angular_speed;
         yaw_pd_initialized_ = true;
         return angular_speed;
+    }
+
+    double computeYawCommand() {
+        return computeYawCommandWithKp(yaw_kp_);
     }
 
     void publishStop(ros::Rate& rate, int count = 3) {
@@ -386,25 +406,29 @@ private:
                 const bool y_reached = std::abs(error_y_m) <= arrival_threshold_y_;
                 const bool yaw_reached = yawReachedForStableFrames();
 
-                if (y_reached && yaw_reached) {
+                if (y_reached) {
                     if (x_reached) {
                         publishStop(rate, 2);
-                        ROS_INFO("[TAGCTL] X, Y and yaw reached. Reached target position! x=%.3f m, y=%.3f m, yaw=%.3f rad, target_yaw=%.3f rad",
-                                 current_x_m_, current_y_m_, current_yaw_rad_, target_yaw_rad_);
+                        ROS_INFO("[TAGCTL] X and Y reached. Stop Y+Yaw without standalone yaw rotation. x=%.3f m, y=%.3f m, yaw_err=%.3f rad",
+                                 current_x_m_, current_y_m_, yawError());
                         res.success = true;
                         return true;
                     }
 
                     publishStop(rate, 2);
-                    ROS_INFO("[TAGCTL] Y and yaw reached, but X still needs correction. Switching to final X state. x=%.3f m, target_x=%.3f m, err_x=%.3f m",
-                             current_x_m_, target_x_m_, error_x_m);
+                    ROS_INFO("[TAGCTL] Y reached. Switching to final X state without standalone yaw rotation. x=%.3f m, target_x=%.3f m, err_x=%.3f m, yaw_err=%.3f rad",
+                             current_x_m_, target_x_m_, error_x_m, yawError());
                     state_ = FINAL_CORRECTING_X;
                     yaw_pd_initialized_ = false;
                     previous_angular_speed_ = 0.0;
                     resetYawStableCounter();
                 } else {
                     const double linear_x_speed = speedFromError(error_y_m, kp_, arrival_threshold_y_);
-                    const double angular_speed = yaw_reached ? 0.0 : computeYawCommand();
+                    const bool yaw_cmd_enabled =
+                        !yaw_reached &&
+                        linear_x_speed != 0.0 &&
+                        std::abs(yawError()) > final_yaw_cmd_deadband_;
+                    const double angular_speed = yaw_cmd_enabled ? computeYawCommandWithKp(final_yaw_kp_) : 0.0;
 
                     // 创建并发布 /cmd_vel 消息
                     geometry_msgs::Twist cmd_vel_msg;
@@ -430,6 +454,14 @@ private:
                 const bool yaw_reached = yawReachedForStableFrames();
 
                 if (x_reached) {
+                    if (!enable_final_y_yaw_after_x_check_) {
+                        publishStop(rate, 2);
+                        ROS_INFO("[TAGCTL] Final X reached. Final Y+Yaw recheck disabled. Reached target position! x=%.3f m, y=%.3f m, yaw=%.3f rad, target_yaw=%.3f rad",
+                                 current_x_m_, current_y_m_, current_yaw_rad_, target_yaw_rad_);
+                        res.success = true;
+                        return true;
+                    }
+
                     if (y_reached && yaw_reached) {
                         publishStop(rate, 2);
                         ROS_INFO("[TAGCTL] Final X, Y and yaw reached. Reached target position! x=%.3f m, y=%.3f m, yaw=%.3f rad, target_yaw=%.3f rad",
