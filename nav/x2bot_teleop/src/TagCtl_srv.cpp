@@ -130,7 +130,7 @@ private:
     unsigned int tag_update_seq_;
     unsigned int last_yaw_stable_seq_;
 
-    enum State { ROTATING, MOVING };
+    enum State { ROTATING, CORRECTING_X, MOVING_Y_YAW, FINAL_CORRECTING_X };
     State state_ = ROTATING;       // 初始状态为旋转
 
     // 订阅回调函数
@@ -330,9 +330,9 @@ private:
                 // 初始旋转阶段：调整方向直到当前角度接近目标角度
                 if (yawReachedForStableFrames()) {
                     publishStop(rate, 2);
-                    ROS_INFO("[TAGCTL] Initial rotation completed after %d stable tag frames. Switching to moving state.",
+                    ROS_INFO("[TAGCTL] Initial rotation completed after %d stable tag frames. Switching to x correction state.",
                              yaw_stable_count_);
-                    state_ = MOVING;  // 切换到移动状态
+                    state_ = CORRECTING_X;  // 切换到 x 修正状态
                     yaw_pd_initialized_ = false;
                     previous_angular_speed_ = 0.0;
                     resetYawStableCounter();
@@ -350,38 +350,126 @@ private:
                                       yaw_stable_count_, yaw_stable_required_,
                                       COLOR_RESET);
                 }
-            } else if (state_ == MOVING) {
+            } else if (state_ == CORRECTING_X) {
+                const double error_x_m = current_x_m_ - target_x_m_;
+                const bool x_reached = std::abs(error_x_m) <= arrival_threshold_x_;
+
+                if (x_reached) {
+                    publishStop(rate, 2);
+                    ROS_INFO("[TAGCTL] X reached. Switching to Y+Yaw state. x=%.3f m, target_x=%.3f m, yaw_err=%.3f rad",
+                             current_x_m_, target_x_m_, yawError());
+                    state_ = MOVING_Y_YAW;
+                    yaw_pd_initialized_ = false;
+                    previous_angular_speed_ = 0.0;
+                    resetYawStableCounter();
+                } else {
+                    const double linear_y_speed = lateralSpeedFromError(error_x_m);
+
+                    geometry_msgs::Twist cmd_vel_msg;
+                    cmd_vel_msg.linear.x = 0.0;
+                    cmd_vel_msg.linear.y = linear_y_speed;
+                    cmd_vel_msg.angular.z = 0.0;
+                    cmd_vel_publisher_.publish(cmd_vel_msg);
+
+                    ROS_INFO_THROTTLE(
+                        1.0,
+                        "%s[TAGCTL] Correcting X: linear.x=%.3f, linear.y=%.3f, angular.z=%.3f | err_x=%.3f m, yaw_err=%.3f rad%s",
+                        COLOR_YELLOW,
+                        cmd_vel_msg.linear.x, cmd_vel_msg.linear.y, cmd_vel_msg.angular.z,
+                        error_x_m, yawError(),
+                        COLOR_RESET);
+                }
+            } else if (state_ == MOVING_Y_YAW) {
                 const double error_y_m = target_y_m_ - current_y_m_;
                 const double error_x_m = current_x_m_ - target_x_m_;
-                const bool xy_reached =
-                    std::abs(error_y_m) <= arrival_threshold_y_ &&
-                    std::abs(error_x_m) <= arrival_threshold_x_;
+                const bool x_reached = std::abs(error_x_m) <= arrival_threshold_x_;
+                const bool y_reached = std::abs(error_y_m) <= arrival_threshold_y_;
+                const bool yaw_reached = yawReachedForStableFrames();
 
-                if (xy_reached) {
+                if (y_reached && yaw_reached) {
+                    if (x_reached) {
+                        publishStop(rate, 2);
+                        ROS_INFO("[TAGCTL] X, Y and yaw reached. Reached target position! x=%.3f m, y=%.3f m, yaw=%.3f rad, target_yaw=%.3f rad",
+                                 current_x_m_, current_y_m_, current_yaw_rad_, target_yaw_rad_);
+                        res.success = true;
+                        return true;
+                    }
+
                     publishStop(rate, 2);
-                    ROS_INFO("[TAGCTL] XY reached. Reached target position! x=%.3f m, y=%.3f m, yaw=%.3f rad, target_yaw=%.3f rad",
-                             current_x_m_, current_y_m_, current_yaw_rad_, target_yaw_rad_);
-                    res.success = true;
-                    return true;
+                    ROS_INFO("[TAGCTL] Y and yaw reached, but X still needs correction. Switching to final X state. x=%.3f m, target_x=%.3f m, err_x=%.3f m",
+                             current_x_m_, target_x_m_, error_x_m);
+                    state_ = FINAL_CORRECTING_X;
+                    yaw_pd_initialized_ = false;
+                    previous_angular_speed_ = 0.0;
+                    resetYawStableCounter();
+                } else {
+                    const double linear_x_speed = speedFromError(error_y_m, kp_, arrival_threshold_y_);
+                    const double angular_speed = yaw_reached ? 0.0 : computeYawCommand();
+
+                    // 创建并发布 /cmd_vel 消息
+                    geometry_msgs::Twist cmd_vel_msg;
+                    cmd_vel_msg.linear.x = linear_x_speed;
+                    cmd_vel_msg.linear.y = 0.0;
+                    cmd_vel_msg.angular.z = angular_speed;
+                    cmd_vel_publisher_.publish(cmd_vel_msg);
+
+                    ROS_INFO_THROTTLE(
+                        1.0,
+                        "%s[TAGCTL] Moving Y+Yaw: linear.x=%.3f, linear.y=%.3f, angular.z=%.3f | err_x=%.3f m, err_y=%.3f m, yaw_err=%.3f rad, yaw_stable=%d/%d%s",
+                        COLOR_YELLOW,
+                        cmd_vel_msg.linear.x, cmd_vel_msg.linear.y, cmd_vel_msg.angular.z,
+                        error_x_m, error_y_m, yawError(), yaw_stable_count_, yaw_stable_required_,
+                        COLOR_RESET);
                 }
+            } else if (state_ == FINAL_CORRECTING_X) {
+                const double error_y_m = target_y_m_ - current_y_m_;
+                const double error_x_m = current_x_m_ - target_x_m_;
+                const bool x_reached = std::abs(error_x_m) <= arrival_threshold_x_;
+                const bool y_reached = std::abs(error_y_m) <= arrival_threshold_y_;
+                const bool yaw_in_threshold = std::abs(yawError()) <= rotation_threshold_;
+                const bool yaw_reached = yawReachedForStableFrames();
 
-                const double linear_x_speed = speedFromError(error_y_m, kp_, arrival_threshold_y_);
-                const double linear_y_speed = lateralSpeedFromError(error_x_m);
+                if (x_reached) {
+                    if (y_reached && yaw_reached) {
+                        publishStop(rate, 2);
+                        ROS_INFO("[TAGCTL] Final X, Y and yaw reached. Reached target position! x=%.3f m, y=%.3f m, yaw=%.3f rad, target_yaw=%.3f rad",
+                                 current_x_m_, current_y_m_, current_yaw_rad_, target_yaw_rad_);
+                        res.success = true;
+                        return true;
+                    }
 
-                // 创建并发布 /cmd_vel 消息
-                geometry_msgs::Twist cmd_vel_msg;
-                cmd_vel_msg.linear.x = linear_x_speed;
-                cmd_vel_msg.linear.y = linear_y_speed;
-                cmd_vel_msg.angular.z = 0.0;
-                cmd_vel_publisher_.publish(cmd_vel_msg);
+                    if (!y_reached || !yaw_in_threshold) {
+                        publishStop(rate, 2);
+                        ROS_INFO("[TAGCTL] Final X reached, but Y/Yaw drifted. Switching back to Y+Yaw state. err_y=%.3f m, yaw_err=%.3f rad",
+                                 error_y_m, yawError());
+                        state_ = MOVING_Y_YAW;
+                        yaw_pd_initialized_ = false;
+                        previous_angular_speed_ = 0.0;
+                        resetYawStableCounter();
+                    } else {
+                        publishStop(rate, 1);
+                        ROS_INFO_THROTTLE(
+                            1.0,
+                            "%s[TAGCTL] Final X reached. Waiting for yaw stable frames: yaw_err=%.3f rad, stable=%d/%d%s",
+                            COLOR_YELLOW, yawError(), yaw_stable_count_, yaw_stable_required_, COLOR_RESET);
+                    }
+                } else {
+                    const double linear_y_speed = lateralSpeedFromError(error_x_m);
 
-                ROS_INFO_THROTTLE(
-                    1.0,
-                    "%s[TAGCTL] Published cmd_vel: linear.x=%.3f, linear.y=%.3f, angular.z=%.3f | err_x=%.3f m, err_y=%.3f m, yaw_err=%.3f rad%s",
-                    COLOR_YELLOW,
-                    cmd_vel_msg.linear.x, cmd_vel_msg.linear.y, cmd_vel_msg.angular.z,
-                    error_x_m, error_y_m, yawError(),
-                    COLOR_RESET);
+                    geometry_msgs::Twist cmd_vel_msg;
+                    cmd_vel_msg.linear.x = 0.0;
+                    cmd_vel_msg.linear.y = linear_y_speed;
+                    cmd_vel_msg.angular.z = 0.0;
+                    cmd_vel_publisher_.publish(cmd_vel_msg);
+
+                    ROS_INFO_THROTTLE(
+                        1.0,
+                        "%s[TAGCTL] Final correcting X: linear.x=%.3f, linear.y=%.3f, angular.z=%.3f | err_x=%.3f m, err_y=%.3f m, yaw_err=%.3f rad%s",
+                        COLOR_YELLOW,
+                        cmd_vel_msg.linear.x, cmd_vel_msg.linear.y, cmd_vel_msg.angular.z,
+                        error_x_m, error_y_m, yawError(),
+                        COLOR_RESET);
+                }
             }
 
             ros::spinOnce();
