@@ -53,6 +53,7 @@ add_library(jgl_dwa_local_planner
 	src/dwa_planner_ros.cpp
 	src/speedPlan.cpp
 	src/pursuit.cpp
+	src/decay_obstacle_layer.cpp
 	src/blind_clear_layer.cpp)
 add_dependencies(jgl_dwa_local_planner ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 target_link_libraries(jgl_dwa_local_planner ${catkin_LIBRARIES})

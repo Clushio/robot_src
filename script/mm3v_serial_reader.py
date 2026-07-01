@@ -7,6 +7,8 @@ import math
 import threading
 import socket
 import json
+from collections import Counter, deque
+from statistics import median
 
 import rospy
 from geometry_msgs.msg import PoseStamped
@@ -35,6 +37,9 @@ class MM3VSerialReader:
         self.udp_feedback_host = rospy.get_param("~udp_feedback_host", "192.168.3.17")
         self.udp_feedback_port = rospy.get_param("~udp_feedback_port", 22222)
         self.udp_feedback_rate = rospy.get_param("~udp_feedback_rate", 2.0)
+        self.udp_mode_window_size = int(rospy.get_param("~udp_mode_window_size", 9))
+        self.udp_mode_position_bin_mm = rospy.get_param("~udp_mode_position_bin_mm", 5.0)
+        self.udp_mode_angle_bin_deg = rospy.get_param("~udp_mode_angle_bin_deg", 0.5)
         self.x_sign = rospy.get_param("~x_sign", 1.0)
         self.y_sign = rospy.get_param("~y_sign", 1.0)
         self.yaw_sign = rospy.get_param("~yaw_sign", -1.0)
@@ -55,6 +60,8 @@ class MM3VSerialReader:
         self.lock = threading.Lock()
         self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.last_udp_feedback_time = rospy.Time(0)
+        self.udp_mode_window = deque(maxlen=max(1, self.udp_mode_window_size))
+        self.udp_mode_last_tag_id = None
 
         self.pose_pub = rospy.Publisher(self.output_topic, PoseStamped, queue_size=10)
 
@@ -196,15 +203,68 @@ class MM3VSerialReader:
             return None
 
     def publish_invalid_pose(self):
+        self.reset_udp_mode_position()
         msg = PoseStamped()
         msg.header.stamp = rospy.Time.now()
         msg.header.frame_id = self.frame_id
         msg.pose.position.z = -99.0
         self.pose_pub.publish(msg)
 
+    def reset_udp_mode_position(self):
+        self.udp_mode_window.clear()
+        self.udp_mode_last_tag_id = None
+
+    def get_udp_position_bin(self):
+        bin_m = self.udp_mode_position_bin_mm / 1000.0
+        return bin_m if self.output_meter else bin_m * 100.0
+
+    def quantize_udp_value(self, value, bin_size):
+        if bin_size <= 0.0:
+            return value
+        return round(value / bin_size) * bin_size
+
+    def median_angle_near_reference(self, angles, reference):
+        adjusted = [reference + self.normalize_angle_deg(angle - reference) for angle in angles]
+        return self.normalize_angle_deg(median(adjusted))
+
+    def update_udp_mode_position(self, pos):
+        tag_id = pos["id"]
+        if tag_id != self.udp_mode_last_tag_id:
+            self.udp_mode_window.clear()
+            self.udp_mode_last_tag_id = tag_id
+
+        position_bin = self.get_udp_position_bin()
+        angle_bin = self.udp_mode_angle_bin_deg
+        qx = self.quantize_udp_value(pos["x"], position_bin)
+        qy = self.quantize_udp_value(pos["y"], position_bin)
+        qa = self.normalize_angle_deg(self.quantize_udp_value(pos["angle"], angle_bin))
+        key = (tag_id, qx, qy, qa)
+        entry = (key, pos["x"], pos["y"], pos["angle"])
+        self.udp_mode_window.append(entry)
+
+        counts = Counter(item[0] for item in self.udp_mode_window)
+        best_key = key
+        best_count = counts[key]
+        for item in reversed(self.udp_mode_window):
+            candidate = item[0]
+            count = counts[candidate]
+            if count > best_count:
+                best_key = candidate
+                best_count = count
+
+        cluster = [item for item in self.udp_mode_window if item[0] == best_key]
+        return {
+            "id": best_key[0],
+            "x": median(item[1] for item in cluster),
+            "y": median(item[2] for item in cluster),
+            "angle": self.median_angle_near_reference([item[3] for item in cluster], best_key[3]),
+        }
+
     def send_udp_feedback(self, pos, force=False):
         if not self.udp_feedback_enable:
             return
+
+        mode_pos = self.update_udp_mode_position(pos)
 
         now = rospy.Time.now()
         min_interval = 1.0 / self.udp_feedback_rate if self.udp_feedback_rate > 0.0 else 0.0
@@ -213,10 +273,10 @@ class MM3VSerialReader:
                 return
 
         message = {
-            "id": pos["id"],
-            "x": pos["x"],
-            "y": pos["y"],
-            "angle": pos["angle"]
+            "id": mode_pos["id"],
+            "x": mode_pos["x"],
+            "y": mode_pos["y"],
+            "angle": mode_pos["angle"]
         }
 
         try:

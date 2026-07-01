@@ -1,4 +1,12 @@
 <library path="lib/libjgl_dwa_local_planner">
+  <class name="jgl_dwa_local_planner/DecayObstacleLayer"
+         type="jgl_dwa_local_planner::DecayObstacleLayer"
+         base_class_type="costmap_2d::Layer">
+    <description>
+      Clears stale point-cloud obstacle cells after a configurable timeout.
+    </description>
+  </class>
+
   <class name="jgl_dwa_local_planner/BlindClearLayer"
          type="jgl_dwa_local_planner::BlindClearLayer"
          base_class_type="costmap_2d::Layer">
