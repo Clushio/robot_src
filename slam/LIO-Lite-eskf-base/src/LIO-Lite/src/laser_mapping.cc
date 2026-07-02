@@ -1,5 +1,6 @@
 #include <tf/transform_broadcaster.h>
 #include <yaml-cpp/yaml.h>
+#include <cmath>
 #include <execution>
 #include <fstream>
 
@@ -116,6 +117,10 @@ bool LaserMapping::LoadParams(ros::NodeHandle &nh) {
     nh.param<std::string>("load_g_map", str_g_map_, "empty");
     nh.param<std::string>("load_f_map", str_f_map_, "empty");
     nh.param<double>("load_eaf_size", load_eaf_size_, 0.5);
+    nh.param<double>("init_icp_max_corr_dist", init_icp_max_corr_dist_, 3.0);
+    nh.param<double>("init_icp_fitness_score_th", init_icp_fitness_score_th_, 0.35);
+    nh.param<double>("init_max_translation_delta", init_max_translation_delta_, 3.0);
+    nh.param<double>("init_max_yaw_delta_deg", init_max_yaw_delta_deg_, 45.0);
 
     nh.param<bool>("split_map", split_map_, false);
     nh.param<float>("sub_grid_resolution", sub_grid_resolution_, 100);
@@ -354,10 +359,10 @@ void LaserMapping::Run() {
         return;
     }
     scan_down_world_->resize(cur_pts);
-    nearest_points_.resize(cur_pts);
-    residuals_.resize(cur_pts, 0);
-    point_selected_surf_.resize(cur_pts, true);
-    plane_coef_.resize(cur_pts, common::V4F::Zero());
+    nearest_points_.assign(cur_pts, PointVector());
+    residuals_.assign(cur_pts, 0);
+    point_selected_surf_.assign(cur_pts, true);
+    plane_coef_.assign(cur_pts, common::V4F::Zero());
 
     // ICP and iterated Kalman filter update
     Timer::Evaluate(
@@ -442,10 +447,10 @@ void LaserMapping::Run_location(){
         return;
     }
     scan_down_world_->resize(cur_pts);
-    nearest_points_.resize(cur_pts);
-    residuals_.resize(cur_pts, 0);
-    point_selected_surf_.resize(cur_pts, false);
-    plane_coef_.resize(cur_pts, common::V4F::Zero());
+    nearest_points_.assign(cur_pts, PointVector());
+    residuals_.assign(cur_pts, 0);
+    point_selected_surf_.assign(cur_pts, false);
+    plane_coef_.assign(cur_pts, common::V4F::Zero());
 
     // ICP and iterated Kalman filter update
     Timer::Evaluate(
@@ -554,6 +559,9 @@ void LaserMapping::initialpose(){
         std::cout<<"wait for human put initial"<<std::endl;
         return;
     }
+    Eigen::Affine3d raw_init_guess = init_guess;
+    Eigen::Vector3d raw_init_position = raw_init_guess.translation();
+    Eigen::Matrix3d raw_init_rotation = raw_init_guess.linear();
 
     pcl::NormalDistributionsTransform<PointType, PointType> ndt;
     ndt.setTransformationEpsilon(1e-4);
@@ -564,7 +572,7 @@ void LaserMapping::initialpose(){
     ndt.setInputTarget(global_map_);
 
     pcl::IterativeClosestPoint<PointType, PointType> icp;
-    icp.setMaxCorrespondenceDistance(40);
+    icp.setMaxCorrespondenceDistance(init_icp_max_corr_dist_);
     icp.setMaximumIterations(100);
     icp.setTransformationEpsilon(1e-6);
     icp.setEuclideanFitnessEpsilon(1e-6);
@@ -576,20 +584,48 @@ void LaserMapping::initialpose(){
     ndt.align(*unused_result, init_guess.matrix().cast<float>());
     icp.align(*unused_result, ndt.getFinalTransformation());
 
-    std::cout<<"init fit rst="<<icp.hasConverged() <<"icp score="<<icp.getFitnessScore()<<std::endl;
-   // if(icp.hasC) 0.25
-    if (icp.hasConverged() == false || icp.getFitnessScore() > 0.8)
+    init_guess = icp.getFinalTransformation().cast<double>();
+    Eigen::Vector3d final_position = init_guess.translation();
+    Eigen::Quaterniond final_rotation(init_guess.linear());
+
+    auto yaw_from_rot = [](const Eigen::Matrix3d &rot) {
+        return std::atan2(rot(1, 0), rot(0, 0));
+    };
+    auto normalize_angle = [](double angle) {
+        while (angle > M_PI) angle -= 2.0 * M_PI;
+        while (angle < -M_PI) angle += 2.0 * M_PI;
+        return angle;
+    };
+
+    const double init_xy_delta = (final_position.head<2>() - raw_init_position.head<2>()).norm();
+    const double init_yaw_delta =
+        std::fabs(normalize_angle(yaw_from_rot(final_rotation.toRotationMatrix()) -
+                                  yaw_from_rot(raw_init_rotation)));
+    const double init_max_yaw_delta = init_max_yaw_delta_deg_ / 180.0 * M_PI;
+    const bool translation_delta_ok =
+        init_max_translation_delta_ <= 0.0 || init_xy_delta <= init_max_translation_delta_;
+    const bool yaw_delta_ok = init_max_yaw_delta_deg_ <= 0.0 || init_yaw_delta <= init_max_yaw_delta;
+    const bool init_delta_ok = translation_delta_ok && yaw_delta_ok;
+    const double icp_score = icp.getFitnessScore();
+
+    std::cout<<"init fit rst="<<icp.hasConverged()
+             <<" ndt rst="<<ndt.hasConverged()
+             <<" icp score="<<icp_score
+             <<" init xy delta="<<init_xy_delta
+             <<" init yaw delta deg="<<init_yaw_delta / M_PI * 180.0
+             <<std::endl;
+
+    if (icp.hasConverged() == false || icp_score > init_icp_fitness_score_th_ || !init_delta_ok)
     {
-        ROS_ERROR("Global Initializing Fail! ");
+        ROS_ERROR("Global Initializing Fail! icp_score=%.3f, max_score=%.3f, xy_delta=%.3f, max_xy_delta=%.3f, yaw_delta_deg=%.3f, max_yaw_delta_deg=%.3f",
+                  icp_score, init_icp_fitness_score_th_, init_xy_delta, init_max_translation_delta_,
+                  init_yaw_delta / M_PI * 180.0, init_max_yaw_delta_deg_);
         flg_location_inited_ = false;
         if(flg_get_init_guess_){
             flg_get_init_guess_ = false;
         }
         return;
     } else{
-        init_guess = icp.getFinalTransformation().cast<double>();
-        Eigen::Vector3d final_position = init_guess.translation();
-        Eigen::Quaterniond final_rotation(init_guess.linear());
         ROS_INFO("\033[1;35m Initializing Succeed! \033[0m");
         state_ikfom init_state = kf_.get_x();
         init_state.pos = final_position;
@@ -988,9 +1024,10 @@ void LaserMapping::ObsModel(state_ikfom &s, esekfom::dyn_share_datastruct<double
 
                 auto &points_near = nearest_points_[i];
                 if (ekfom_data.converge) {
+                    points_near.clear();
                     /** Find the closest surfaces in the map **/
-                    ivox_->GetClosestPoint(point_world, points_near, options::NUM_MATCH_POINTS);
-                    point_selected_surf_[i] = points_near.size() >= options::MIN_NUM_MATCH_POINTS;
+                    bool found_near = ivox_->GetClosestPoint(point_world, points_near, options::NUM_MATCH_POINTS);
+                    point_selected_surf_[i] = found_near && points_near.size() >= options::MIN_NUM_MATCH_POINTS;
                     if (point_selected_surf_[i]) {
                         point_selected_surf_[i] =
                             common::esti_plane(plane_coef_[i], points_near, options::ESTI_PLANE_THRESHOLD);
@@ -1008,7 +1045,12 @@ void LaserMapping::ObsModel(state_ikfom &s, esekfom::dyn_share_datastruct<double
                         selected_surf_count ++;
                     }else{
                         point_selected_surf_[i] = false;
+                        residuals_[i] = 0.0;
+                        plane_coef_[i].setZero();
                     }
+                } else {
+                    residuals_[i] = 0.0;
+                    plane_coef_[i].setZero();
                 }
             });
         },
@@ -1120,9 +1162,10 @@ void LaserMapping::ObsModel_location(state_ikfom &s, esekfom::dyn_share_datastru
 
                 auto &points_near = nearest_points_[i];
                 if (ekfom_data.converge) {
+                    points_near.clear();
                     /** Find the closest surfaces in the map **/
-                    ivox_->GetClosestPoint(point_world, points_near, options::NUM_MATCH_POINTS);
-                    point_selected_surf_[i] = points_near.size() >= options::MIN_NUM_MATCH_POINTS;
+                    bool found_near = ivox_->GetClosestPoint(point_world, points_near, options::NUM_MATCH_POINTS);
+                    point_selected_surf_[i] = found_near && points_near.size() >= options::MIN_NUM_MATCH_POINTS;
 
                     if (point_selected_surf_[i]) {
                         point_selected_surf_[i] =
@@ -1138,7 +1181,14 @@ void LaserMapping::ObsModel_location(state_ikfom &s, esekfom::dyn_share_datastru
                     if (valid_corr) {
                         point_selected_surf_[i] = true;
                         residuals_[i] = pd2;
+                    } else {
+                        point_selected_surf_[i] = false;
+                        residuals_[i] = 0.0;
+                        plane_coef_[i].setZero();
                     }
+                } else {
+                    residuals_[i] = 0.0;
+                    plane_coef_[i].setZero();
                 }
 
             });

@@ -57,3 +57,7 @@ load_f_map: "FeatureMap.pcd"
 load_eaf_size: 0.5
 init_trans: [0, 0, 0]            # Initial value for repositioning
 init_rpy: [0, 0, 0]              # degree. For example, 180 degrees
+init_icp_max_corr_dist: 3.0
+init_icp_fitness_score_th: 0.35
+init_max_translation_delta: 3.0
+init_max_yaw_delta_deg: 45.0

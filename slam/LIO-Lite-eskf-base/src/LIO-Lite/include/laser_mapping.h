@@ -105,6 +105,10 @@ class LaserMapping {
     std::mutex init_lock_;
     std::string str_g_map_, str_f_map_;
     double load_eaf_size_;
+    double init_icp_max_corr_dist_ = 3.0;
+    double init_icp_fitness_score_th_ = 0.35;
+    double init_max_translation_delta_ = 3.0;
+    double init_max_yaw_delta_deg_ = 45.0;
 
 
    private:
