@@ -37,6 +37,8 @@ double grid_z = 0.1;
 double map_resolution = 0.05;
 
 double thre_radius = 0.1;
+bool radius_filter_enable = false;
+int radius_min_neighbors = 10;
 
 bool savemap_f = true;
 
@@ -78,6 +80,8 @@ int main(int argc, char** argv)
    private_nh.param("grid_y", grid_y, 0.1);
    private_nh.param("grid_z", grid_z, 0.1);
    private_nh.param("thre_radius", thre_radius, 0.5);
+   private_nh.param("radius_filter_enable", radius_filter_enable, false);
+   private_nh.param("radius_min_neighbors", radius_min_neighbors, 10);
    private_nh.param("map_resolution", map_resolution, 0.05);
    private_nh.param("map_topic_name", map_topic_name, std::string("map"));
    private_nh.param("savemap", savemap_f, true);
@@ -101,10 +105,15 @@ int main(int argc, char** argv)
 
    PassThroughFilter(thre_z_min, thre_z_max, bool(flag_pass_through));
 
-//   RadiusOutlierFilter(cloud_after_PassThrough, 0.1, 10);
-//   SetMapTopicMsg(cloud_after_Radius, map_topic_msg);
-
-   SetMapTopicMsg(cloud_after_PassThrough, map_topic_msg);
+   if (radius_filter_enable)
+   {
+     RadiusOutlierFilter(cloud_after_PassThrough, thre_radius, radius_min_neighbors);
+     SetMapTopicMsg(cloud_after_Radius, map_topic_msg);
+   }
+   else
+   {
+     SetMapTopicMsg(cloud_after_PassThrough, map_topic_msg);
+   }
 
    while(ros::ok())
    {
@@ -215,5 +224,4 @@ void SetMapTopicMsg(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, nav_msgs::O
 //    msg.data[i + j * msg.info.width] = int(255 * (cloud->points[iter].z * k_line + b_line)) % 255;
   }
 }
-
 
