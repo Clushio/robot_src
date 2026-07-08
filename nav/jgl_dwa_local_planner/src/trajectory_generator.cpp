@@ -303,8 +303,8 @@ bool TrajectoryGenerator::generateBsplineReference(
   out_path = bspline_path;
   last_path_mode_ = PATH_MODE_BSPLINE;
   last_fallback_segments_.assign(waypoints.size() - 1, 0);
-  ROS_INFO("JGL reference path: generated optimized B-spline path with %zu samples and %u control points.",
-           out_path.poses.size(), control_point_count);
+  ROS_DEBUG("JGL reference path: generated optimized B-spline candidate with %zu samples and %u control points.",
+            out_path.poses.size(), control_point_count);
   return true;
 }
 

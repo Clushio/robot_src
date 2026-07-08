@@ -247,6 +247,27 @@ namespace jgl_dwa_local_planner
     return reference_job_failed_topology_version_ == topology_version;
   }
 
+  bool DWAPlannerROS::referenceGenerationUsefulForCurrentGoal(
+      const std::vector<geometry_msgs::PoseStamped> &waypoints) const
+  {
+    if (reference_goal_reached_ || linePath.empty() || waypoints.size() < 4)
+    {
+      return false;
+    }
+    if (linePath.back().pose.position.z == 2)
+    {
+      return false;
+    }
+
+    const int goal_index = reference_path_manager_.goalIndex(linePath.back());
+    if (goal_index <= 0)
+    {
+      return false;
+    }
+
+    return goal_index < static_cast<int>(waypoints.size()) - 1;
+  }
+
   void DWAPlannerROS::waitForReferencePathJob()
   {
     if (reference_job_thread_.joinable())
@@ -372,6 +393,14 @@ namespace jgl_dwa_local_planner
       return false;
     }
 
+    const std::vector<geometry_msgs::PoseStamped> current_waypoints =
+        reference_path_manager_.waypoints();
+    if (!referenceGenerationUsefulForCurrentGoal(current_waypoints))
+    {
+      ROS_INFO("JGL reference path: discard async result because current topology goal no longer needs a reference path.");
+      return false;
+    }
+
     if (!success)
     {
       boost::mutex::scoped_lock lock(reference_job_mutex_);
@@ -406,6 +435,12 @@ namespace jgl_dwa_local_planner
     {
       return;
     }
+    const std::vector<geometry_msgs::PoseStamped> waypoints =
+        reference_path_manager_.waypoints();
+    if (!referenceGenerationUsefulForCurrentGoal(waypoints))
+    {
+      return;
+    }
     if (!reference_path_manager_.needRegenerate(current_pose_))
     {
       return;
@@ -419,8 +454,6 @@ namespace jgl_dwa_local_planner
       return;
     }
 
-    const std::vector<geometry_msgs::PoseStamped> waypoints =
-        reference_path_manager_.waypoints();
     const int topology_version = reference_path_manager_.topologyVersion();
     if (startReferencePathJob(waypoints, topology_version))
     {

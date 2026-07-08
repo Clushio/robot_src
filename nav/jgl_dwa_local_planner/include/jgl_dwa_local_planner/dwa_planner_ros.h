@@ -224,6 +224,8 @@ namespace jgl_dwa_local_planner
       bool consumeReferencePathJob();
       bool referencePathJobRunning() const;
       bool referencePathJobFailedForCurrentTopology() const;
+      bool referenceGenerationUsefulForCurrentGoal(
+          const std::vector<geometry_msgs::PoseStamped> &waypoints) const;
       void waitForReferencePathJob();
       const char *referencePathModeName(TrajectoryGenerator::PathMode mode) const;
       bool computeReferenceVelocityCommands(geometry_msgs::Twist &cmd_vel,
