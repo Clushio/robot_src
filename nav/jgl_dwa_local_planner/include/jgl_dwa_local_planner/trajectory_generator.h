@@ -112,6 +112,11 @@ private:
 	                                nav_msgs::Path &out_path);
 	  bool generateCubicReference(const std::vector<geometry_msgs::PoseStamped> &waypoints,
 	                              nav_msgs::Path &out_path);
+	  std::vector<geometry_msgs::PoseStamped> referenceCurveWaypoints(
+	      const std::vector<geometry_msgs::PoseStamped> &waypoints) const;
+	  void expandFallbackSegmentsForFullTopology(
+	      unsigned int full_waypoint_count,
+	      const std::vector<int> &curve_fallback_segments);
 	  std::vector<Point2d> initializeBsplineControlPoints(
 	      const std::vector<geometry_msgs::PoseStamped> &waypoints) const;
 	  bool optimizeBsplineControlPoints(

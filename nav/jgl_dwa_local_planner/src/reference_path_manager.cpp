@@ -142,7 +142,7 @@ bool ReferencePathManager::needRegenerate(
     const geometry_msgs::PoseStamped &current_pose) const
 {
   boost::mutex::scoped_lock lock(mutex_);
-  if (topo_waypoints_.size() < 3)
+  if (topo_waypoints_.size() < 4)
   {
     return false;
   }

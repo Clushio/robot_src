@@ -99,23 +99,74 @@ bool TrajectoryGenerator::generate(const std::vector<geometry_msgs::PoseStamped>
                                    nav_msgs::Path &out_path)
 {
   out_path.poses.clear();
-  if (waypoints.size() < 2)
+  const std::vector<geometry_msgs::PoseStamped> curve_waypoints =
+      referenceCurveWaypoints(waypoints);
+  if (curve_waypoints.size() < 2)
   {
+    last_path_mode_ = PATH_MODE_INVALID;
+    last_fallback_segments_.clear();
     return false;
   }
 
   if (reference_curve_type_ == "bspline")
   {
     nav_msgs::Path bspline_path;
-    if (generateBsplineReference(waypoints, bspline_path))
+    if (generateBsplineReference(curve_waypoints, bspline_path))
     {
       out_path = bspline_path;
+      expandFallbackSegmentsForFullTopology(
+          static_cast<unsigned int>(waypoints.size()), last_fallback_segments_);
       return true;
     }
     ROS_WARN("JGL reference path: optimized B-spline failed, falling back to cubic/hybrid/polyline.");
   }
 
-  return generateCubicReference(waypoints, out_path);
+  const bool success = generateCubicReference(curve_waypoints, out_path);
+  if (success)
+  {
+    expandFallbackSegmentsForFullTopology(
+        static_cast<unsigned int>(waypoints.size()), last_fallback_segments_);
+  }
+  return success;
+}
+
+std::vector<geometry_msgs::PoseStamped> TrajectoryGenerator::referenceCurveWaypoints(
+    const std::vector<geometry_msgs::PoseStamped> &waypoints) const
+{
+  std::vector<geometry_msgs::PoseStamped> curve_waypoints;
+  if (waypoints.size() < 4)
+  {
+    return curve_waypoints;
+  }
+
+  curve_waypoints.reserve(waypoints.size() - 2);
+  for (unsigned int i = 1; i + 1 < waypoints.size(); ++i)
+  {
+    curve_waypoints.push_back(waypoints[i]);
+  }
+  return curve_waypoints;
+}
+
+void TrajectoryGenerator::expandFallbackSegmentsForFullTopology(
+    unsigned int full_waypoint_count,
+    const std::vector<int> &curve_fallback_segments)
+{
+  if (full_waypoint_count < 2)
+  {
+    last_fallback_segments_.clear();
+    return;
+  }
+
+  std::vector<int> expanded(full_waypoint_count - 1, 0);
+  for (unsigned int i = 0; i < curve_fallback_segments.size(); ++i)
+  {
+    const unsigned int original_segment_index = i + 1;
+    if (original_segment_index < expanded.size())
+    {
+      expanded[original_segment_index] = curve_fallback_segments[i];
+    }
+  }
+  last_fallback_segments_ = expanded;
 }
 
 bool TrajectoryGenerator::generateCubicReference(

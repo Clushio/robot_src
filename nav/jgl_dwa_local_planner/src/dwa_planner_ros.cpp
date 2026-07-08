@@ -259,7 +259,7 @@ namespace jgl_dwa_local_planner
       const std::vector<geometry_msgs::PoseStamped> &waypoints,
       int topology_version)
   {
-    if (waypoints.size() < 3)
+    if (waypoints.size() < 4)
     {
       return false;
     }

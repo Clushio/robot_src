@@ -82,11 +82,11 @@ double minYInXRange(const nav_msgs::Path &path, double min_x, double max_x)
 
 }  // namespace
 
-TEST(TrajectoryGeneratorBspline, StraightLineKeepsEndpointsAndPassesChecks)
+TEST(TrajectoryGeneratorBspline, StraightLineUsesSecondToPenultimateEndpoints)
 {
   ros::Time::init();
   jgl_dwa_local_planner::TrajectoryGenerator generator;
-  generator.setGlobalCostmapForTesting(makeFreeGrid(-1.0, -1.0, 0.05, 80, 40));
+  generator.setGlobalCostmapForTesting(makeFreeGrid(-1.0, -1.0, 0.05, 100, 40));
   generator.setReferenceLimitsForTesting(0.05, 0.10, 0.30, 2.0, 0.48);
   generator.setBsplineOptimizationForTesting(0.30, 60, 1.0, 2.0, 0.6, 1.0);
 
@@ -94,13 +94,14 @@ TEST(TrajectoryGeneratorBspline, StraightLineKeepsEndpointsAndPassesChecks)
   waypoints.push_back(makePose(0.0, 0.0));
   waypoints.push_back(makePose(1.0, 0.0));
   waypoints.push_back(makePose(2.0, 0.0));
+  waypoints.push_back(makePose(3.0, 0.0));
 
   nav_msgs::Path path;
   ASSERT_TRUE(generator.generate(waypoints, path));
   EXPECT_EQ(jgl_dwa_local_planner::TrajectoryGenerator::PATH_MODE_BSPLINE,
             generator.lastPathMode());
   ASSERT_GE(path.poses.size(), 2U);
-  EXPECT_NEAR(0.0, path.poses.front().pose.position.x, 1e-9);
+  EXPECT_NEAR(1.0, path.poses.front().pose.position.x, 1e-9);
   EXPECT_NEAR(0.0, path.poses.front().pose.position.y, 1e-9);
   EXPECT_NEAR(2.0, path.poses.back().pose.position.x, 1e-9);
   EXPECT_NEAR(0.0, path.poses.back().pose.position.y, 1e-9);
@@ -126,9 +127,11 @@ TEST(TrajectoryGeneratorBspline, WallNearTopoPushesMiddleAway)
   generator.setBsplineOptimizationForTesting(0.25, 120, 0.8, 8.0, 0.15, 0.5);
 
   std::vector<geometry_msgs::PoseStamped> waypoints;
+  waypoints.push_back(makePose(-0.4, 0.40));
   waypoints.push_back(makePose(0.0, 0.40));
   waypoints.push_back(makePose(1.0, 0.22));
   waypoints.push_back(makePose(2.0, 0.40));
+  waypoints.push_back(makePose(2.4, 0.40));
 
   nav_msgs::Path path;
   ASSERT_TRUE(generator.generate(waypoints, path));
@@ -152,6 +155,8 @@ TEST(TrajectoryGeneratorBspline, TooSharpBsplineFallsBackToLegacyPolyline)
   waypoints.push_back(makePose(0.0, 0.0));
   waypoints.push_back(makePose(0.4, 0.0));
   waypoints.push_back(makePose(0.4, 0.4));
+  waypoints.push_back(makePose(0.8, 0.4));
+  waypoints.push_back(makePose(1.2, 0.4));
 
   nav_msgs::Path path;
   ASSERT_TRUE(generator.generate(waypoints, path));
