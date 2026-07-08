@@ -13,7 +13,9 @@ PathFollower::PathFollower()
       v_min_(0.04),
       v_max_(0.20),
       end_slow_distance_(0.80),
-      k_curve_(1.0)
+      k_curve_(1.0),
+      max_curvature_(2.0),
+      min_turn_radius_(0.48)
 {
 }
 
@@ -24,12 +26,16 @@ void PathFollower::loadParams(ros::NodeHandle &private_nh)
   private_nh.param("v_max", v_max_, 0.20);
   private_nh.param("end_slow_distance", end_slow_distance_, 0.80);
   private_nh.param("k_curve", k_curve_, 1.0);
+  private_nh.param("max_curvature", max_curvature_, 2.0);
+  private_nh.param("min_turn_radius", min_turn_radius_, 0.48);
 
   lookahead_distance_ = std::max(0.05, lookahead_distance_);
   v_min_ = std::max(0.0, v_min_);
   v_max_ = std::max(v_min_, v_max_);
   end_slow_distance_ = std::max(0.0, end_slow_distance_);
   k_curve_ = std::max(0.0, k_curve_);
+  max_curvature_ = std::max(0.0, max_curvature_);
+  min_turn_radius_ = std::max(0.0, min_turn_radius_);
 }
 
 bool PathFollower::computeCommand(const nav_msgs::Path &path,
@@ -74,8 +80,8 @@ bool PathFollower::computeCommand(const nav_msgs::Path &path,
   const double yaw = tf2::getYaw(current_pose.pose.orientation);
   const double alpha = normalizeAngle(std::atan2(dy, dx) - yaw);
 
-  curvature = 2.0 * std::sin(alpha) / target_distance;
-  double velocity = v_max_ / (1.0 + k_curve_ * std::fabs(curvature));
+  const double raw_curvature = 2.0 * std::sin(alpha) / target_distance;
+  double velocity = v_max_ / (1.0 + k_curve_ * std::fabs(raw_curvature));
   velocity = clamp(velocity, v_min_, v_max_);
 
   const double remain = remainingDistance(path, current_pose, new_index);
@@ -85,9 +91,16 @@ bool PathFollower::computeCommand(const nav_msgs::Path &path,
     velocity = std::max(v_min_, velocity * scale);
   }
 
-  cmd_vel.linear.x = velocity;
+  curvature = raw_curvature;
+  const double max_curvature = effectiveMaxCurvature();
+  if (max_curvature > 0.0 && std::fabs(curvature) > max_curvature)
+  {
+    curvature = curvature > 0.0 ? max_curvature : -max_curvature;
+  }
+
+  cmd_vel.linear.x = std::max(0.0, velocity);
   cmd_vel.linear.y = 0.0;
-  cmd_vel.angular.z = velocity * curvature;
+  cmd_vel.angular.z = cmd_vel.linear.x * curvature;
   return true;
 }
 
@@ -174,6 +187,17 @@ double PathFollower::normalizeAngle(double angle) const
     angle += 2.0 * M_PI;
   }
   return angle;
+}
+
+double PathFollower::effectiveMaxCurvature() const
+{
+  double limit = max_curvature_;
+  if (min_turn_radius_ > 1e-6)
+  {
+    const double radius_limit = 1.0 / min_turn_radius_;
+    limit = limit > 0.0 ? std::min(limit, radius_limit) : radius_limit;
+  }
+  return limit;
 }
 
 }  // namespace jgl_dwa_local_planner

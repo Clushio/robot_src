@@ -135,6 +135,13 @@ namespace jgl_dwa_local_planner
     legacy_line_forced_goal_index_ = -1;
     reference_goal_reached_ = false;
     reference_path_mode_ = TrajectoryGenerator::PATH_MODE_INVALID;
+    dsrv_ = NULL;
+    reference_job_running_ = false;
+    reference_job_result_ready_ = false;
+    reference_job_result_success_ = false;
+    reference_job_topology_version_ = -1;
+    reference_job_failed_topology_version_ = -1;
+    reference_job_path_mode_ = TrajectoryGenerator::PATH_MODE_INVALID;
   }
 
   void  DWAPlannerROS::logToFile(const std::string& message, const std::string& filename) {
@@ -209,46 +216,263 @@ namespace jgl_dwa_local_planner
     return true;
   }
 
-  bool DWAPlannerROS::prepareReferencePath()
+  const char *DWAPlannerROS::referencePathModeName(
+      TrajectoryGenerator::PathMode mode) const
   {
+    switch (mode)
+    {
+      case TrajectoryGenerator::PATH_MODE_BSPLINE:
+        return "bspline";
+      case TrajectoryGenerator::PATH_MODE_CUBIC:
+        return "cubic";
+      case TrajectoryGenerator::PATH_MODE_HYBRID:
+        return "hybrid";
+      case TrajectoryGenerator::PATH_MODE_POLYLINE_FALLBACK:
+        return "polyline_fallback";
+      default:
+        return "invalid";
+    }
+  }
+
+  bool DWAPlannerROS::referencePathJobRunning() const
+  {
+    boost::mutex::scoped_lock lock(reference_job_mutex_);
+    return reference_job_running_;
+  }
+
+  bool DWAPlannerROS::referencePathJobFailedForCurrentTopology() const
+  {
+    const int topology_version = reference_path_manager_.topologyVersion();
+    boost::mutex::scoped_lock lock(reference_job_mutex_);
+    return reference_job_failed_topology_version_ == topology_version;
+  }
+
+  void DWAPlannerROS::waitForReferencePathJob()
+  {
+    if (reference_job_thread_.joinable())
+    {
+      reference_job_thread_.join();
+    }
+  }
+
+  bool DWAPlannerROS::startReferencePathJob(
+      const std::vector<geometry_msgs::PoseStamped> &waypoints,
+      int topology_version)
+  {
+    if (waypoints.size() < 3)
+    {
+      return false;
+    }
+
+    {
+      boost::mutex::scoped_lock lock(reference_job_mutex_);
+      if (reference_job_running_)
+      {
+        return false;
+      }
+      if (reference_job_result_ready_ &&
+          reference_job_topology_version_ == topology_version)
+      {
+        return false;
+      }
+      if (reference_job_failed_topology_version_ == topology_version)
+      {
+        return false;
+      }
+    }
+
+    waitForReferencePathJob();
+
+    {
+      boost::mutex::scoped_lock lock(reference_job_mutex_);
+      if (reference_job_running_)
+      {
+        return false;
+      }
+      reference_job_running_ = true;
+      reference_job_result_ready_ = false;
+      reference_job_result_success_ = false;
+      reference_job_topology_version_ = topology_version;
+      reference_job_path_.poses.clear();
+      reference_job_path_mode_ = TrajectoryGenerator::PATH_MODE_INVALID;
+      reference_job_fallback_segments_.clear();
+    }
+
+    reference_job_thread_ =
+        boost::thread(&DWAPlannerROS::referencePathGenerationThread,
+                      this, waypoints, topology_version);
+    ROS_INFO("JGL reference path: started async generation for topology version %d with %zu waypoints.",
+             topology_version, waypoints.size());
+    return true;
+  }
+
+  void DWAPlannerROS::referencePathGenerationThread(
+      std::vector<geometry_msgs::PoseStamped> waypoints,
+      int topology_version)
+  {
+    nav_msgs::Path reference_path;
+    const bool success = trajectory_generator_.generate(waypoints, reference_path);
+    const TrajectoryGenerator::PathMode path_mode =
+        success ? trajectory_generator_.lastPathMode()
+                : TrajectoryGenerator::PATH_MODE_INVALID;
+    const std::vector<int> fallback_segments =
+        success ? trajectory_generator_.lastFallbackSegments()
+                : std::vector<int>();
+
+    boost::mutex::scoped_lock lock(reference_job_mutex_);
+    reference_job_path_ = reference_path;
+    reference_job_path_mode_ = path_mode;
+    reference_job_fallback_segments_ = fallback_segments;
+    reference_job_result_success_ = success;
+    reference_job_result_ready_ = true;
+    reference_job_running_ = false;
+    reference_job_topology_version_ = topology_version;
+  }
+
+  bool DWAPlannerROS::consumeReferencePathJob()
+  {
+    bool ready = false;
+    bool success = false;
+    int job_topology_version = -1;
+    nav_msgs::Path reference_path;
+    TrajectoryGenerator::PathMode path_mode =
+        TrajectoryGenerator::PATH_MODE_INVALID;
+    std::vector<int> fallback_segments;
+    {
+      boost::mutex::scoped_lock lock(reference_job_mutex_);
+      ready = reference_job_result_ready_;
+      success = reference_job_result_success_;
+      job_topology_version = reference_job_topology_version_;
+      reference_path = reference_job_path_;
+      path_mode = reference_job_path_mode_;
+      fallback_segments = reference_job_fallback_segments_;
+    }
+
+    if (!ready)
+    {
+      return false;
+    }
+
+    waitForReferencePathJob();
+
+    const int current_topology_version =
+        reference_path_manager_.topologyVersion();
+    {
+      boost::mutex::scoped_lock lock(reference_job_mutex_);
+      reference_job_result_ready_ = false;
+      reference_job_path_.poses.clear();
+      reference_job_path_mode_ = TrajectoryGenerator::PATH_MODE_INVALID;
+      reference_job_fallback_segments_.clear();
+    }
+
+    if (job_topology_version != current_topology_version)
+    {
+      ROS_WARN("JGL reference path: discard stale async result for topology version %d, current version is %d.",
+               job_topology_version, current_topology_version);
+      return false;
+    }
+
+    if (!success)
+    {
+      boost::mutex::scoped_lock lock(reference_job_mutex_);
+      reference_job_failed_topology_version_ = job_topology_version;
+      ROS_ERROR("JGL reference path: async generation failed for topology version %d.",
+                job_topology_version);
+      return false;
+    }
+
+    reference_path_mode_ = path_mode;
+    reference_fallback_segments_ = fallback_segments;
+    legacy_line_forced_goal_index_ = -1;
+    reference_path_manager_.setReferencePath(reference_path);
+    double nearest_distance = 0.0;
+    unsigned int nearest_index = 0;
+    syncReferencePathIndex(&nearest_distance, &nearest_index);
+    reference_path_pub_.publish(reference_path);
+    publishReferencePathMarker(reference_path, reference_path_mode_);
+    ROS_INFO("JGL reference path: published /reference_path version %d mode=%s samples=%zu init_idx=%u init_dist=%.3f.",
+             reference_path_manager_.pathVersion(),
+             referencePathModeName(reference_path_mode_),
+             reference_path.poses.size(),
+             nearest_index,
+             nearest_distance);
+    return true;
+  }
+
+  void DWAPlannerROS::maybeStartReferencePathJob()
+  {
+    if (!enable_bspline_reference_path_ || useLine <= 0 ||
+        !reference_path_manager_.hasWaypoints())
+    {
+      return;
+    }
+    if (!reference_path_manager_.needRegenerate(current_pose_))
+    {
+      return;
+    }
+    if (referencePathJobRunning())
+    {
+      return;
+    }
+    if (referencePathJobFailedForCurrentTopology())
+    {
+      return;
+    }
+
+    const std::vector<geometry_msgs::PoseStamped> waypoints =
+        reference_path_manager_.waypoints();
+    const int topology_version = reference_path_manager_.topologyVersion();
+    if (startReferencePathJob(waypoints, topology_version))
+    {
+      reference_path_manager_.markRegenerateAttempt();
+    }
+  }
+
+  bool DWAPlannerROS::prepareReferencePath(bool &generation_pending,
+                                           bool &generation_failed)
+  {
+    generation_pending = false;
+    generation_failed = false;
+
     if (!reference_path_manager_.hasWaypoints())
     {
       return false;
     }
 
-    if (reference_path_manager_.needRegenerate(current_pose_))
+    if (consumeReferencePathJob())
     {
-      reference_path_manager_.markRegenerateAttempt();
-      nav_msgs::Path reference_path;
-      const std::vector<geometry_msgs::PoseStamped> waypoints =
-          reference_path_manager_.waypoints();
-      if (!trajectory_generator_.generate(waypoints, reference_path))
-      {
-        reference_path_manager_.invalidate();
-        reference_path_mode_ = TrajectoryGenerator::PATH_MODE_INVALID;
-        reference_fallback_segments_.clear();
-        return false;
-      }
-
-      reference_path_mode_ = trajectory_generator_.lastPathMode();
-      reference_fallback_segments_ = trajectory_generator_.lastFallbackSegments();
-      legacy_line_forced_goal_index_ = -1;
-      reference_path_manager_.setReferencePath(reference_path);
-      double nearest_distance = 0.0;
-      unsigned int nearest_index = 0;
-      syncReferencePathIndex(&nearest_distance, &nearest_index);
-      reference_path_pub_.publish(reference_path);
-      publishReferencePathMarker(reference_path,
-                                 reference_path_mode_);
-      ROS_INFO("JGL reference path: published /reference_path version %d mode=%s samples=%zu init_idx=%u init_dist=%.3f.",
-               reference_path_manager_.pathVersion(),
-               trajectory_generator_.lastPathModeName(),
-               reference_path.poses.size(),
-               nearest_index,
-               nearest_distance);
+      return reference_path_manager_.hasValidPath();
     }
 
-    return reference_path_manager_.hasValidPath();
+    maybeStartReferencePathJob();
+
+    if (reference_path_manager_.hasValidPath())
+    {
+      return true;
+    }
+
+    if (consumeReferencePathJob())
+    {
+      return reference_path_manager_.hasValidPath();
+    }
+
+    if (referencePathJobRunning())
+    {
+      generation_pending = true;
+      return false;
+    }
+
+    if (referencePathJobFailedForCurrentTopology())
+    {
+      generation_failed = true;
+      return false;
+    }
+
+    if (reference_path_manager_.hasWaypoints())
+    {
+      generation_pending = true;
+    }
+    return false;
   }
 
   void DWAPlannerROS::publishReferencePathMarker(const nav_msgs::Path &path,
@@ -474,8 +698,27 @@ namespace jgl_dwa_local_planner
       return false;
     }
 
-    if (!prepareReferencePath())
+    bool generation_pending = false;
+    bool generation_failed = false;
+    if (!prepareReferencePath(generation_pending, generation_failed))
     {
+      if (generation_pending)
+      {
+        stopCmd(cmd_vel);
+        ROS_INFO_THROTTLE(1.0,
+                          "JGL reference path: async generation is still running, wait at topology goal idx=%d.",
+                          current_topology_goal_index_);
+        return true;
+      }
+      if (generation_failed)
+      {
+        stopCmd(cmd_vel);
+        hard_failure = true;
+        ROS_ERROR_THROTTLE(1.0,
+                           "JGL reference path: async generation failed for topology version %d, keep stopped.",
+                           reference_path_manager_.topologyVersion());
+        return false;
+      }
       return false;
     }
 
@@ -485,7 +728,7 @@ namespace jgl_dwa_local_planner
       ROS_INFO_THROTTLE(1.0,
                         "JGL reference path: goal_idx=%d uses legacy rotate-line controller because reference mode=%s has fallback polyline nearby.",
                         current_topology_goal_index_,
-                        trajectory_generator_.lastPathModeName());
+                        referencePathModeName(reference_path_mode_));
       return false;
     }
 
@@ -897,6 +1140,7 @@ bool DWAPlannerROS::isGoalReached()
   DWAPlannerROS::~DWAPlannerROS()
   {
     //make sure to clean things up
+    waitForReferencePathJob();
     delete dsrv_;
   }
 
@@ -1330,6 +1574,8 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseS
       begin=ros::Time::now();
     //  ROS_INFO("pure pursuit!!!");
       publishGlobalPlan(transformed_plan);
+      consumeReferencePathJob();
+      maybeStartReferencePathJob();
       bool reference_hard_failure = false;
       if (computeReferenceVelocityCommands(cmd_vel, reference_hard_failure))
       {

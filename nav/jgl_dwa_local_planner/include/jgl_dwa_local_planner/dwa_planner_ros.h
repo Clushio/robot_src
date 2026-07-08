@@ -212,7 +212,20 @@ namespace jgl_dwa_local_planner
 
       void stopCmd(geometry_msgs::Twist &cmd_vel) const;
       bool shouldUseReferencePath();
-      bool prepareReferencePath();
+      bool prepareReferencePath(bool &generation_pending,
+                                bool &generation_failed);
+      void maybeStartReferencePathJob();
+      bool startReferencePathJob(
+          const std::vector<geometry_msgs::PoseStamped> &waypoints,
+          int topology_version);
+      void referencePathGenerationThread(
+          std::vector<geometry_msgs::PoseStamped> waypoints,
+          int topology_version);
+      bool consumeReferencePathJob();
+      bool referencePathJobRunning() const;
+      bool referencePathJobFailedForCurrentTopology() const;
+      void waitForReferencePathJob();
+      const char *referencePathModeName(TrajectoryGenerator::PathMode mode) const;
       bool computeReferenceVelocityCommands(geometry_msgs::Twist &cmd_vel,
                                             bool &hard_failure);
       bool referencePathBlocked(const nav_msgs::Path &path);
@@ -271,6 +284,16 @@ namespace jgl_dwa_local_planner
       bool reference_goal_reached_;
       TrajectoryGenerator::PathMode reference_path_mode_;
       std::vector<int> reference_fallback_segments_;
+      mutable boost::mutex reference_job_mutex_;
+      boost::thread reference_job_thread_;
+      bool reference_job_running_;
+      bool reference_job_result_ready_;
+      bool reference_job_result_success_;
+      int reference_job_topology_version_;
+      int reference_job_failed_topology_version_;
+      nav_msgs::Path reference_job_path_;
+      TrajectoryGenerator::PathMode reference_job_path_mode_;
+      std::vector<int> reference_job_fallback_segments_;
       TrajectoryGenerator trajectory_generator_;
       ReferencePathManager reference_path_manager_;
       PathFollower path_follower_;

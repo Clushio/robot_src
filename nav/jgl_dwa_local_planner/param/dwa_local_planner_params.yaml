@@ -11,11 +11,19 @@ DWAPlannerROS:
   frontdis_X: 0.00
 
   enable_bspline_reference_path: true
+  reference_curve_type: "bspline"  # "bspline" or "cubic"
   bspline_sample_resolution: 0.10
+  bspline_control_point_spacing: 0.40
+  bspline_opt_iterations: 60
+  bspline_weight_smooth: 1.0
+  bspline_weight_obstacle: 2.0
+  bspline_weight_topo: 0.6
+  bspline_weight_curvature: 1.0
   safe_distance: 0.25
   reference_occupied_threshold: 98
   max_deviation_from_topo: 0.50
   max_curvature: 2.00
+  min_turn_radius: 0.48
   lookahead_distance: 0.50
   v_min: 0.04
   v_max: 0.20

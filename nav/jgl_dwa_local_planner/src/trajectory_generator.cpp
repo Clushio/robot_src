@@ -2,6 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
+#include <limits>
+#include <queue>
+#include <utility>
 
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
@@ -9,13 +13,44 @@
 namespace jgl_dwa_local_planner
 {
 
+TrajectoryGenerator::Point2d::Point2d() : x(0.0), y(0.0)
+{
+}
+
+TrajectoryGenerator::Point2d::Point2d(double px, double py) : x(px), y(py)
+{
+}
+
+TrajectoryGenerator::DistanceField::DistanceField()
+    : valid(false),
+      width(0),
+      height(0),
+      resolution(0.0),
+      origin_x(0.0),
+      origin_y(0.0)
+{
+}
+
+int TrajectoryGenerator::DistanceField::index(int mx, int my) const
+{
+  return my * static_cast<int>(width) + mx;
+}
+
 TrajectoryGenerator::TrajectoryGenerator()
     : have_global_costmap_(false),
       sample_resolution_(0.10),
       safe_distance_(0.25),
       max_deviation_from_topo_(0.50),
       max_curvature_(2.0),
+      min_turn_radius_(0.48),
+      bspline_control_point_spacing_(0.40),
+      bspline_opt_iterations_(60),
+      bspline_weight_smooth_(1.0),
+      bspline_weight_obstacle_(2.0),
+      bspline_weight_topo_(0.6),
+      bspline_weight_curvature_(1.0),
       occupied_threshold_(98),
+      reference_curve_type_("bspline"),
       last_path_mode_(PATH_MODE_INVALID)
 {
 }
@@ -27,11 +62,26 @@ void TrajectoryGenerator::initialize(ros::NodeHandle &private_nh, ros::NodeHandl
   private_nh.param("max_deviation_from_topo", max_deviation_from_topo_, 0.50);
   private_nh.param("max_curvature", max_curvature_, 2.0);
   private_nh.param("reference_occupied_threshold", occupied_threshold_, 98);
+  private_nh.param("reference_curve_type", reference_curve_type_, std::string("bspline"));
+  private_nh.param("bspline_control_point_spacing", bspline_control_point_spacing_, 0.40);
+  private_nh.param("bspline_opt_iterations", bspline_opt_iterations_, 60);
+  private_nh.param("bspline_weight_smooth", bspline_weight_smooth_, 1.0);
+  private_nh.param("bspline_weight_obstacle", bspline_weight_obstacle_, 2.0);
+  private_nh.param("bspline_weight_topo", bspline_weight_topo_, 0.6);
+  private_nh.param("bspline_weight_curvature", bspline_weight_curvature_, 1.0);
+  private_nh.param("min_turn_radius", min_turn_radius_, 0.48);
 
   sample_resolution_ = std::max(0.02, sample_resolution_);
   safe_distance_ = std::max(0.0, safe_distance_);
   max_deviation_from_topo_ = std::max(0.0, max_deviation_from_topo_);
   max_curvature_ = std::max(0.0, max_curvature_);
+  min_turn_radius_ = std::max(0.0, min_turn_radius_);
+  bspline_control_point_spacing_ = std::max(0.10, bspline_control_point_spacing_);
+  bspline_opt_iterations_ = std::max(0, bspline_opt_iterations_);
+  bspline_weight_smooth_ = std::max(0.0, bspline_weight_smooth_);
+  bspline_weight_obstacle_ = std::max(0.0, bspline_weight_obstacle_);
+  bspline_weight_topo_ = std::max(0.0, bspline_weight_topo_);
+  bspline_weight_curvature_ = std::max(0.0, bspline_weight_curvature_);
   occupied_threshold_ = std::max(1, std::min(100, occupied_threshold_));
 
   global_costmap_sub_ = node_nh.subscribe("/mxb_move_base/global_costmap/costmap", 1,
@@ -54,6 +104,25 @@ bool TrajectoryGenerator::generate(const std::vector<geometry_msgs::PoseStamped>
     return false;
   }
 
+  if (reference_curve_type_ == "bspline")
+  {
+    nav_msgs::Path bspline_path;
+    if (generateBsplineReference(waypoints, bspline_path))
+    {
+      out_path = bspline_path;
+      return true;
+    }
+    ROS_WARN("JGL reference path: optimized B-spline failed, falling back to cubic/hybrid/polyline.");
+  }
+
+  return generateCubicReference(waypoints, out_path);
+}
+
+bool TrajectoryGenerator::generateCubicReference(
+    const std::vector<geometry_msgs::PoseStamped> &waypoints,
+    nav_msgs::Path &out_path)
+{
+  out_path.poses.clear();
   nav_msgs::Path spline_path = catmullRomPath(waypoints);
   if (pathChecksPass(spline_path, waypoints, true))
   {
@@ -106,6 +175,8 @@ const char *TrajectoryGenerator::lastPathModeName() const
 {
   switch (last_path_mode_)
   {
+    case PATH_MODE_BSPLINE:
+      return "bspline";
     case PATH_MODE_CUBIC:
       return "cubic";
     case PATH_MODE_HYBRID:
@@ -126,6 +197,714 @@ bool TrajectoryGenerator::pathChecksPass(
          checkCollision(path) &&
          checkDeviationFromTopo(path, waypoints) &&
          (!check_curvature || checkCurvature(path));
+}
+
+bool TrajectoryGenerator::generateBsplineReference(
+    const std::vector<geometry_msgs::PoseStamped> &waypoints,
+    nav_msgs::Path &out_path)
+{
+  out_path.poses.clear();
+
+  nav_msgs::OccupancyGrid grid;
+  {
+    boost::mutex::scoped_lock lock(costmap_mutex_);
+    if (!have_global_costmap_)
+    {
+      ROS_WARN_THROTTLE(2.0, "JGL reference path: waiting for global costmap before B-spline optimization.");
+      return false;
+    }
+    grid = global_costmap_;
+  }
+
+  DistanceField distance_field;
+  if (!buildDistanceField(grid, distance_field))
+  {
+    ROS_WARN("JGL reference path: failed to build distance field for B-spline optimization.");
+    return false;
+  }
+
+  std::vector<Point2d> control_points = initializeBsplineControlPoints(waypoints);
+  if (control_points.size() < 4)
+  {
+    return false;
+  }
+
+  if (!optimizeBsplineControlPoints(control_points, waypoints, distance_field))
+  {
+    return false;
+  }
+
+  nav_msgs::Path bspline_path = sampleBsplinePath(control_points, waypoints);
+  if (!pathChecksPass(bspline_path, waypoints, true))
+  {
+    ROS_WARN("JGL reference path: optimized B-spline failed final safety checks.");
+    return false;
+  }
+
+  out_path = bspline_path;
+  last_path_mode_ = PATH_MODE_BSPLINE;
+  last_fallback_segments_.assign(waypoints.size() - 1, 0);
+  ROS_INFO("JGL reference path: generated optimized B-spline path with %zu samples and %zu control points.",
+           out_path.poses.size(), control_points.size());
+  return true;
+}
+
+std::vector<TrajectoryGenerator::Point2d> TrajectoryGenerator::initializeBsplineControlPoints(
+    const std::vector<geometry_msgs::PoseStamped> &waypoints) const
+{
+  std::vector<Point2d> control_points;
+  const double length = topoPolylineLength(waypoints);
+  if (waypoints.size() < 2 || length < 1e-6)
+  {
+    return control_points;
+  }
+
+  const int control_count =
+      std::max(4, static_cast<int>(std::ceil(length / bspline_control_point_spacing_)) + 1);
+  control_points.reserve(control_count);
+  for (int i = 0; i < control_count; ++i)
+  {
+    const double distance_along =
+        length * static_cast<double>(i) / static_cast<double>(control_count - 1);
+    control_points.push_back(interpolateTopoPolyline(waypoints, distance_along));
+  }
+
+  const Point2d start(waypoints.front().pose.position.x,
+                      waypoints.front().pose.position.y);
+  const Point2d end(waypoints.back().pose.position.x,
+                    waypoints.back().pose.position.y);
+  const Point2d start_tangent = waypointTangent(waypoints, true);
+  const Point2d end_tangent = waypointTangent(waypoints, false);
+  const double handle = std::min(bspline_control_point_spacing_, length / 3.0);
+
+  control_points.front() = start;
+  control_points.back() = end;
+  control_points[1] = pointAdd(start, pointScale(start_tangent, handle));
+  control_points[control_points.size() - 2] =
+      pointSub(end, pointScale(end_tangent, handle));
+  return control_points;
+}
+
+bool TrajectoryGenerator::optimizeBsplineControlPoints(
+    std::vector<Point2d> &control_points,
+    const std::vector<geometry_msgs::PoseStamped> &waypoints,
+    const DistanceField &distance_field) const
+{
+  if (control_points.size() < 4 || !distance_field.valid)
+  {
+    return false;
+  }
+
+  const double topo_length = std::max(topoPolylineLength(waypoints), sample_resolution_);
+  const int sample_count =
+      std::max(8, static_cast<int>(std::ceil(topo_length / sample_resolution_)));
+  const double obstacle_push_distance =
+      safe_distance_ + std::max(distance_field.resolution, 0.02);
+  const double max_curvature = effectiveMaxCurvature();
+  const double max_step = std::min(0.06, 0.25 * bspline_control_point_spacing_);
+
+  for (int iter = 0; iter < bspline_opt_iterations_; ++iter)
+  {
+    std::vector<Point2d> deltas(control_points.size(), Point2d());
+
+    for (unsigned int i = 0; i < control_points.size(); ++i)
+    {
+      if (isFixedControlPoint(i, control_points.size()))
+      {
+        continue;
+      }
+
+      Point2d smooth_delta;
+      if (i >= 2 && i + 2 < control_points.size())
+      {
+        const Point2d fourth = pointAdd(
+            pointAdd(control_points[i - 2], pointScale(control_points[i - 1], -4.0)),
+            pointAdd(pointScale(control_points[i], 6.0),
+                     pointAdd(pointScale(control_points[i + 1], -4.0),
+                              control_points[i + 2])));
+        smooth_delta = pointScale(fourth, -0.010 * bspline_weight_smooth_);
+      }
+      else
+      {
+        const Point2d laplacian =
+            pointSub(pointScale(pointAdd(control_points[i - 1], control_points[i + 1]), 0.5),
+                     control_points[i]);
+        smooth_delta = pointScale(laplacian, 0.040 * bspline_weight_smooth_);
+      }
+      deltas[i] = pointAdd(deltas[i], smooth_delta);
+    }
+
+    for (int sample = 0; sample <= sample_count; ++sample)
+    {
+      const double u = static_cast<double>(sample) / static_cast<double>(sample_count);
+      Point2d point;
+      std::vector<int> indices;
+      std::vector<double> weights;
+      if (!evaluateBspline(control_points, u, point) ||
+          !bsplineBasisWeights(control_points.size(), u, indices, weights))
+      {
+        continue;
+      }
+
+      const Point2d topo_projection = projectPointToTopo(point, waypoints);
+      const Point2d topo_delta = pointSub(topo_projection, point);
+      const Point2d topo_step = pointScale(topo_delta, 0.020 * bspline_weight_topo_);
+
+      for (unsigned int j = 0; j < indices.size(); ++j)
+      {
+        const int idx = indices[j];
+        if (idx < 0 || idx >= static_cast<int>(control_points.size()) ||
+            isFixedControlPoint(idx, control_points.size()))
+        {
+          continue;
+        }
+        deltas[idx] = pointAdd(deltas[idx], pointScale(topo_step, weights[j]));
+      }
+
+      double obstacle_distance = 0.0;
+      Point2d obstacle_gradient;
+      if (distanceAtPoint(distance_field, point, obstacle_distance) &&
+          obstacle_distance < obstacle_push_distance &&
+          distanceGradientAtPoint(distance_field, point, obstacle_gradient))
+      {
+        const double push =
+            (obstacle_push_distance - obstacle_distance) * 0.060 * bspline_weight_obstacle_;
+        const Point2d obstacle_step = pointScale(obstacle_gradient, push);
+        for (unsigned int j = 0; j < indices.size(); ++j)
+        {
+          const int idx = indices[j];
+          if (idx < 0 || idx >= static_cast<int>(control_points.size()) ||
+              isFixedControlPoint(idx, control_points.size()))
+          {
+            continue;
+          }
+          deltas[idx] = pointAdd(deltas[idx], pointScale(obstacle_step, weights[j]));
+        }
+      }
+    }
+
+    if (max_curvature > 0.0)
+    {
+      for (unsigned int i = 1; i + 1 < control_points.size(); ++i)
+      {
+        if (isFixedControlPoint(i, control_points.size()))
+        {
+          continue;
+        }
+        const double curvature = controlPolygonCurvature(control_points[i - 1],
+                                                         control_points[i],
+                                                         control_points[i + 1]);
+        if (curvature > max_curvature)
+        {
+          const Point2d midpoint =
+              pointScale(pointAdd(control_points[i - 1], control_points[i + 1]), 0.5);
+          const double scale =
+              std::min(2.0, curvature / std::max(1e-6, max_curvature) - 1.0);
+          const Point2d curvature_step =
+              pointScale(pointSub(midpoint, control_points[i]),
+                         0.050 * bspline_weight_curvature_ * scale);
+          deltas[i] = pointAdd(deltas[i], curvature_step);
+        }
+      }
+    }
+
+    for (unsigned int i = 0; i < control_points.size(); ++i)
+    {
+      if (isFixedControlPoint(i, control_points.size()))
+      {
+        continue;
+      }
+      limitPointStep(deltas[i], max_step);
+      const Point2d candidate = pointAdd(control_points[i], deltas[i]);
+      double candidate_distance = 0.0;
+      if (!distanceAtPoint(distance_field, candidate, candidate_distance))
+      {
+        continue;
+      }
+      control_points[i] = candidate;
+    }
+  }
+
+  return true;
+}
+
+nav_msgs::Path TrajectoryGenerator::sampleBsplinePath(
+    const std::vector<Point2d> &control_points,
+    const std::vector<geometry_msgs::PoseStamped> &waypoints) const
+{
+  nav_msgs::Path path;
+  if (control_points.size() < 4 || waypoints.empty())
+  {
+    return path;
+  }
+
+  const double length = std::max(topoPolylineLength(waypoints), sample_resolution_);
+  const int samples =
+      std::max(1, static_cast<int>(std::ceil(length / sample_resolution_)));
+  path.header = waypoints.front().header;
+  path.header.stamp = ros::Time::now();
+  path.poses.reserve(samples + 1);
+
+  for (int i = 0; i <= samples; ++i)
+  {
+    const double u = static_cast<double>(i) / static_cast<double>(samples);
+    Point2d point;
+    if (!evaluateBspline(control_points, u, point))
+    {
+      continue;
+    }
+    path.poses.push_back(makePoseLike(waypoints.front(), point.x, point.y));
+  }
+
+  if (!path.poses.empty())
+  {
+    path.poses.front().pose.position.x = waypoints.front().pose.position.x;
+    path.poses.front().pose.position.y = waypoints.front().pose.position.y;
+    path.poses.back().pose.position.x = waypoints.back().pose.position.x;
+    path.poses.back().pose.position.y = waypoints.back().pose.position.y;
+  }
+  applyPathOrientations(path, waypoints.back());
+  return path;
+}
+
+bool TrajectoryGenerator::evaluateBspline(
+    const std::vector<Point2d> &control_points,
+    double u,
+    Point2d &point) const
+{
+  std::vector<int> indices;
+  std::vector<double> weights;
+  if (!bsplineBasisWeights(control_points.size(), u, indices, weights))
+  {
+    return false;
+  }
+
+  point = Point2d();
+  for (unsigned int i = 0; i < indices.size(); ++i)
+  {
+    const int idx = indices[i];
+    if (idx < 0 || idx >= static_cast<int>(control_points.size()))
+    {
+      return false;
+    }
+    point = pointAdd(point, pointScale(control_points[idx], weights[i]));
+  }
+  return true;
+}
+
+bool TrajectoryGenerator::bsplineBasisWeights(
+    int control_point_count,
+    double u,
+    std::vector<int> &indices,
+    std::vector<double> &weights) const
+{
+  indices.clear();
+  weights.clear();
+  const int degree = 3;
+  if (control_point_count < degree + 1)
+  {
+    return false;
+  }
+
+  u = std::max(0.0, std::min(1.0, u));
+  const int n = control_point_count - 1;
+  std::vector<double> knots;
+  buildClampedKnotVector(control_point_count, knots);
+
+  int span = n;
+  if (u < 1.0)
+  {
+    int low = degree;
+    int high = n + 1;
+    int mid = (low + high) / 2;
+    while (u < knots[mid] || u >= knots[mid + 1])
+    {
+      if (u < knots[mid])
+      {
+        high = mid;
+      }
+      else
+      {
+        low = mid;
+      }
+      mid = (low + high) / 2;
+    }
+    span = mid;
+  }
+
+  std::vector<double> basis(degree + 1, 0.0);
+  std::vector<double> left(degree + 1, 0.0);
+  std::vector<double> right(degree + 1, 0.0);
+  basis[0] = 1.0;
+  for (int j = 1; j <= degree; ++j)
+  {
+    left[j] = u - knots[span + 1 - j];
+    right[j] = knots[span + j] - u;
+    double saved = 0.0;
+    for (int r = 0; r < j; ++r)
+    {
+      const double denom = right[r + 1] + left[j - r];
+      const double temp = std::fabs(denom) > 1e-12 ? basis[r] / denom : 0.0;
+      basis[r] = saved + right[r + 1] * temp;
+      saved = left[j - r] * temp;
+    }
+    basis[j] = saved;
+  }
+
+  for (int j = 0; j <= degree; ++j)
+  {
+    const int idx = span - degree + j;
+    if (idx >= 0 && idx < control_point_count && std::fabs(basis[j]) > 1e-12)
+    {
+      indices.push_back(idx);
+      weights.push_back(basis[j]);
+    }
+  }
+  return !indices.empty();
+}
+
+void TrajectoryGenerator::buildClampedKnotVector(
+    int control_point_count,
+    std::vector<double> &knots) const
+{
+  const int degree = 3;
+  const int n = control_point_count - 1;
+  const int knot_count = control_point_count + degree + 1;
+  knots.assign(knot_count, 0.0);
+  for (int i = 0; i < knot_count; ++i)
+  {
+    if (i <= degree)
+    {
+      knots[i] = 0.0;
+    }
+    else if (i >= control_point_count)
+    {
+      knots[i] = 1.0;
+    }
+    else
+    {
+      knots[i] = static_cast<double>(i - degree) /
+                 static_cast<double>(n - degree + 1);
+    }
+  }
+}
+
+bool TrajectoryGenerator::buildDistanceField(
+    const nav_msgs::OccupancyGrid &grid,
+    DistanceField &distance_field) const
+{
+  if (grid.info.width == 0 || grid.info.height == 0 ||
+      grid.data.size() != grid.info.width * grid.info.height)
+  {
+    return false;
+  }
+
+  distance_field.valid = true;
+  distance_field.width = grid.info.width;
+  distance_field.height = grid.info.height;
+  distance_field.resolution = std::max(1e-6, static_cast<double>(grid.info.resolution));
+  distance_field.origin_x = grid.info.origin.position.x;
+  distance_field.origin_y = grid.info.origin.position.y;
+  distance_field.distance.assign(grid.data.size(),
+                                 std::numeric_limits<double>::infinity());
+
+  typedef std::pair<double, int> QueueItem;
+  std::priority_queue<QueueItem, std::vector<QueueItem>, std::greater<QueueItem> > queue;
+
+  for (unsigned int my = 0; my < grid.info.height; ++my)
+  {
+    for (unsigned int mx = 0; mx < grid.info.width; ++mx)
+    {
+      const int index = my * grid.info.width + mx;
+      const int value = grid.data[index];
+      if (value < 0 || value >= occupied_threshold_)
+      {
+        distance_field.distance[index] = 0.0;
+        queue.push(QueueItem(0.0, index));
+      }
+    }
+  }
+
+  const int dx[8] = {1, -1, 0, 0, 1, 1, -1, -1};
+  const int dy[8] = {0, 0, 1, -1, 1, -1, 1, -1};
+  while (!queue.empty())
+  {
+    const QueueItem item = queue.top();
+    queue.pop();
+    if (item.first > distance_field.distance[item.second] + 1e-9)
+    {
+      continue;
+    }
+
+    const int mx = item.second % static_cast<int>(grid.info.width);
+    const int my = item.second / static_cast<int>(grid.info.width);
+    for (int k = 0; k < 8; ++k)
+    {
+      const int nx = mx + dx[k];
+      const int ny = my + dy[k];
+      if (nx < 0 || ny < 0 ||
+          nx >= static_cast<int>(grid.info.width) ||
+          ny >= static_cast<int>(grid.info.height))
+      {
+        continue;
+      }
+
+      const double step = (dx[k] == 0 || dy[k] == 0) ? distance_field.resolution
+                                                     : distance_field.resolution * std::sqrt(2.0);
+      const int next_index = distance_field.index(nx, ny);
+      const double next_distance = item.first + step;
+      if (next_distance + 1e-9 < distance_field.distance[next_index])
+      {
+        distance_field.distance[next_index] = next_distance;
+        queue.push(QueueItem(next_distance, next_index));
+      }
+    }
+  }
+
+  return true;
+}
+
+bool TrajectoryGenerator::distanceAtPoint(
+    const DistanceField &distance_field,
+    const Point2d &point,
+    double &distance) const
+{
+  if (!distance_field.valid || distance_field.resolution <= 0.0)
+  {
+    return false;
+  }
+  const int mx = static_cast<int>(std::floor((point.x - distance_field.origin_x) /
+                                            distance_field.resolution));
+  const int my = static_cast<int>(std::floor((point.y - distance_field.origin_y) /
+                                            distance_field.resolution));
+  if (mx < 0 || my < 0 ||
+      mx >= static_cast<int>(distance_field.width) ||
+      my >= static_cast<int>(distance_field.height))
+  {
+    return false;
+  }
+
+  distance = distance_field.distance[distance_field.index(mx, my)];
+  if (!std::isfinite(distance))
+  {
+    distance = 1e6;
+  }
+  return true;
+}
+
+bool TrajectoryGenerator::distanceGradientAtPoint(
+    const DistanceField &distance_field,
+    const Point2d &point,
+    Point2d &gradient) const
+{
+  if (!distance_field.valid || distance_field.resolution <= 0.0)
+  {
+    return false;
+  }
+  const int mx = static_cast<int>(std::floor((point.x - distance_field.origin_x) /
+                                            distance_field.resolution));
+  const int my = static_cast<int>(std::floor((point.y - distance_field.origin_y) /
+                                            distance_field.resolution));
+  if (mx <= 0 || my <= 0 ||
+      mx + 1 >= static_cast<int>(distance_field.width) ||
+      my + 1 >= static_cast<int>(distance_field.height))
+  {
+    return false;
+  }
+
+  double left = distance_field.distance[distance_field.index(mx - 1, my)];
+  double right = distance_field.distance[distance_field.index(mx + 1, my)];
+  double down = distance_field.distance[distance_field.index(mx, my - 1)];
+  double up = distance_field.distance[distance_field.index(mx, my + 1)];
+  if (!std::isfinite(left) || !std::isfinite(right) ||
+      !std::isfinite(down) || !std::isfinite(up))
+  {
+    return false;
+  }
+
+  gradient.x = (right - left) / (2.0 * distance_field.resolution);
+  gradient.y = (up - down) / (2.0 * distance_field.resolution);
+  const double norm = pointNorm(gradient);
+  if (norm < 1e-6)
+  {
+    return false;
+  }
+  gradient = pointScale(gradient, 1.0 / norm);
+  return true;
+}
+
+TrajectoryGenerator::Point2d TrajectoryGenerator::projectPointToTopo(
+    const Point2d &point,
+    const std::vector<geometry_msgs::PoseStamped> &waypoints) const
+{
+  if (waypoints.empty())
+  {
+    return point;
+  }
+  if (waypoints.size() == 1)
+  {
+    return Point2d(waypoints.front().pose.position.x, waypoints.front().pose.position.y);
+  }
+
+  Point2d best(waypoints.front().pose.position.x, waypoints.front().pose.position.y);
+  double best_distance = std::numeric_limits<double>::max();
+  for (unsigned int i = 0; i + 1 < waypoints.size(); ++i)
+  {
+    const Point2d a(waypoints[i].pose.position.x, waypoints[i].pose.position.y);
+    const Point2d b(waypoints[i + 1].pose.position.x, waypoints[i + 1].pose.position.y);
+    const Point2d ab = pointSub(b, a);
+    const double len_sq = ab.x * ab.x + ab.y * ab.y;
+    double t = 0.0;
+    if (len_sq > 1e-9)
+    {
+      const Point2d ap = pointSub(point, a);
+      t = (ap.x * ab.x + ap.y * ab.y) / len_sq;
+      t = std::max(0.0, std::min(1.0, t));
+    }
+    const Point2d projection = pointAdd(a, pointScale(ab, t));
+    const double distance = pointDistance(point, projection);
+    if (distance < best_distance)
+    {
+      best_distance = distance;
+      best = projection;
+    }
+  }
+  return best;
+}
+
+TrajectoryGenerator::Point2d TrajectoryGenerator::interpolateTopoPolyline(
+    const std::vector<geometry_msgs::PoseStamped> &waypoints,
+    double distance_along) const
+{
+  if (waypoints.empty())
+  {
+    return Point2d();
+  }
+  if (distance_along <= 0.0 || waypoints.size() == 1)
+  {
+    return Point2d(waypoints.front().pose.position.x, waypoints.front().pose.position.y);
+  }
+
+  double walked = 0.0;
+  for (unsigned int i = 0; i + 1 < waypoints.size(); ++i)
+  {
+    const double segment_length = poseDistance(waypoints[i], waypoints[i + 1]);
+    if (walked + segment_length >= distance_along && segment_length > 1e-9)
+    {
+      const double ratio = (distance_along - walked) / segment_length;
+      const double x = waypoints[i].pose.position.x +
+                       ratio * (waypoints[i + 1].pose.position.x -
+                                waypoints[i].pose.position.x);
+      const double y = waypoints[i].pose.position.y +
+                       ratio * (waypoints[i + 1].pose.position.y -
+                                waypoints[i].pose.position.y);
+      return Point2d(x, y);
+    }
+    walked += segment_length;
+  }
+
+  return Point2d(waypoints.back().pose.position.x, waypoints.back().pose.position.y);
+}
+
+double TrajectoryGenerator::topoPolylineLength(
+    const std::vector<geometry_msgs::PoseStamped> &waypoints) const
+{
+  double length = 0.0;
+  for (unsigned int i = 1; i < waypoints.size(); ++i)
+  {
+    length += poseDistance(waypoints[i - 1], waypoints[i]);
+  }
+  return length;
+}
+
+TrajectoryGenerator::Point2d TrajectoryGenerator::waypointTangent(
+    const std::vector<geometry_msgs::PoseStamped> &waypoints,
+    bool start) const
+{
+  if (waypoints.size() < 2)
+  {
+    return Point2d(1.0, 0.0);
+  }
+
+  if (start)
+  {
+    const Point2d origin(waypoints.front().pose.position.x,
+                         waypoints.front().pose.position.y);
+    for (unsigned int i = 1; i < waypoints.size(); ++i)
+    {
+      Point2d tangent = pointSub(Point2d(waypoints[i].pose.position.x,
+                                         waypoints[i].pose.position.y),
+                                 origin);
+      const double norm = pointNorm(tangent);
+      if (norm > 1e-6)
+      {
+        return pointScale(tangent, 1.0 / norm);
+      }
+    }
+  }
+  else
+  {
+    const Point2d end(waypoints.back().pose.position.x,
+                      waypoints.back().pose.position.y);
+    for (int i = static_cast<int>(waypoints.size()) - 2; i >= 0; --i)
+    {
+      Point2d tangent = pointSub(end,
+                                 Point2d(waypoints[i].pose.position.x,
+                                         waypoints[i].pose.position.y));
+      const double norm = pointNorm(tangent);
+      if (norm > 1e-6)
+      {
+        return pointScale(tangent, 1.0 / norm);
+      }
+    }
+  }
+  return Point2d(1.0, 0.0);
+}
+
+double TrajectoryGenerator::effectiveMaxCurvature() const
+{
+  double limit = max_curvature_;
+  if (min_turn_radius_ > 1e-6)
+  {
+    const double radius_limit = 1.0 / min_turn_radius_;
+    limit = limit > 0.0 ? std::min(limit, radius_limit) : radius_limit;
+  }
+  return limit;
+}
+
+double TrajectoryGenerator::controlPolygonCurvature(
+    const Point2d &a,
+    const Point2d &b,
+    const Point2d &c) const
+{
+  const double ab = pointDistance(a, b);
+  const double bc = pointDistance(b, c);
+  const double ac = pointDistance(a, c);
+  if (ab < 1e-4 || bc < 1e-4 || ac < 1e-4)
+  {
+    return 0.0;
+  }
+  const double cross = std::fabs((b.x - a.x) * (c.y - a.y) -
+                                 (b.y - a.y) * (c.x - a.x));
+  return 2.0 * cross / (ab * bc * ac);
+}
+
+void TrajectoryGenerator::limitPointStep(Point2d &delta, double max_step) const
+{
+  const double norm = pointNorm(delta);
+  if (norm > max_step && norm > 1e-9)
+  {
+    delta = pointScale(delta, max_step / norm);
+  }
+}
+
+bool TrajectoryGenerator::isFixedControlPoint(unsigned int index, unsigned int count) const
+{
+  if (count <= 4)
+  {
+    return true;
+  }
+  return index <= 1 || index + 2 >= count;
 }
 
 nav_msgs::Path TrajectoryGenerator::catmullRomPath(
@@ -527,7 +1306,8 @@ double TrajectoryGenerator::pointToSegmentDistance(
 
 bool TrajectoryGenerator::checkCurvature(const nav_msgs::Path &path)
 {
-  if (max_curvature_ <= 0.0 || path.poses.size() < 3)
+  const double max_curvature = effectiveMaxCurvature();
+  if (max_curvature <= 0.0 || path.poses.size() < 3)
   {
     return true;
   }
@@ -549,10 +1329,10 @@ bool TrajectoryGenerator::checkCurvature(const nav_msgs::Path &path)
                                    (b.pose.position.y - a.pose.position.y) *
                                        (c.pose.position.x - a.pose.position.x));
     const double curvature = 2.0 * cross / (ab * bc * ac);
-    if (curvature > max_curvature_)
+    if (curvature > max_curvature)
     {
       ROS_WARN("JGL reference path: curvature %.3f exceeds max %.3f at sample %u.",
-               curvature, max_curvature_, i);
+               curvature, max_curvature, i);
       return false;
     }
   }
@@ -564,6 +1344,37 @@ double TrajectoryGenerator::poseDistance(const geometry_msgs::PoseStamped &a,
 {
   return std::hypot(a.pose.position.x - b.pose.position.x,
                     a.pose.position.y - b.pose.position.y);
+}
+
+double TrajectoryGenerator::pointDistance(const Point2d &a, const Point2d &b) const
+{
+  return std::hypot(a.x - b.x, a.y - b.y);
+}
+
+double TrajectoryGenerator::pointNorm(const Point2d &point) const
+{
+  return std::hypot(point.x, point.y);
+}
+
+TrajectoryGenerator::Point2d TrajectoryGenerator::pointAdd(
+    const Point2d &a,
+    const Point2d &b) const
+{
+  return Point2d(a.x + b.x, a.y + b.y);
+}
+
+TrajectoryGenerator::Point2d TrajectoryGenerator::pointSub(
+    const Point2d &a,
+    const Point2d &b) const
+{
+  return Point2d(a.x - b.x, a.y - b.y);
+}
+
+TrajectoryGenerator::Point2d TrajectoryGenerator::pointScale(
+    const Point2d &point,
+    double scale) const
+{
+  return Point2d(point.x * scale, point.y * scale);
 }
 
 }  // namespace jgl_dwa_local_planner

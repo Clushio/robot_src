@@ -70,6 +70,7 @@ public:
           progress_distance_(0.05),
           progress_yaw_(6.0 * M_PI / 180.0),
           waypoint_reached_distance_(0.20),
+          validate_pass_through_action_success_distance_(false),
           goal_timeout_(120.0),
           block_bidirectional_(true),
           static_map_loaded_(false),
@@ -104,6 +105,9 @@ public:
         private_nh.param("progress_yaw", progress_yaw_, progress_yaw_);
         private_nh.param("waypoint_reached_distance", waypoint_reached_distance_,
                          waypoint_reached_distance_);
+        private_nh.param("validate_pass_through_action_success_distance",
+                         validate_pass_through_action_success_distance_,
+                         validate_pass_through_action_success_distance_);
         private_nh.param("goal_timeout", goal_timeout_, goal_timeout_);
         private_nh.param("block_bidirectional", block_bidirectional_, block_bidirectional_);
         private_nh.param("static_map_inflation_radius", static_map_inflation_radius_,
@@ -403,6 +407,7 @@ private:
     double progress_distance_;
     double progress_yaw_;
     double waypoint_reached_distance_;
+    bool validate_pass_through_action_success_distance_;
     double goal_timeout_;
     bool block_bidirectional_;
     std::vector<int> active_path_;
@@ -1442,7 +1447,9 @@ private:
                 if (state == actionlib::SimpleClientGoalState::SUCCEEDED)
                 {
                     geometry_msgs::PoseStamped current_pose;
-                    if (!final_goal && getCurrentRobotPose(current_pose))
+                    if (!final_goal &&
+                        validate_pass_through_action_success_distance_ &&
+                        getCurrentRobotPose(current_pose))
                     {
                         const double target_distance = distanceToNode(current_pose, target_index);
                         if (target_distance > waypoint_reached_distance_)
@@ -1452,6 +1459,13 @@ private:
                             global_ac->sendGoal(mb_goal);
                             continue;
                         }
+                    }
+                    else if (!final_goal && getCurrentRobotPose(current_pose))
+                    {
+                        const double target_distance = distanceToNode(current_pose, target_index);
+                        ROS_INFO("Pass-through P%d accepted by move_base action success at %.2f m "
+                                 "from topo point; reference curve may not pass exactly through the waypoint.",
+                                 target_index, target_distance);
                     }
                     ROS_INFO_STREAM("Reached topology goal P" << target_index);
                     current_pose_index = target_index;

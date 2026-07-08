@@ -63,6 +63,17 @@ add_library(jgl_dwa_local_planner
 add_dependencies(jgl_dwa_local_planner ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 target_link_libraries(jgl_dwa_local_planner ${catkin_LIBRARIES})
 
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(trajectory_generator_test test/trajectory_generator_test.cpp)
+  if(TARGET trajectory_generator_test)
+    set_target_properties(trajectory_generator_test PROPERTIES
+      COMPILE_FLAGS "-DJGL_DWA_LOCAL_PLANNER_ENABLE_TEST_ACCESS")
+    target_link_libraries(trajectory_generator_test
+      jgl_dwa_local_planner
+      ${catkin_LIBRARIES})
+  endif()
+endif()
+
 install(TARGETS jgl_dwa_local_planner
        ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
        LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}

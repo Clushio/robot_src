@@ -74,6 +74,12 @@ std::vector<geometry_msgs::PoseStamped> ReferencePathManager::waypoints() const
   return topo_waypoints_;
 }
 
+int ReferencePathManager::topologyVersion() const
+{
+  boost::mutex::scoped_lock lock(mutex_);
+  return topology_version_;
+}
+
 bool ReferencePathManager::hasValidPath() const
 {
   boost::mutex::scoped_lock lock(mutex_);

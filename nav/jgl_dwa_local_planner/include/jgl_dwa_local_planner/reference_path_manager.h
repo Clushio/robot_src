@@ -21,6 +21,7 @@ public:
 
   bool hasWaypoints() const;
   std::vector<geometry_msgs::PoseStamped> waypoints() const;
+  int topologyVersion() const;
 
   bool hasValidPath() const;
   nav_msgs::Path referencePath() const;

@@ -36,12 +36,15 @@ private:
                       const geometry_msgs::PoseStamped &b) const;
   double clamp(double value, double min_value, double max_value) const;
   double normalizeAngle(double angle) const;
+  double effectiveMaxCurvature() const;
 
   double lookahead_distance_;
   double v_min_;
   double v_max_;
   double end_slow_distance_;
   double k_curve_;
+  double max_curvature_;
+  double min_turn_radius_;
 };
 
 }  // namespace jgl_dwa_local_planner
