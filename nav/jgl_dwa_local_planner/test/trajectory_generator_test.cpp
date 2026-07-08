@@ -184,7 +184,7 @@ TEST(PathFollowerAckermannOnly, CommandNeverUsesCrabOrReverse)
 
   EXPECT_GE(cmd_vel.linear.x, 0.0);
   EXPECT_EQ(0.0, cmd_vel.linear.y);
-  EXPECT_LE(std::fabs(curvature), 2.0 + 1e-9);
+  EXPECT_LE(std::fabs(curvature), 2.1 + 1e-9);
   EXPECT_NEAR(cmd_vel.linear.x * curvature, cmd_vel.angular.z, 1e-9);
 }
 

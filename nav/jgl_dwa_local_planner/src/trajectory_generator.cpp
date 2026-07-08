@@ -41,8 +41,8 @@ TrajectoryGenerator::TrajectoryGenerator()
       sample_resolution_(0.10),
       safe_distance_(0.25),
       max_deviation_from_topo_(0.50),
-      max_curvature_(2.0),
-      min_turn_radius_(0.48),
+      max_curvature_(2.1),
+      min_turn_radius_(0.476),
       bspline_control_point_spacing_(0.40),
       bspline_opt_iterations_(60),
       bspline_weight_smooth_(1.0),
@@ -60,7 +60,7 @@ void TrajectoryGenerator::initialize(ros::NodeHandle &private_nh, ros::NodeHandl
   private_nh.param("bspline_sample_resolution", sample_resolution_, 0.10);
   private_nh.param("safe_distance", safe_distance_, 0.25);
   private_nh.param("max_deviation_from_topo", max_deviation_from_topo_, 0.50);
-  private_nh.param("max_curvature", max_curvature_, 2.0);
+  private_nh.param("max_curvature", max_curvature_, 2.1);
   private_nh.param("reference_occupied_threshold", occupied_threshold_, 98);
   private_nh.param("reference_curve_type", reference_curve_type_, std::string("bspline"));
   private_nh.param("bspline_control_point_spacing", bspline_control_point_spacing_, 0.40);
@@ -69,7 +69,7 @@ void TrajectoryGenerator::initialize(ros::NodeHandle &private_nh, ros::NodeHandl
   private_nh.param("bspline_weight_obstacle", bspline_weight_obstacle_, 2.0);
   private_nh.param("bspline_weight_topo", bspline_weight_topo_, 0.6);
   private_nh.param("bspline_weight_curvature", bspline_weight_curvature_, 1.0);
-  private_nh.param("min_turn_radius", min_turn_radius_, 0.48);
+  private_nh.param("min_turn_radius", min_turn_radius_, 0.476);
 
   sample_resolution_ = std::max(0.02, sample_resolution_);
   safe_distance_ = std::max(0.0, safe_distance_);

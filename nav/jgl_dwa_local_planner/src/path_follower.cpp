@@ -14,8 +14,8 @@ PathFollower::PathFollower()
       v_max_(0.20),
       end_slow_distance_(0.80),
       k_curve_(1.0),
-      max_curvature_(2.0),
-      min_turn_radius_(0.48)
+      max_curvature_(2.1),
+      min_turn_radius_(0.476)
 {
 }
 
@@ -26,8 +26,8 @@ void PathFollower::loadParams(ros::NodeHandle &private_nh)
   private_nh.param("v_max", v_max_, 0.20);
   private_nh.param("end_slow_distance", end_slow_distance_, 0.80);
   private_nh.param("k_curve", k_curve_, 1.0);
-  private_nh.param("max_curvature", max_curvature_, 2.0);
-  private_nh.param("min_turn_radius", min_turn_radius_, 0.48);
+  private_nh.param("max_curvature", max_curvature_, 2.1);
+  private_nh.param("min_turn_radius", min_turn_radius_, 0.476);
 
   lookahead_distance_ = std::max(0.05, lookahead_distance_);
   v_min_ = std::max(0.0, v_min_);
