@@ -119,6 +119,16 @@ bool TrajectoryGenerator::generate(const std::vector<geometry_msgs::PoseStamped>
       return true;
     }
     ROS_WARN("JGL reference path: optimized B-spline failed, falling back to cubic/hybrid/polyline.");
+
+    nav_msgs::Path chunked_bspline_path;
+    if (generateChunkedBsplineReference(curve_waypoints, chunked_bspline_path))
+    {
+      out_path = chunked_bspline_path;
+      expandFallbackSegmentsForFullTopology(
+          static_cast<unsigned int>(waypoints.size()), last_fallback_segments_);
+      return true;
+    }
+    ROS_WARN("JGL reference path: chunked B-spline fallback failed, falling back to cubic/hybrid/polyline.");
   }
 
   const bool success = generateCubicReference(curve_waypoints, out_path);
@@ -274,6 +284,42 @@ bool TrajectoryGenerator::generateBsplineReference(
     return false;
   }
 
+  unsigned int control_point_count = 0;
+  nav_msgs::Path bspline_path;
+  if (!buildOptimizedBsplinePath(waypoints,
+                                 distance_field,
+                                 bspline_path,
+                                 &control_point_count))
+  {
+    return false;
+  }
+
+  if (!pathChecksPass(bspline_path, waypoints, true))
+  {
+    ROS_WARN("JGL reference path: optimized B-spline failed final safety checks.");
+    return false;
+  }
+
+  out_path = bspline_path;
+  last_path_mode_ = PATH_MODE_BSPLINE;
+  last_fallback_segments_.assign(waypoints.size() - 1, 0);
+  ROS_INFO("JGL reference path: generated optimized B-spline path with %zu samples and %u control points.",
+           out_path.poses.size(), control_point_count);
+  return true;
+}
+
+bool TrajectoryGenerator::buildOptimizedBsplinePath(
+    const std::vector<geometry_msgs::PoseStamped> &waypoints,
+    const DistanceField &distance_field,
+    nav_msgs::Path &out_path,
+    unsigned int *control_point_count) const
+{
+  out_path.poses.clear();
+  if (control_point_count != NULL)
+  {
+    *control_point_count = 0;
+  }
+
   std::vector<Point2d> control_points = initializeBsplineControlPoints(waypoints);
   if (control_points.size() < 4)
   {
@@ -285,19 +331,370 @@ bool TrajectoryGenerator::generateBsplineReference(
     return false;
   }
 
-  nav_msgs::Path bspline_path = sampleBsplinePath(control_points, waypoints);
-  if (!pathChecksPass(bspline_path, waypoints, true))
+  out_path = sampleBsplinePath(control_points, waypoints);
+  if (control_point_count != NULL)
   {
-    ROS_WARN("JGL reference path: optimized B-spline failed final safety checks.");
+    *control_point_count = static_cast<unsigned int>(control_points.size());
+  }
+  return out_path.poses.size() >= 2;
+}
+
+bool TrajectoryGenerator::generateChunkedBsplineReference(
+    const std::vector<geometry_msgs::PoseStamped> &waypoints,
+    nav_msgs::Path &out_path)
+{
+  out_path.poses.clear();
+  if (waypoints.size() < 2)
+  {
     return false;
   }
 
-  out_path = bspline_path;
-  last_path_mode_ = PATH_MODE_BSPLINE;
-  last_fallback_segments_.assign(waypoints.size() - 1, 0);
-  ROS_INFO("JGL reference path: generated optimized B-spline path with %zu samples and %zu control points.",
-           out_path.poses.size(), control_points.size());
+  nav_msgs::OccupancyGrid grid;
+  {
+    boost::mutex::scoped_lock lock(costmap_mutex_);
+    if (!have_global_costmap_)
+    {
+      ROS_WARN_THROTTLE(2.0, "JGL reference path: waiting for global costmap before chunked B-spline optimization.");
+      return false;
+    }
+    grid = global_costmap_;
+  }
+
+  DistanceField distance_field;
+  if (!buildDistanceField(grid, distance_field))
+  {
+    ROS_WARN("JGL reference path: failed to build distance field for chunked B-spline optimization.");
+    return false;
+  }
+
+  nav_msgs::Path failed_full_path;
+  buildOptimizedBsplinePath(waypoints, distance_field, failed_full_path, NULL);
+  const std::vector<unsigned int> breakpoints =
+      findBsplineBreakpoints(waypoints, failed_full_path, distance_field);
+
+  nav_msgs::Path path;
+  path.header = waypoints.front().header;
+  path.header.stamp = ros::Time::now();
+
+  const unsigned int segment_count =
+      static_cast<unsigned int>(waypoints.size() - 1);
+  std::vector<int> fallback_segment_flags(segment_count, 0);
+  unsigned int bspline_chunks = 0;
+  unsigned int cubic_chunks = 0;
+  unsigned int polyline_chunks = 0;
+  unsigned int polyline_segments = 0;
+
+  for (unsigned int i = 1; i + 1 < breakpoints.size(); ++i)
+  {
+    const unsigned int breakpoint = breakpoints[i];
+    if (breakpoint > 0 && breakpoint - 1 < fallback_segment_flags.size())
+    {
+      fallback_segment_flags[breakpoint - 1] = 1;
+    }
+    if (breakpoint < fallback_segment_flags.size())
+    {
+      fallback_segment_flags[breakpoint] = 1;
+    }
+  }
+
+  for (unsigned int chunk = 0; chunk + 1 < breakpoints.size(); ++chunk)
+  {
+    const unsigned int start_index = breakpoints[chunk];
+    const unsigned int end_index = breakpoints[chunk + 1];
+    if (start_index >= end_index || end_index >= waypoints.size())
+    {
+      continue;
+    }
+
+    nav_msgs::Path chunk_path;
+    if (generateBsplineChunk(waypoints,
+                             start_index,
+                             end_index,
+                             distance_field,
+                             chunk_path))
+    {
+      ++bspline_chunks;
+      appendPathSegment(path, chunk_path);
+      continue;
+    }
+
+    std::vector<geometry_msgs::PoseStamped> chunk_waypoints;
+    for (unsigned int i = start_index; i <= end_index; ++i)
+    {
+      chunk_waypoints.push_back(waypoints[i]);
+    }
+
+    if (chunk_waypoints.size() >= 3)
+    {
+      chunk_path = catmullRomPath(chunk_waypoints);
+      if (pathChecksPass(chunk_path, waypoints, true))
+      {
+        ++cubic_chunks;
+        ROS_WARN("JGL reference path: chunk [%u,%u] falls back from B-spline to cubic.",
+                 start_index, end_index);
+        appendPathSegment(path, chunk_path);
+        continue;
+      }
+    }
+
+    chunk_path = fallbackPolylinePath(chunk_waypoints);
+    if (!pathChecksPass(chunk_path, waypoints, false))
+    {
+      ROS_ERROR("JGL reference path: chunk [%u,%u] failed B-spline, cubic, and collision-checked polyline.",
+                start_index, end_index);
+      last_path_mode_ = PATH_MODE_INVALID;
+      last_fallback_segments_.clear();
+      return false;
+    }
+
+    ++polyline_chunks;
+    for (unsigned int i = start_index; i < end_index; ++i)
+    {
+      if (i < fallback_segment_flags.size())
+      {
+        fallback_segment_flags[i] = 1;
+        ++polyline_segments;
+      }
+    }
+    ROS_WARN("JGL reference path: chunk [%u,%u] falls back from B-spline/cubic to polyline.",
+             start_index, end_index);
+    appendPathSegment(path, chunk_path);
+  }
+
+  if (path.poses.empty())
+  {
+    last_path_mode_ = PATH_MODE_INVALID;
+    last_fallback_segments_.clear();
+    return false;
+  }
+
+  path.poses.front().pose.position.x = waypoints.front().pose.position.x;
+  path.poses.front().pose.position.y = waypoints.front().pose.position.y;
+  path.poses.back().pose.position.x = waypoints.back().pose.position.x;
+  path.poses.back().pose.position.y = waypoints.back().pose.position.y;
+  applyPathOrientations(path, waypoints.back());
+
+  if (!pathChecksPass(path, waypoints, false))
+  {
+    ROS_WARN("JGL reference path: chunked B-spline path failed final collision/deviation checks.");
+    last_path_mode_ = PATH_MODE_INVALID;
+    last_fallback_segments_.clear();
+    return false;
+  }
+
+  out_path = path;
+  last_fallback_segments_ = fallback_segment_flags;
+  last_path_mode_ =
+      polyline_segments == segment_count ? PATH_MODE_POLYLINE_FALLBACK : PATH_MODE_HYBRID;
+  ROS_WARN("JGL reference path: using chunked B-spline fallback with %zu breakpoints, %u B-spline chunks, %u cubic chunks, %u polyline chunks, %zu samples.",
+           breakpoints.size(), bspline_chunks, cubic_chunks, polyline_chunks, out_path.poses.size());
   return true;
+}
+
+bool TrajectoryGenerator::generateBsplineChunk(
+    const std::vector<geometry_msgs::PoseStamped> &waypoints,
+    unsigned int start_index,
+    unsigned int end_index,
+    const DistanceField &distance_field,
+    nav_msgs::Path &out_path)
+{
+  out_path.poses.clear();
+  if (start_index >= end_index || end_index >= waypoints.size())
+  {
+    return false;
+  }
+
+  std::vector<geometry_msgs::PoseStamped> chunk_waypoints;
+  chunk_waypoints.reserve(end_index - start_index + 1);
+  for (unsigned int i = start_index; i <= end_index; ++i)
+  {
+    chunk_waypoints.push_back(waypoints[i]);
+  }
+
+  nav_msgs::Path chunk_path;
+  if (!buildOptimizedBsplinePath(chunk_waypoints,
+                                 distance_field,
+                                 chunk_path,
+                                 NULL))
+  {
+    return false;
+  }
+
+  if (!pathChecksPass(chunk_path, waypoints, true))
+  {
+    ROS_WARN("JGL reference path: chunk [%u,%u] B-spline failed checks.",
+             start_index, end_index);
+    return false;
+  }
+
+  out_path = chunk_path;
+  return true;
+}
+
+std::vector<unsigned int> TrajectoryGenerator::findBsplineBreakpoints(
+    const std::vector<geometry_msgs::PoseStamped> &waypoints,
+    const nav_msgs::Path &failed_path,
+    const DistanceField &distance_field) const
+{
+  std::vector<unsigned int> breakpoints;
+  if (waypoints.size() < 2)
+  {
+    return breakpoints;
+  }
+
+  const unsigned int last_index =
+      static_cast<unsigned int>(waypoints.size() - 1);
+  breakpoints.push_back(0);
+  breakpoints.push_back(last_index);
+
+  const double max_curvature = effectiveMaxCurvature();
+  for (unsigned int i = 1; i + 1 < waypoints.size(); ++i)
+  {
+    const Point2d a(waypoints[i - 1].pose.position.x,
+                    waypoints[i - 1].pose.position.y);
+    const Point2d b(waypoints[i].pose.position.x,
+                    waypoints[i].pose.position.y);
+    const Point2d c(waypoints[i + 1].pose.position.x,
+                    waypoints[i + 1].pose.position.y);
+    if (max_curvature > 0.0 &&
+        controlPolygonCurvature(a, b, c) > 0.85 * max_curvature)
+    {
+      breakpoints.push_back(i);
+    }
+  }
+
+  for (unsigned int i = 0; i < failed_path.poses.size(); ++i)
+  {
+    bool bad_sample = false;
+
+    double obstacle_distance = 0.0;
+    const Point2d point(failed_path.poses[i].pose.position.x,
+                        failed_path.poses[i].pose.position.y);
+    if (!distanceAtPoint(distance_field, point, obstacle_distance) ||
+        obstacle_distance <= safe_distance_ + 1e-9)
+    {
+      bad_sample = true;
+    }
+
+    if (!bad_sample && max_deviation_from_topo_ > 0.0 &&
+        pointToPolylineDistance(failed_path.poses[i], waypoints) >
+            max_deviation_from_topo_)
+    {
+      bad_sample = true;
+    }
+
+    if (!bad_sample && max_curvature > 0.0 &&
+        pathSampleCurvature(failed_path, i) > max_curvature)
+    {
+      bad_sample = true;
+    }
+
+    if (!bad_sample)
+    {
+      continue;
+    }
+
+    const unsigned int segment =
+        nearestTopoSegmentIndex(failed_path.poses[i], waypoints);
+    if (segment > 0)
+    {
+      breakpoints.push_back(segment);
+    }
+    if (segment + 1 < last_index)
+    {
+      breakpoints.push_back(segment + 1);
+    }
+  }
+
+  if (breakpoints.size() <= 2 && waypoints.size() > 2)
+  {
+    unsigned int best_index = 1;
+    double best_curvature = -1.0;
+    for (unsigned int i = 1; i + 1 < waypoints.size(); ++i)
+    {
+      const Point2d a(waypoints[i - 1].pose.position.x,
+                      waypoints[i - 1].pose.position.y);
+      const Point2d b(waypoints[i].pose.position.x,
+                      waypoints[i].pose.position.y);
+      const Point2d c(waypoints[i + 1].pose.position.x,
+                      waypoints[i + 1].pose.position.y);
+      const double curvature = controlPolygonCurvature(a, b, c);
+      if (curvature > best_curvature)
+      {
+        best_curvature = curvature;
+        best_index = i;
+      }
+    }
+    breakpoints.push_back(best_index);
+  }
+
+  std::sort(breakpoints.begin(), breakpoints.end());
+  breakpoints.erase(std::unique(breakpoints.begin(), breakpoints.end()),
+                    breakpoints.end());
+
+  ROS_WARN("JGL reference path: chunked B-spline found %zu breakpoints.",
+           breakpoints.size());
+  for (unsigned int i = 0; i < breakpoints.size(); ++i)
+  {
+    ROS_DEBUG("JGL reference path: breakpoint[%u]=%u", i, breakpoints[i]);
+  }
+
+  return breakpoints;
+}
+
+unsigned int TrajectoryGenerator::nearestTopoSegmentIndex(
+    const geometry_msgs::PoseStamped &pose,
+    const std::vector<geometry_msgs::PoseStamped> &waypoints) const
+{
+  if (waypoints.size() < 2)
+  {
+    return 0;
+  }
+
+  unsigned int best_index = 0;
+  double best_distance = std::numeric_limits<double>::infinity();
+  for (unsigned int i = 0; i + 1 < waypoints.size(); ++i)
+  {
+    const double distance =
+        pointToSegmentDistance(pose.pose.position.x,
+                               pose.pose.position.y,
+                               waypoints[i],
+                               waypoints[i + 1]);
+    if (distance < best_distance)
+    {
+      best_distance = distance;
+      best_index = i;
+    }
+  }
+  return best_index;
+}
+
+double TrajectoryGenerator::pathSampleCurvature(
+    const nav_msgs::Path &path,
+    unsigned int sample_index) const
+{
+  if (sample_index == 0 || sample_index + 1 >= path.poses.size())
+  {
+    return 0.0;
+  }
+
+  const geometry_msgs::PoseStamped &a = path.poses[sample_index - 1];
+  const geometry_msgs::PoseStamped &b = path.poses[sample_index];
+  const geometry_msgs::PoseStamped &c = path.poses[sample_index + 1];
+  const double ab = poseDistance(a, b);
+  const double bc = poseDistance(b, c);
+  const double ac = poseDistance(a, c);
+  if (ab < 1e-4 || bc < 1e-4 || ac < 1e-4)
+  {
+    return 0.0;
+  }
+
+  const double cross = std::fabs(
+      (b.pose.position.x - a.pose.position.x) *
+          (c.pose.position.y - a.pose.position.y) -
+      (b.pose.position.y - a.pose.position.y) *
+          (c.pose.position.x - a.pose.position.x));
+  return 2.0 * cross / (ab * bc * ac);
 }
 
 std::vector<TrajectoryGenerator::Point2d> TrajectoryGenerator::initializeBsplineControlPoints(
@@ -311,7 +708,7 @@ std::vector<TrajectoryGenerator::Point2d> TrajectoryGenerator::initializeBspline
   }
 
   const int control_count =
-      std::max(4, static_cast<int>(std::ceil(length / bspline_control_point_spacing_)) + 1);
+      std::max(6, static_cast<int>(std::ceil(length / bspline_control_point_spacing_)) + 1);
   control_points.reserve(control_count);
   for (int i = 0; i < control_count; ++i)
   {

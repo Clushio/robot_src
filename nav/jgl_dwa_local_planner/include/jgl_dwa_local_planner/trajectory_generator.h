@@ -110,6 +110,29 @@ private:
 
 	  bool generateBsplineReference(const std::vector<geometry_msgs::PoseStamped> &waypoints,
 	                                nav_msgs::Path &out_path);
+	  bool buildOptimizedBsplinePath(
+	      const std::vector<geometry_msgs::PoseStamped> &waypoints,
+	      const DistanceField &distance_field,
+	      nav_msgs::Path &out_path,
+	      unsigned int *control_point_count) const;
+	  bool generateChunkedBsplineReference(
+	      const std::vector<geometry_msgs::PoseStamped> &waypoints,
+	      nav_msgs::Path &out_path);
+	  bool generateBsplineChunk(
+	      const std::vector<geometry_msgs::PoseStamped> &waypoints,
+	      unsigned int start_index,
+	      unsigned int end_index,
+	      const DistanceField &distance_field,
+	      nav_msgs::Path &out_path);
+	  std::vector<unsigned int> findBsplineBreakpoints(
+	      const std::vector<geometry_msgs::PoseStamped> &waypoints,
+	      const nav_msgs::Path &failed_path,
+	      const DistanceField &distance_field) const;
+	  unsigned int nearestTopoSegmentIndex(
+	      const geometry_msgs::PoseStamped &pose,
+	      const std::vector<geometry_msgs::PoseStamped> &waypoints) const;
+	  double pathSampleCurvature(const nav_msgs::Path &path,
+	                             unsigned int sample_index) const;
 	  bool generateCubicReference(const std::vector<geometry_msgs::PoseStamped> &waypoints,
 	                              nav_msgs::Path &out_path);
 	  std::vector<geometry_msgs::PoseStamped> referenceCurveWaypoints(

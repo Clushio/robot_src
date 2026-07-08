@@ -143,7 +143,7 @@ TEST(TrajectoryGeneratorBspline, WallNearTopoPushesMiddleAway)
   EXPECT_TRUE(generator.checkDeviationFromTopo(path, waypoints));
 }
 
-TEST(TrajectoryGeneratorBspline, TooSharpBsplineFallsBackToLegacyPolyline)
+TEST(TrajectoryGeneratorBspline, TooSharpFullBsplineFallsBackToChunkedBspline)
 {
   ros::Time::init();
   jgl_dwa_local_planner::TrajectoryGenerator generator;
@@ -160,8 +160,14 @@ TEST(TrajectoryGeneratorBspline, TooSharpBsplineFallsBackToLegacyPolyline)
 
   nav_msgs::Path path;
   ASSERT_TRUE(generator.generate(waypoints, path));
-  EXPECT_EQ(jgl_dwa_local_planner::TrajectoryGenerator::PATH_MODE_POLYLINE_FALLBACK,
+  EXPECT_EQ(jgl_dwa_local_planner::TrajectoryGenerator::PATH_MODE_HYBRID,
             generator.lastPathMode());
+  const std::vector<int> fallback_segments = generator.lastFallbackSegments();
+  ASSERT_EQ(waypoints.size() - 1, fallback_segments.size());
+  EXPECT_EQ(0, fallback_segments[0]);
+  EXPECT_EQ(1, fallback_segments[1]);
+  EXPECT_EQ(1, fallback_segments[2]);
+  EXPECT_EQ(0, fallback_segments[3]);
   EXPECT_TRUE(generator.checkCollision(path));
   EXPECT_TRUE(generator.checkDeviationFromTopo(path, waypoints));
   EXPECT_FALSE(generator.checkCurvature(path));
