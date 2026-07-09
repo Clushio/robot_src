@@ -586,6 +586,83 @@ namespace jgl_dwa_local_planner
     return true;
   }
 
+  bool DWAPlannerROS::referenceEntryHeadingAligned(
+      const nav_msgs::Path &reference_path,
+      double *heading_error) const
+  {
+    if (heading_error != NULL)
+    {
+      *heading_error = 0.0;
+    }
+    if (reference_path.poses.size() < 2)
+    {
+      return true;
+    }
+
+    const unsigned int current_index =
+        std::min(reference_path_manager_.currentPathIndex(),
+                 static_cast<unsigned int>(reference_path.poses.size() - 1));
+    const double entry_distance =
+        std::hypot(current_pose_.pose.position.x -
+                       reference_path.poses.front().pose.position.x,
+                   current_pose_.pose.position.y -
+                       reference_path.poses.front().pose.position.y);
+    const double entry_gate_distance =
+        std::max(0.60, path_follower_.lookaheadDistance() + 0.20);
+    if (current_index > 6 && entry_distance > entry_gate_distance)
+    {
+      return true;
+    }
+
+    unsigned int tangent_index = current_index;
+    double walked = 0.0;
+    for (unsigned int i = current_index + 1; i < reference_path.poses.size(); ++i)
+    {
+      walked += std::hypot(reference_path.poses[i].pose.position.x -
+                               reference_path.poses[i - 1].pose.position.x,
+                           reference_path.poses[i].pose.position.y -
+                               reference_path.poses[i - 1].pose.position.y);
+      tangent_index = i;
+      if (walked >= 0.30)
+      {
+        break;
+      }
+    }
+
+    if (tangent_index <= current_index)
+    {
+      return true;
+    }
+
+    const geometry_msgs::PoseStamped &from = reference_path.poses[current_index];
+    const geometry_msgs::PoseStamped &to = reference_path.poses[tangent_index];
+    const double dx = to.pose.position.x - from.pose.position.x;
+    const double dy = to.pose.position.y - from.pose.position.y;
+    if (std::hypot(dx, dy) < 1e-4)
+    {
+      return true;
+    }
+
+    const double path_yaw = std::atan2(dy, dx);
+    const double robot_yaw = tf::getYaw(current_pose_.pose.orientation);
+    double error = path_yaw - robot_yaw;
+    if (error <= -PI)
+    {
+      error += 2.0 * PI;
+    }
+    else if (error >= PI)
+    {
+      error -= 2.0 * PI;
+    }
+
+    if (heading_error != NULL)
+    {
+      *heading_error = error;
+    }
+    const double tolerance = std::max(0.35, static_cast<double>(angle_err_H) * 1.5);
+    return std::fabs(error) <= tolerance;
+  }
+
   void DWAPlannerROS::forceLegacyLineRotate(const char *reason)
   {
     if (legacy_line_forced_goal_index_ == current_topology_goal_index_)
@@ -784,6 +861,17 @@ namespace jgl_dwa_local_planner
                         distance_to_reference,
                         nearest_reference_index,
                         path_deviation_replan_threshold_);
+      return false;
+    }
+
+    double reference_entry_heading_error = 0.0;
+    if (!referenceEntryHeadingAligned(reference_path,
+                                      &reference_entry_heading_error))
+    {
+      forceLegacyLineRotate("reference_entry_heading_misaligned");
+      ROS_WARN_THROTTLE(1.0,
+                        "JGL reference path: entry heading error %.3f rad is too large, use legacy rotate-line before reference tracking.",
+                        reference_entry_heading_error);
       return false;
     }
 

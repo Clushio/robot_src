@@ -108,7 +108,7 @@ bool TrajectoryGenerator::generate(const std::vector<geometry_msgs::PoseStamped>
     return false;
   }
 
-  if (reference_curve_type_ == "bspline")
+  if (reference_curve_type_ == "bspline" && curve_waypoints.size() >= 3)
   {
     nav_msgs::Path bspline_path;
     if (generateBsplineReference(curve_waypoints, bspline_path))
@@ -184,6 +184,25 @@ bool TrajectoryGenerator::generateCubicReference(
     nav_msgs::Path &out_path)
 {
   out_path.poses.clear();
+  if (waypoints.size() < 3)
+  {
+    nav_msgs::Path fallback_path = fallbackPolylinePath(waypoints);
+    if (pathChecksPass(fallback_path, waypoints, false))
+    {
+      out_path = fallback_path;
+      last_path_mode_ = PATH_MODE_POLYLINE_FALLBACK;
+      last_fallback_segments_.assign(waypoints.size() > 0 ? waypoints.size() - 1 : 0, 1);
+      ROS_WARN("JGL reference path: cubic needs at least 3 curve waypoints, using collision-checked polyline fallback with %zu samples.",
+               out_path.poses.size());
+      return true;
+    }
+
+    ROS_ERROR("JGL reference path: short cubic/polyline fallback failed checks.");
+    last_path_mode_ = PATH_MODE_INVALID;
+    last_fallback_segments_.clear();
+    return false;
+  }
+
   nav_msgs::Path spline_path = catmullRomPath(waypoints);
   if (pathChecksPass(spline_path, waypoints, true))
   {
@@ -265,6 +284,10 @@ bool TrajectoryGenerator::generateBsplineReference(
     nav_msgs::Path &out_path)
 {
   out_path.poses.clear();
+  if (waypoints.size() < 3)
+  {
+    return false;
+  }
 
   nav_msgs::OccupancyGrid grid;
   {
@@ -315,6 +338,11 @@ bool TrajectoryGenerator::buildOptimizedBsplinePath(
     unsigned int *control_point_count) const
 {
   out_path.poses.clear();
+  if (waypoints.size() < 3)
+  {
+    return false;
+  }
+
   if (control_point_count != NULL)
   {
     *control_point_count = 0;
@@ -344,7 +372,7 @@ bool TrajectoryGenerator::generateChunkedBsplineReference(
     nav_msgs::Path &out_path)
 {
   out_path.poses.clear();
-  if (waypoints.size() < 2)
+  if (waypoints.size() < 3)
   {
     return false;
   }
@@ -499,7 +527,7 @@ bool TrajectoryGenerator::generateBsplineChunk(
     nav_msgs::Path &out_path)
 {
   out_path.poses.clear();
-  if (start_index >= end_index || end_index >= waypoints.size())
+  if (start_index + 1 >= end_index || end_index >= waypoints.size())
   {
     return false;
   }

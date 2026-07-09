@@ -241,6 +241,8 @@ namespace jgl_dwa_local_planner
       void publishReferencePathMarker(const nav_msgs::Path &path,
                                       TrajectoryGenerator::PathMode path_mode) const;
       bool referencePathCanFollowGoal(int goal_index) const;
+      bool referenceEntryHeadingAligned(const nav_msgs::Path &reference_path,
+                                        double *heading_error) const;
       void forceLegacyLineRotate(const char *reason);
       bool syncReferencePathIndex(double *distance_to_reference,
                                   unsigned int *nearest_index);

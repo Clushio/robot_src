@@ -95,6 +95,7 @@ TEST(TrajectoryGeneratorBspline, StraightLineUsesSecondToPenultimateEndpoints)
   waypoints.push_back(makePose(1.0, 0.0));
   waypoints.push_back(makePose(2.0, 0.0));
   waypoints.push_back(makePose(3.0, 0.0));
+  waypoints.push_back(makePose(4.0, 0.0));
 
   nav_msgs::Path path;
   ASSERT_TRUE(generator.generate(waypoints, path));
@@ -103,7 +104,7 @@ TEST(TrajectoryGeneratorBspline, StraightLineUsesSecondToPenultimateEndpoints)
   ASSERT_GE(path.poses.size(), 2U);
   EXPECT_NEAR(1.0, path.poses.front().pose.position.x, 1e-9);
   EXPECT_NEAR(0.0, path.poses.front().pose.position.y, 1e-9);
-  EXPECT_NEAR(2.0, path.poses.back().pose.position.x, 1e-9);
+  EXPECT_NEAR(3.0, path.poses.back().pose.position.x, 1e-9);
   EXPECT_NEAR(0.0, path.poses.back().pose.position.y, 1e-9);
 
   for (unsigned int i = 0; i < path.poses.size(); ++i)
@@ -160,7 +161,7 @@ TEST(TrajectoryGeneratorBspline, TooSharpFullBsplineFallsBackToChunkedBspline)
 
   nav_msgs::Path path;
   ASSERT_TRUE(generator.generate(waypoints, path));
-  EXPECT_EQ(jgl_dwa_local_planner::TrajectoryGenerator::PATH_MODE_HYBRID,
+  EXPECT_EQ(jgl_dwa_local_planner::TrajectoryGenerator::PATH_MODE_POLYLINE_FALLBACK,
             generator.lastPathMode());
   const std::vector<int> fallback_segments = generator.lastFallbackSegments();
   ASSERT_EQ(waypoints.size() - 1, fallback_segments.size());
@@ -171,6 +172,32 @@ TEST(TrajectoryGeneratorBspline, TooSharpFullBsplineFallsBackToChunkedBspline)
   EXPECT_TRUE(generator.checkCollision(path));
   EXPECT_TRUE(generator.checkDeviationFromTopo(path, waypoints));
   EXPECT_FALSE(generator.checkCurvature(path));
+}
+
+TEST(TrajectoryGeneratorBspline, TwoCurveWaypointReferenceMarksSecondToThirdSegmentPolyline)
+{
+  ros::Time::init();
+  jgl_dwa_local_planner::TrajectoryGenerator generator;
+  generator.setGlobalCostmapForTesting(makeFreeGrid(-1.0, -1.0, 0.05, 60, 60));
+  generator.setReferenceLimitsForTesting(0.05, 0.0, 1.0, 2.0, 0.48);
+
+  std::vector<geometry_msgs::PoseStamped> waypoints;
+  waypoints.push_back(makePose(0.0, 0.0));
+  waypoints.push_back(makePose(0.4, 0.0));
+  waypoints.push_back(makePose(0.4, 0.4));
+  waypoints.push_back(makePose(0.8, 0.4));
+
+  nav_msgs::Path path;
+  ASSERT_TRUE(generator.generate(waypoints, path));
+  EXPECT_EQ(jgl_dwa_local_planner::TrajectoryGenerator::PATH_MODE_POLYLINE_FALLBACK,
+            generator.lastPathMode());
+
+  const std::vector<int> fallback_segments = generator.lastFallbackSegments();
+  ASSERT_EQ(waypoints.size() - 1, fallback_segments.size());
+  EXPECT_EQ(0, fallback_segments[0]);
+  EXPECT_EQ(1, fallback_segments[1]);
+  EXPECT_EQ(0, fallback_segments[2]);
+  EXPECT_TRUE(generator.checkCollision(path));
 }
 
 TEST(PathFollowerAckermannOnly, CommandNeverUsesCrabOrReverse)
