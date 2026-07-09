@@ -660,9 +660,24 @@ class MyWindow(QWidget):
 
     def nav5(self):
                   # 定义要执行的 ROS 命令
-        ros_command = 'roslaunch robot_r 5nav.launch'          
-            # 构建完整的终端命令，使用 gnome-terminal 打开新的终端窗口并执行 ROS 命令
-        terminal_command = ['gnome-terminal', '--', 'bash', '-c', ros_command + '; exec bash']          
+        ros_command = 'roslaunch robot_r 5nav.launch'
+        move_base_command = (
+            'bash -lc "' + ros_command.replace('\\', '\\\\').replace('"', '\\"') +
+            '; exec bash"'
+        )
+        bspline_log_command = (
+            'bash -lc "'
+            'echo \\"[B-spline] Only showing JGL reference path logs.\\"; '
+            'echo \\"[B-spline] Press Ctrl+C to stop this log view.\\"; '
+            'rostopic echo /rosout_agg/msg | grep --line-buffered \\"JGL reference path\\"; '
+            'exec bash"'
+        )
+            # 使用同一个 gnome-terminal 窗口的两个 tab：MoveBase 和 B-spline 日志
+        terminal_command = [
+            'gnome-terminal',
+            '--window', '--title=MoveBase', '--command=' + move_base_command,
+            '--tab', '--title=B-spline Log', '--command=' + bspline_log_command
+        ]
             # 使用 subprocess.Popen 启动新的终端
         self.run5NavProcess = subprocess.Popen(terminal_command, preexec_fn=os.setpgrp)  # 记录进程     
 

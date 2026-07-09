@@ -778,6 +778,14 @@ bool TrajectoryGenerator::optimizeBsplineControlPoints(
       safe_distance_ + std::max(distance_field.resolution, 0.02);
   const double max_curvature = effectiveMaxCurvature();
   const double max_step = std::min(0.06, 0.25 * bspline_control_point_spacing_);
+  double current_cost = bsplineOptimizationCost(control_points, waypoints, distance_field);
+  if (!std::isfinite(current_cost))
+  {
+    return false;
+  }
+  const double initial_cost = current_cost;
+  int accepted_iterations = 0;
+  int stalled_iterations = 0;
 
   for (int iter = 0; iter < bspline_opt_iterations_; ++iter)
   {
@@ -884,6 +892,7 @@ bool TrajectoryGenerator::optimizeBsplineControlPoints(
       }
     }
 
+    bool have_update = false;
     for (unsigned int i = 0; i < control_points.size(); ++i)
     {
       if (isFixedControlPoint(i, control_points.size()))
@@ -891,17 +900,215 @@ bool TrajectoryGenerator::optimizeBsplineControlPoints(
         continue;
       }
       limitPointStep(deltas[i], max_step);
-      const Point2d candidate = pointAdd(control_points[i], deltas[i]);
-      double candidate_distance = 0.0;
-      if (!distanceAtPoint(distance_field, candidate, candidate_distance))
+      if (pointNorm(deltas[i]) > 1e-7)
       {
-        continue;
+        have_update = true;
       }
-      control_points[i] = candidate;
+    }
+
+    if (!have_update)
+    {
+      break;
+    }
+
+    const std::vector<Point2d> previous_control_points = control_points;
+    std::vector<Point2d> accepted_control_points;
+    double accepted_cost = current_cost;
+    double accepted_step = 0.0;
+    bool accepted = false;
+
+    double step_scale = 1.0;
+    for (int trial = 0; trial < 8; ++trial)
+    {
+      std::vector<Point2d> candidate_control_points = previous_control_points;
+      bool candidate_valid = true;
+      double max_applied_step = 0.0;
+
+      for (unsigned int i = 0; i < candidate_control_points.size(); ++i)
+      {
+        if (isFixedControlPoint(i, candidate_control_points.size()))
+        {
+          continue;
+        }
+
+        const Point2d step = pointScale(deltas[i], step_scale);
+        const Point2d candidate =
+            pointAdd(previous_control_points[i], step);
+        double candidate_distance = 0.0;
+        if (!distanceAtPoint(distance_field, candidate, candidate_distance))
+        {
+          candidate_valid = false;
+          break;
+        }
+        candidate_control_points[i] = candidate;
+        max_applied_step = std::max(max_applied_step, pointNorm(step));
+      }
+
+      if (candidate_valid)
+      {
+        const double candidate_cost =
+            bsplineOptimizationCost(candidate_control_points, waypoints, distance_field);
+        if (std::isfinite(candidate_cost) &&
+            candidate_cost <= current_cost + 1e-9)
+        {
+          accepted_control_points.swap(candidate_control_points);
+          accepted_cost = candidate_cost;
+          accepted_step = max_applied_step;
+          accepted = true;
+          break;
+        }
+      }
+
+      step_scale *= 0.5;
+    }
+
+    if (!accepted)
+    {
+      break;
+    }
+
+    const double improvement = current_cost - accepted_cost;
+    control_points.swap(accepted_control_points);
+    current_cost = accepted_cost;
+    ++accepted_iterations;
+
+    const double cost_tolerance =
+        1e-5 * std::max(1.0, std::fabs(current_cost));
+    if (improvement <= cost_tolerance || accepted_step < 1e-4)
+    {
+      ++stalled_iterations;
+    }
+    else
+    {
+      stalled_iterations = 0;
+    }
+
+    if (stalled_iterations >= 3)
+    {
+      break;
     }
   }
 
+  ROS_DEBUG("JGL reference path: B-spline optimization cost %.6f -> %.6f in %d/%d accepted iterations.",
+            initial_cost,
+            current_cost,
+            accepted_iterations,
+            bspline_opt_iterations_);
   return true;
+}
+
+double TrajectoryGenerator::bsplineOptimizationCost(
+    const std::vector<Point2d> &control_points,
+    const std::vector<geometry_msgs::PoseStamped> &waypoints,
+    const DistanceField &distance_field) const
+{
+  if (control_points.size() < 4 || waypoints.empty() || !distance_field.valid)
+  {
+    return std::numeric_limits<double>::infinity();
+  }
+
+  const double topo_length = std::max(topoPolylineLength(waypoints), sample_resolution_);
+  const int sample_count =
+      std::max(8, static_cast<int>(std::ceil(topo_length / sample_resolution_)));
+  const double obstacle_push_distance =
+      safe_distance_ + std::max(distance_field.resolution, 0.02);
+  const double topo_scale =
+      std::max(std::max(max_deviation_from_topo_, bspline_control_point_spacing_), 0.10);
+  const double smooth_scale =
+      std::max(bspline_control_point_spacing_ * bspline_control_point_spacing_, 1e-4);
+  const double max_curvature = effectiveMaxCurvature();
+
+  double smooth_cost = 0.0;
+  int smooth_count = 0;
+  for (unsigned int i = 1; i + 1 < control_points.size(); ++i)
+  {
+    const Point2d second_difference = pointAdd(
+        pointSub(control_points[i - 1], pointScale(control_points[i], 2.0)),
+        control_points[i + 1]);
+    smooth_cost += (second_difference.x * second_difference.x +
+                    second_difference.y * second_difference.y) /
+                   smooth_scale;
+    ++smooth_count;
+  }
+  if (smooth_count > 0)
+  {
+    smooth_cost /= static_cast<double>(smooth_count);
+  }
+
+  double obstacle_cost = 0.0;
+  double topo_cost = 0.0;
+  std::vector<Point2d> samples;
+  samples.reserve(sample_count + 1);
+  for (int sample = 0; sample <= sample_count; ++sample)
+  {
+    const double u = static_cast<double>(sample) / static_cast<double>(sample_count);
+    Point2d point;
+    if (!evaluateBspline(control_points, u, point))
+    {
+      return std::numeric_limits<double>::infinity();
+    }
+    samples.push_back(point);
+
+    double obstacle_distance = 0.0;
+    if (!distanceAtPoint(distance_field, point, obstacle_distance))
+    {
+      return std::numeric_limits<double>::infinity();
+    }
+    if (obstacle_distance < obstacle_push_distance)
+    {
+      const double normalized_penalty =
+          (obstacle_push_distance - obstacle_distance) /
+          std::max(obstacle_push_distance, 0.05);
+      obstacle_cost += normalized_penalty * normalized_penalty;
+    }
+
+    const Point2d topo_projection = projectPointToTopo(point, waypoints);
+    const double topo_distance = pointDistance(point, topo_projection);
+    const double normalized_deviation = topo_distance / topo_scale;
+    topo_cost += normalized_deviation * normalized_deviation;
+    if (max_deviation_from_topo_ > 1e-6 &&
+        topo_distance > max_deviation_from_topo_)
+    {
+      const double excess =
+          (topo_distance - max_deviation_from_topo_) /
+          max_deviation_from_topo_;
+      topo_cost += 4.0 * excess * excess;
+    }
+  }
+
+  const double sample_normalizer =
+      1.0 / static_cast<double>(std::max(1, sample_count + 1));
+  obstacle_cost *= sample_normalizer;
+  topo_cost *= sample_normalizer;
+
+  double curvature_cost = 0.0;
+  int curvature_count = 0;
+  if (max_curvature > 1e-6)
+  {
+    for (unsigned int i = 1; i + 1 < samples.size(); ++i)
+    {
+      const double curvature =
+          controlPolygonCurvature(samples[i - 1], samples[i], samples[i + 1]);
+      if (curvature > max_curvature)
+      {
+        const double normalized_excess =
+            (curvature - max_curvature) / max_curvature;
+        curvature_cost += normalized_excess * normalized_excess;
+      }
+      ++curvature_count;
+    }
+  }
+  if (curvature_count > 0)
+  {
+    curvature_cost /= static_cast<double>(curvature_count);
+  }
+
+  const double cost =
+      bspline_weight_smooth_ * smooth_cost +
+      bspline_weight_obstacle_ * obstacle_cost +
+      bspline_weight_topo_ * topo_cost +
+      bspline_weight_curvature_ * curvature_cost;
+  return std::isfinite(cost) ? cost : std::numeric_limits<double>::infinity();
 }
 
 nav_msgs::Path TrajectoryGenerator::sampleBsplinePath(

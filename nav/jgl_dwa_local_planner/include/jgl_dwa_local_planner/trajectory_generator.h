@@ -146,6 +146,10 @@ private:
 	      std::vector<Point2d> &control_points,
 	      const std::vector<geometry_msgs::PoseStamped> &waypoints,
 	      const DistanceField &distance_field) const;
+	  double bsplineOptimizationCost(
+	      const std::vector<Point2d> &control_points,
+	      const std::vector<geometry_msgs::PoseStamped> &waypoints,
+	      const DistanceField &distance_field) const;
 	  nav_msgs::Path sampleBsplinePath(
 	      const std::vector<Point2d> &control_points,
 	      const std::vector<geometry_msgs::PoseStamped> &waypoints) const;
