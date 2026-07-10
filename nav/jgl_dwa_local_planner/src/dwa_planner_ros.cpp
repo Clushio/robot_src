@@ -570,16 +570,9 @@ namespace jgl_dwa_local_planner
     }
 
     const int incoming_segment = goal_index - 1;
-    const int outgoing_segment = goal_index;
     if (incoming_segment >= 0 &&
         incoming_segment < static_cast<int>(reference_fallback_segments_.size()) &&
         reference_fallback_segments_[incoming_segment] != 0)
-    {
-      return false;
-    }
-    if (outgoing_segment >= 0 &&
-        outgoing_segment < static_cast<int>(reference_fallback_segments_.size()) &&
-        reference_fallback_segments_[outgoing_segment] != 0)
     {
       return false;
     }

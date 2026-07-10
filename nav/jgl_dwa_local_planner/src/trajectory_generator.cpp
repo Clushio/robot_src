@@ -412,19 +412,6 @@ bool TrajectoryGenerator::generateChunkedBsplineReference(
   unsigned int polyline_chunks = 0;
   unsigned int polyline_segments = 0;
 
-  for (unsigned int i = 1; i + 1 < breakpoints.size(); ++i)
-  {
-    const unsigned int breakpoint = breakpoints[i];
-    if (breakpoint > 0 && breakpoint - 1 < fallback_segment_flags.size())
-    {
-      fallback_segment_flags[breakpoint - 1] = 1;
-    }
-    if (breakpoint < fallback_segment_flags.size())
-    {
-      fallback_segment_flags[breakpoint] = 1;
-    }
-  }
-
   for (unsigned int chunk = 0; chunk + 1 < breakpoints.size(); ++chunk)
   {
     const unsigned int start_index = breakpoints[chunk];
