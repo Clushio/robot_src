@@ -24,6 +24,7 @@ DWAPlannerROS:
   max_deviation_from_topo: 0.50
   max_curvature: 2.10
   min_turn_radius: 0.476
+  reference_fallback_boundary_distance: 0.15
   lookahead_distance: 0.50
   v_min: 0.04
   v_max: 0.20

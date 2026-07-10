@@ -241,6 +241,7 @@ namespace jgl_dwa_local_planner
       void publishReferencePathMarker(const nav_msgs::Path &path,
                                       TrajectoryGenerator::PathMode path_mode) const;
       bool referencePathCanFollowGoal(int goal_index) const;
+      bool referenceGoalExitsToFallback(int goal_index) const;
       bool referenceEntryHeadingAligned(const nav_msgs::Path &reference_path,
                                         double *heading_error) const;
       void forceLegacyLineRotate(const char *reason);
@@ -280,6 +281,7 @@ namespace jgl_dwa_local_planner
       std::vector<geometry_msgs::PoseStamped> linePath; //将直线存到此中
       bool enable_bspline_reference_path_;
       double reference_safe_distance_;
+      double reference_fallback_boundary_distance_;
       double obstacle_wait_time_;
       double path_deviation_replan_threshold_;
       ros::Time reference_obstacle_start_;

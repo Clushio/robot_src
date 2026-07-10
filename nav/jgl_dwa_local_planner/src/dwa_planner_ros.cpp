@@ -128,6 +128,7 @@ namespace jgl_dwa_local_planner
   {
     enable_bspline_reference_path_ = false;
     reference_safe_distance_ = 0.25;
+    reference_fallback_boundary_distance_ = 0.15;
     obstacle_wait_time_ = 10.0;
     path_deviation_replan_threshold_ = 0.60;
     reference_obstacle_start_ = ros::Time(0);
@@ -579,6 +580,20 @@ namespace jgl_dwa_local_planner
     return true;
   }
 
+  bool DWAPlannerROS::referenceGoalExitsToFallback(int goal_index) const
+  {
+    if (reference_path_mode_ != TrajectoryGenerator::PATH_MODE_HYBRID ||
+        goal_index < 0)
+    {
+      return false;
+    }
+
+    const int outgoing_segment = goal_index;
+    return outgoing_segment >= 0 &&
+           outgoing_segment < static_cast<int>(reference_fallback_segments_.size()) &&
+           reference_fallback_segments_[outgoing_segment] != 0;
+  }
+
   bool DWAPlannerROS::referenceEntryHeadingAligned(
       const nav_msgs::Path &reference_path,
       double *heading_error) const
@@ -706,11 +721,46 @@ namespace jgl_dwa_local_planner
       return false;
     }
 
+    unsigned int reached_goal_path_index = 0;
+    double reached_remaining_reference_distance = 0.0;
+    double reached_goal_distance = 0.0;
     const double pass_distance =
         std::max(static_cast<double>(xdis), 0.5 * path_follower_.lookaheadDistance());
-    return reference_path_manager_.referenceProgressReached(
-        linePath.back(), current_pose_, pass_distance, goal_path_index,
-        remaining_reference_distance, goal_distance);
+    const bool reached = reference_path_manager_.referenceProgressReached(
+        linePath.back(), current_pose_, pass_distance, &reached_goal_path_index,
+        &reached_remaining_reference_distance, &reached_goal_distance);
+
+    if (goal_path_index != NULL)
+    {
+      *goal_path_index = reached_goal_path_index;
+    }
+    if (remaining_reference_distance != NULL)
+    {
+      *remaining_reference_distance = reached_remaining_reference_distance;
+    }
+    if (goal_distance != NULL)
+    {
+      *goal_distance = reached_goal_distance;
+    }
+
+    if (!reached)
+    {
+      return false;
+    }
+
+    if (referenceGoalExitsToFallback(current_topology_goal_index_) &&
+        reached_goal_distance > reference_fallback_boundary_distance_)
+    {
+      ROS_INFO_THROTTLE(
+          1.0,
+          "JGL reference path: goal_idx=%d is before fallback; wait for direct distance %.3f <= %.3f before switching to legacy rotate-line.",
+          current_topology_goal_index_,
+          reached_goal_distance,
+          reference_fallback_boundary_distance_);
+      return false;
+    }
+
+    return true;
   }
 
   bool DWAPlannerROS::costmapPointBlocked(costmap_2d::Costmap2D *costmap,
@@ -982,10 +1032,14 @@ namespace jgl_dwa_local_planner
         private_nh.param("enable_bspline_reference_path",
                          enable_bspline_reference_path_, false);
         private_nh.param("safe_distance", reference_safe_distance_, 0.25);
+        private_nh.param("reference_fallback_boundary_distance",
+                         reference_fallback_boundary_distance_, 0.15);
         private_nh.param("obstacle_wait_time", obstacle_wait_time_, 10.0);
         private_nh.param("path_deviation_replan_threshold",
                          path_deviation_replan_threshold_, 0.60);
         reference_safe_distance_ = std::max(0.0, reference_safe_distance_);
+        reference_fallback_boundary_distance_ =
+            std::max(0.02, reference_fallback_boundary_distance_);
         obstacle_wait_time_ = std::max(0.0, obstacle_wait_time_);
         path_deviation_replan_threshold_ =
             std::max(0.05, path_deviation_replan_threshold_);
