@@ -4,6 +4,7 @@
 #include <x2bot_teleop/SetTagY.h>
 #include <tf/transform_datatypes.h> // 用于处理四元数
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 
 namespace {
@@ -23,6 +24,15 @@ double normalizeAngleRad(double angle) {
     }
     return angle;
 }
+
+class ActiveControlGuard {
+public:
+    explicit ActiveControlGuard(std::atomic<bool>& active) : active_(active) {}
+    ~ActiveControlGuard() { active_.store(false); }
+
+private:
+    std::atomic<bool>& active_;
+};
 }
 
 class RobotController {
@@ -44,6 +54,7 @@ public:
           yaw_stable_required_(5),
           tag_update_seq_(0),
           last_yaw_stable_seq_(0),
+          control_active_(false),
           last_update_time_(ros::Time(0)) {
         // 初始化参数
         ros::NodeHandle private_nh("~");
@@ -135,6 +146,7 @@ private:
     int yaw_stable_required_;
     unsigned int tag_update_seq_;
     unsigned int last_yaw_stable_seq_;
+    std::atomic<bool> control_active_;
 
     enum State { ROTATING, CORRECTING_X, MOVING_Y_YAW, FINAL_CORRECTING_X };
     State state_ = ROTATING;       // 初始状态为旋转
@@ -324,6 +336,14 @@ private:
 
     // 服务回调函数
     bool handleSetTargetY(x2bot_teleop::SetTagY::Request& req, x2bot_teleop::SetTagY::Response& res) {
+        bool expected = false;
+        if (!control_active_.compare_exchange_strong(expected, true)) {
+            ROS_WARN("[TAGCTL] Reject a new target because another Tag control request is still active.");
+            res.success = false;
+            return true;
+        }
+        ActiveControlGuard control_guard(control_active_);
+
         target_x_m_ = req.target_x;
         target_y_m_ = req.target_y;
         target_yaw_rad_ = degToRad(req.target_angle);
@@ -336,11 +356,21 @@ private:
 
         ros::Rate rate(30);  // 30 Hz
         while (ros::ok()) {
+            // The service callback is blocking. Process /tag_position before
+            // checking validity so a request that started without a visible
+            // tag can recover as soon as MM3V sees the tag later.
+            ros::spinOnce();
+
             // 检查数据是否过期
             if (isDataStale() || (current_valid_ <0) ) {
                 ROS_WARN_THROTTLE(1.0, "[TAGCTL] Tag position data is stale or invalid. Stopping the robot.");
                 publishStop(rate, 3);
                 for (int i = 0; i < 20 && ros::ok(); ++i) {
+                    ros::spinOnce();
+                    if (!isDataStale() && current_valid_ >= 0) {
+                        ROS_INFO("[TAGCTL] Tag data became valid; resume the active control request.");
+                        break;
+                    }
                     rate.sleep();
                 }
                 continue;
@@ -504,12 +534,11 @@ private:
                 }
             }
 
-            ros::spinOnce();
             rate.sleep();
         }
 
         res.success = false;
-        return false;
+        return true;
     }
 };
 

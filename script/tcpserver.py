@@ -3,6 +3,7 @@ import threading
 import time
 import json
 import subprocess
+import re
 
 
 class TCPServer:
@@ -12,6 +13,57 @@ class TCPServer:
         self.port = port
         self.server_socket = None
         self.clients = []
+
+    def parse_rosservice_success(self, output):
+        text = output.decode('utf-8', errors='replace')
+        match = re.search(
+            r'(?m)^\s*success:\s*(true|false|True|False|1|0)\s*$',
+            text
+        )
+        if not match:
+            print(f"Cannot parse service success from output:\n{text}")
+            return False
+        return match.group(1).lower() in ('true', '1')
+
+    def wait_for_service(self, service_name, timeout=10.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            check = subprocess.run(
+                ["rosservice", "info", service_name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            if check.returncode == 0:
+                return True
+            time.sleep(0.2)
+        print(f"Service {service_name} is not available after {timeout:.1f}s")
+        return False
+
+    def call_rosservice(self, service_name, request_args, retries=3):
+        if not self.wait_for_service(service_name):
+            return None
+
+        command = ["rosservice", "call", service_name] + list(request_args)
+        for attempt in range(1, retries + 1):
+            try:
+                return subprocess.check_output(command, stderr=subprocess.STDOUT)
+            except subprocess.CalledProcessError as e:
+                detail = e.output.decode('utf-8', errors='replace').strip()
+                print(
+                    f"Service call {service_name} failed "
+                    f"(attempt {attempt}/{retries}, returncode={e.returncode}):\n{detail}"
+                )
+            except OSError as e:
+                print(
+                    f"Cannot execute rosservice for {service_name} "
+                    f"(attempt {attempt}/{retries}): {e}"
+                )
+
+            if attempt < retries:
+                time.sleep(0.5)
+                if not self.wait_for_service(service_name, timeout=3.0):
+                    break
+        return None
 
     def start(self):
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -55,15 +107,14 @@ class TCPServer:
             # Call rosservice asynchronously
             def call_service():
                 nonlocal result
-                try:
-                    request_msg = f"{{data: {id}, currentID: {cid}, run: 1}}"
-                    output = subprocess.check_output(
-                        ["rosservice", "call", "/plan_path_and_go", request_msg],
-                        stderr=subprocess.STDOUT
-                    )
-                    result = "success" in output.decode('utf-8').lower()
-                except Exception as e:
-                    print(f"Service call failed: {e}")
+                service_request = (
+                    f"{{data: {int(id)}, currentID: {int(cid)}, run: 1}}"
+                )
+                output = self.call_rosservice(
+                    "/plan_path_and_go", [service_request]
+                )
+                if output is not None:
+                    result = self.parse_rosservice_success(output)
 
             service_thread = threading.Thread(target=call_service)
             service_thread.start()
@@ -95,18 +146,15 @@ class TCPServer:
             # Call rosservice asynchronously
             def call_service():
                 nonlocal result
-                try:
-                    service_request = (
-                        f"{{target_x: {target_x/100}, target_y: {target_y/100}, "
-                        f"target_angle: {target_angle}}}"
-                    )
-                    output = subprocess.check_output(
-                        ["rosservice", "call", "/set_target_y", service_request],
-                        stderr=subprocess.STDOUT
-                    )
-                    result = "success" in output.decode('utf-8').lower()
-                except Exception as e:
-                    print(f"Service call failed: {e}")
+                service_request = (
+                    f"{{target_x: {target_x/100}, target_y: {target_y/100}, "
+                    f"target_angle: {target_angle}}}"
+                )
+                output = self.call_rosservice(
+                    "/set_target_y", [service_request]
+                )
+                if output is not None:
+                    result = self.parse_rosservice_success(output)
 
             service_thread = threading.Thread(target=call_service)
             service_thread.start()

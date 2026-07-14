@@ -21,6 +21,9 @@
     <param name="output_topic" value="/tag_position"/>
     <param name="output_meter" value="false"/>
     <param name="publish_no_tag" value="true"/>
+    <!-- Hold the last valid Tag briefly so heartbeat/no-tag frames do not
+         alternate /tag_position between valid and z=-99. -->
+    <param name="tag_lost_timeout" value="0.5"/>
     <param name="x_sign" value="$(arg x_sign)"/>
     <param name="y_sign" value="$(arg y_sign)"/>
     <param name="yaw_sign" value="$(arg yaw_sign)"/>

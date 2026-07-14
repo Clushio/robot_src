@@ -33,6 +33,7 @@ class MM3VSerialReader:
         self.output_meter = rospy.get_param("~output_meter", False)
         self.output_topic = rospy.get_param("~output_topic", "/tag_position")
         self.publish_no_tag = rospy.get_param("~publish_no_tag", True)
+        self.tag_lost_timeout = max(0.0, float(rospy.get_param("~tag_lost_timeout", 0.5)))
         self.udp_feedback_enable = rospy.get_param("~udp_feedback_enable", True)
         self.udp_feedback_host = rospy.get_param("~udp_feedback_host", "192.168.3.17")
         self.udp_feedback_port = rospy.get_param("~udp_feedback_port", 22222)
@@ -57,6 +58,7 @@ class MM3VSerialReader:
 
         self.buffer = bytearray()
         self.latest_position = None
+        self.last_valid_monotonic = None
         self.lock = threading.Lock()
         self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.last_udp_feedback_time = rospy.Time(0)
@@ -163,8 +165,6 @@ class MM3VSerialReader:
                     1.0,
                     f"[MM3V] Invalid pixel coordinate. Xp={xp_pixel}, Yp={yp_pixel}, frame={self.bytes_to_hex_string(data)}"
                 )
-                with self.lock:
-                    self.latest_position = None
                 return None
 
             bx, by, ba = converted
@@ -187,15 +187,14 @@ class MM3VSerialReader:
 
             with self.lock:
                 self.latest_position = result
+                self.last_valid_monotonic = time.monotonic()
 
             return result
 
         else:
-            # 状态心跳帧，未识别到标签时会发
+            # 状态心跳帧可能夹在有效Tag帧之间。不要在单个心跳帧上立即
+            # 清空位置，publish_pose() 会在 tag_lost_timeout 到期后发布invalid。
             frame_type = data[1]
-            with self.lock:
-                self.latest_position = None
-
             rospy.logdebug_throttle(
                 1.0,
                 f"[MM3V] No tag / heartbeat frame. type=0x{frame_type:02X}, frame={self.bytes_to_hex_string(data)}"
@@ -340,7 +339,16 @@ class MM3VSerialReader:
 
         while not rospy.is_shutdown():
             with self.lock:
-                pos = self.latest_position.copy() if self.latest_position else None
+                now_monotonic = time.monotonic()
+                tag_recent = (
+                    self.latest_position is not None
+                    and self.last_valid_monotonic is not None
+                    and now_monotonic - self.last_valid_monotonic <= self.tag_lost_timeout
+                )
+                pos = self.latest_position.copy() if tag_recent else None
+                if not tag_recent and self.latest_position is not None:
+                    self.latest_position = None
+                    self.last_valid_monotonic = None
 
             if pos is not None:
                 msg = PoseStamped()
