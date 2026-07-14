@@ -17,6 +17,7 @@ find_package(catkin REQUIRED
             tf2_geometry_msgs
             tf2_ros
             tf
+            visualization_msgs
         )
 
 find_package(Eigen3 REQUIRED)
@@ -46,11 +47,15 @@ catkin_package(
         tf2
         tf2_ros
         tf
+        visualization_msgs
 )
 
 add_library(jgl_dwa_local_planner 
 	src/dwa_planner.cpp 
 	src/dwa_planner_ros.cpp
+	src/trajectory_generator.cpp
+	src/reference_path_manager.cpp
+	src/path_follower.cpp
 	src/speedPlan.cpp
 	src/pursuit.cpp
 	src/decay_obstacle_layer.cpp

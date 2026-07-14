@@ -57,8 +57,11 @@
 
 #include <jgl_dwa_local_planner/dwa_planner.h>
 
+#include <jgl_dwa_local_planner/path_follower.h>
+#include <jgl_dwa_local_planner/reference_path_manager.h>
 #include <jgl_dwa_local_planner/speedPlan.h>
 #include <jgl_dwa_local_planner/pursuit.h>
+#include <jgl_dwa_local_planner/trajectory_generator.h>
 #include <tf/tf.h>
 #include <tf/transform_listener.h>
 
@@ -67,6 +70,7 @@
 #include <tf2/LinearMath/Transform.h>
 #include <tf2/convert.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include <visualization_msgs/Marker.h>
 
 namespace jgl_dwa_local_planner
 {
@@ -206,10 +210,31 @@ namespace jgl_dwa_local_planner
 
       void publishGlobalPlan(std::vector<geometry_msgs::PoseStamped> &path);
 
+      void stopCmd(geometry_msgs::Twist &cmd_vel) const;
+      bool shouldUseReferencePath();
+      bool prepareReferencePath();
+      bool computeReferenceVelocityCommands(geometry_msgs::Twist &cmd_vel,
+                                            bool &hard_failure);
+      bool referencePathBlocked(const nav_msgs::Path &path);
+      bool costmapPointBlocked(costmap_2d::Costmap2D *costmap,
+                               unsigned int mx, unsigned int my,
+                               int radius_cells) const;
+      void updateLineGoalRelativeState();
+      bool referenceMiddleGoalReachedByProgress(unsigned int *goal_path_index,
+                                                double *remaining_reference_distance,
+                                                double *goal_distance);
+      void publishReferencePathMarker(const nav_msgs::Path &path,
+                                      TrajectoryGenerator::PathMode path_mode) const;
+      bool referencePathCanFollowGoal(int goal_index) const;
+      void forceLegacyLineRotate(const char *reason);
+      bool syncReferencePathIndex(double *distance_to_reference,
+                                  unsigned int *nearest_index);
+
       tf2_ros::Buffer *tf_; ///< @brief Used for transforming point clouds
 
       // for visualisation, publishers of global and local plan
-      ros::Publisher g_plan_pub_, l_plan_pub_;
+      ros::Publisher g_plan_pub_, l_plan_pub_, reference_path_pub_,
+          reference_path_marker_pub_;
 
       base_local_planner::LocalPlannerUtil planner_util_;
 
@@ -236,6 +261,19 @@ namespace jgl_dwa_local_planner
       tf::StampedTransform trans;
       int useLine;                                     //是否使用直线控制
       std::vector<geometry_msgs::PoseStamped> linePath; //将直线存到此中
+      bool enable_bspline_reference_path_;
+      double reference_safe_distance_;
+      double obstacle_wait_time_;
+      double path_deviation_replan_threshold_;
+      ros::Time reference_obstacle_start_;
+      int current_topology_goal_index_;
+      int legacy_line_forced_goal_index_;
+      bool reference_goal_reached_;
+      TrajectoryGenerator::PathMode reference_path_mode_;
+      std::vector<int> reference_fallback_segments_;
+      TrajectoryGenerator trajectory_generator_;
+      ReferencePathManager reference_path_manager_;
+      PathFollower path_follower_;
       double goal_yaw_err;                              //到达目标点的角度误差
       double yaw_goal_tolerance;                        //允许到达目标点的角度误差
       double xy_goal_tolerance;                         //允许到达目标点的距离误差

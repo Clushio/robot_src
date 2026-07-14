@@ -10,6 +10,21 @@ DWAPlannerROS:
 
   frontdis_X: 0.00
 
+  enable_bspline_reference_path: true
+  bspline_sample_resolution: 0.10
+  safe_distance: 0.25
+  reference_occupied_threshold: 98
+  max_deviation_from_topo: 0.50
+  max_curvature: 2.00
+  lookahead_distance: 0.50
+  v_min: 0.04
+  v_max: 0.20
+  end_slow_distance: 0.80
+  obstacle_wait_time: 10.0
+  path_deviation_replan_threshold: 0.60
+  path_regenerate_cooldown: 1.0
+  k_curve: 1.0
+
 
 # Robot Configuration Parameters - Kobuki
   max_vel_x: 0.2  # X2bot最大线速度0.85m/s
