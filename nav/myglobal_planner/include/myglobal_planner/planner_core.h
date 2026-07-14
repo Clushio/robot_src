@@ -286,6 +286,7 @@ class MyGlobalPlanner : public nav_core::BaseGlobalPlanner {
         double distance_behind_obstacle;                  //障碍物后方多少米作为绕行终点
         int lethal_cost;                                   //costmap致命障碍物的cost
         double wait_time;                                  //检测到前方有障碍物的等待时间
+        bool enable_dwa_obstacle_avoidance;                 //等待超时后是否允许切换到DWA绕行
         bool flag;
 
 

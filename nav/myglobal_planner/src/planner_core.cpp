@@ -191,6 +191,10 @@ namespace myglobal_planner
       private_nh.param("distance_check_obstacle", distance_check_obstacle, 1.0);
       private_nh.param("distance_behind_obstacle", distance_behind_obstacle, 1.0);
       private_nh.param("wait_time",wait_time,3.0);
+      private_nh.param("enable_dwa_obstacle_avoidance",
+                       enable_dwa_obstacle_avoidance, false);
+      ROS_INFO("Global planner DWA obstacle avoidance after wait is %s.",
+               enable_dwa_obstacle_avoidance ? "enabled" : "disabled");
       first_line_plan = true;
       iniStart.header.frame_id = "";
       neardis=1.0;
@@ -592,7 +596,15 @@ namespace myglobal_planner
     }
     if (status == 1 && begin + ros::Duration(wait_time) < ros::Time::now())//当前状态为1，且原地等待已超过wait_time秒
     {
-       ROS_INFO(" the obstacle is still there after waiting for 3 seconds " );
+      if (!enable_dwa_obstacle_avoidance)
+      {
+        ROS_WARN_THROTTLE(2.0,
+                          "Obstacle is still present after %.1f seconds; keep stopping and let AutoNAV replan.",
+                          wait_time);
+        return;
+      }
+      ROS_INFO("The obstacle is still there after waiting for %.1f seconds; switch to DWA avoidance.",
+               wait_time);
       status = 2;
       return;
     }

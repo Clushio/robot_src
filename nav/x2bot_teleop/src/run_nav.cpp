@@ -41,7 +41,9 @@ struct TopoEdge {
     double cost;
     bool trusted;
     bool bidirectional;
-    bool blocked;
+    bool configured_blocked;
+    ros::WallTime blocked_until;
+    int failure_count;
     std::string source;
 };
 
@@ -61,6 +63,10 @@ public:
           pause_robot(false),
           current_status(0),
           blocked_timeout_(10.0),
+          blocked_cooldown_initial_(20.0),
+          blocked_cooldown_max_(120.0),
+          blocked_backoff_factor_(2.0),
+          blocked_wait_timeout_(180.0),
           progress_distance_(0.05),
           progress_yaw_(6.0 * M_PI / 180.0),
           waypoint_reached_distance_(0.20),
@@ -82,6 +88,18 @@ public:
         normalizeMapsDir();
         ROS_INFO_STREAM("Topology navigation maps_dir: " << maps_dir_);
         private_nh.param("blocked_timeout", blocked_timeout_, blocked_timeout_);
+        private_nh.param("blocked_cooldown_initial", blocked_cooldown_initial_,
+                         blocked_cooldown_initial_);
+        private_nh.param("blocked_cooldown_max", blocked_cooldown_max_,
+                         blocked_cooldown_max_);
+        private_nh.param("blocked_backoff_factor", blocked_backoff_factor_,
+                         blocked_backoff_factor_);
+        private_nh.param("blocked_wait_timeout", blocked_wait_timeout_,
+                         blocked_wait_timeout_);
+        blocked_cooldown_initial_ = std::max(0.1, blocked_cooldown_initial_);
+        blocked_cooldown_max_ = std::max(blocked_cooldown_initial_, blocked_cooldown_max_);
+        blocked_backoff_factor_ = std::max(1.0, blocked_backoff_factor_);
+        blocked_wait_timeout_ = std::max(0.0, blocked_wait_timeout_);
         private_nh.param("progress_distance", progress_distance_, progress_distance_);
         private_nh.param("progress_yaw", progress_yaw_, progress_yaw_);
         private_nh.param("waypoint_reached_distance", waypoint_reached_distance_,
@@ -141,6 +159,10 @@ public:
 
         current_pose_index = start_index;
         std::vector<int> path_indices = dijkstraShortestPath(start_index, target_index);
+        if (path_indices.empty() && exec_path)
+        {
+            waitForTemporaryPath(start_index, target_index, path_indices);
+        }
         if (path_indices.empty())
         {
             res.success = false;
@@ -374,6 +396,10 @@ private:
     int current_status; // 0 init, 1 load pnts ok, 2 running, 3 finished, 4 quit
 
     double blocked_timeout_;
+    double blocked_cooldown_initial_;
+    double blocked_cooldown_max_;
+    double blocked_backoff_factor_;
+    double blocked_wait_timeout_;
     double progress_distance_;
     double progress_yaw_;
     double waypoint_reached_distance_;
@@ -849,7 +875,9 @@ private:
         edge.cost = cost;
         edge.trusted = trusted;
         edge.bidirectional = bidirectional;
-        edge.blocked = blocked;
+        edge.configured_blocked = blocked;
+        edge.blocked_until = ros::WallTime();
+        edge.failure_count = 0;
         edge.source = source;
         graph[from].push_back(edge);
     }
@@ -1017,6 +1045,78 @@ private:
         return count;
     }
 
+    bool edgeIsBlocked(const TopoEdge &edge) const
+    {
+        if (edge.configured_blocked)
+        {
+            return true;
+        }
+        return !edge.blocked_until.isZero() &&
+               ros::WallTime::now() < edge.blocked_until;
+    }
+
+    double nextTemporaryUnblockDelay() const
+    {
+        const ros::WallTime now = ros::WallTime::now();
+        double delay = std::numeric_limits<double>::infinity();
+        for (const auto &item : graph)
+        {
+            for (const TopoEdge &edge : item.second)
+            {
+                if (!edge.configured_blocked && !edge.blocked_until.isZero() &&
+                    now < edge.blocked_until)
+                {
+                    delay = std::min(delay, (edge.blocked_until - now).toSec());
+                }
+            }
+        }
+        return delay;
+    }
+
+    bool waitForTemporaryPath(int start, int target, std::vector<int> &path)
+    {
+        if (blocked_wait_timeout_ <= 0.0)
+        {
+            return false;
+        }
+
+        const ros::WallTime wait_start = ros::WallTime::now();
+        bool announced = false;
+        while (ros::ok() && !stop_and_quit)
+        {
+            path = dijkstraShortestPath(start, target);
+            if (!path.empty())
+            {
+                ROS_INFO("A temporary topology block expired; retry path to P%d.", target);
+                return true;
+            }
+
+            const double next_delay = nextTemporaryUnblockDelay();
+            if (!std::isfinite(next_delay))
+            {
+                return false;
+            }
+
+            const double elapsed = (ros::WallTime::now() - wait_start).toSec();
+            if (elapsed >= blocked_wait_timeout_)
+            {
+                ROS_ERROR("Timed out after %.1f seconds waiting for a temporary topology block to expire.",
+                          blocked_wait_timeout_);
+                return false;
+            }
+
+            if (!announced)
+            {
+                ROS_WARN("No alternate topology path. Stop and wait up to %.1f seconds for a temporary block to expire.",
+                         blocked_wait_timeout_);
+                announced = true;
+            }
+            stopRobot();
+            ros::WallDuration(std::min(0.2, std::max(0.01, next_delay))).sleep();
+        }
+        return false;
+    }
+
     std::vector<int> dijkstraShortestPath(int start, int goal)
     {
         if (!validIndex(start) || !validIndex(goal))
@@ -1058,7 +1158,7 @@ private:
             }
             for (const TopoEdge &edge : it->second)
             {
-                if (edge.blocked || !validIndex(edge.to))
+                if (edgeIsBlocked(edge) || !validIndex(edge.to))
                 {
                     continue;
                 }
@@ -1102,6 +1202,7 @@ private:
         }
 
         int blocked_count = 0;
+        double longest_cooldown = 0.0;
         auto block_one_direction = [&](int a, int b) {
             auto it = graph.find(a);
             if (it == graph.end())
@@ -1112,7 +1213,17 @@ private:
             {
                 if (edge.to == b)
                 {
-                    edge.blocked = true;
+                    if (edge.configured_blocked)
+                    {
+                        continue;
+                    }
+                    edge.failure_count++;
+                    const double cooldown = std::min(
+                        blocked_cooldown_initial_ *
+                            std::pow(blocked_backoff_factor_, edge.failure_count - 1),
+                        blocked_cooldown_max_);
+                    edge.blocked_until = ros::WallTime::now() + ros::WallDuration(cooldown);
+                    longest_cooldown = std::max(longest_cooldown, cooldown);
                     blocked_count++;
                 }
             }
@@ -1124,8 +1235,34 @@ private:
             block_one_direction(to, from);
         }
 
-        ROS_WARN("Blocked topology edge P%d -> P%d%s (%d directed edges).",
-                 from, to, block_bidirectional_ ? " bidirectional" : "", blocked_count);
+        ROS_WARN("Temporarily blocked topology edge P%d -> P%d%s for %.1f seconds (%d directed edges).",
+                 from, to, block_bidirectional_ ? " bidirectional" : "",
+                 longest_cooldown, blocked_count);
+    }
+
+    void markEdgeSuccess(int from, int to)
+    {
+        auto clear_one_direction = [&](int a, int b) {
+            auto it = graph.find(a);
+            if (it == graph.end())
+            {
+                return;
+            }
+            for (TopoEdge &edge : it->second)
+            {
+                if (edge.to == b)
+                {
+                    edge.blocked_until = ros::WallTime();
+                    edge.failure_count = 0;
+                }
+            }
+        };
+
+        clear_one_direction(from, to);
+        if (block_bidirectional_)
+        {
+            clear_one_direction(to, from);
+        }
     }
 
     std::string formatPathMessage(const std::string &prefix, const std::vector<int> &path)
@@ -1174,7 +1311,7 @@ private:
             const int from = item.first;
             for (const TopoEdge &edge : item.second)
             {
-                if (!validIndex(from) || !validIndex(edge.to) || edge.blocked)
+                if (!validIndex(from) || !validIndex(edge.to) || edgeIsBlocked(edge))
                 {
                     continue;
                 }
@@ -1428,6 +1565,10 @@ private:
                 const bool final_goal = next_index == target_index;
                 if (sendGoalAndMonitor(next_index, previous_index, final_goal))
                 {
+                    if (validIndex(previous_index))
+                    {
+                        markEdgeSuccess(previous_index, next_index);
+                    }
                     if (next_index == target_index)
                     {
                         current_status = 3;
@@ -1452,10 +1593,13 @@ private:
                 replan_count++;
                 if (path_indices.empty())
                 {
-                    ROS_ERROR("Target P%d is temporarily unreachable after blocking failed edge.",
-                              target_index);
-                    stopRobot();
-                    return false;
+                    if (!waitForTemporaryPath(start_index, target_index, path_indices))
+                    {
+                        ROS_ERROR("Target P%d remains unreachable after waiting for temporary blocks.",
+                                  target_index);
+                        stopRobot();
+                        return false;
+                    }
                 }
                 publishTopologyPath(path_indices);
                 ROS_WARN_STREAM(formatPathMessage("replan after blocked edge:", path_indices));

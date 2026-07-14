@@ -4,6 +4,11 @@
 
 
   <node pkg="x2bot_teleop" type="runnav" name="runnav" output="screen">
+    <!-- Runtime topology failures are temporary; configured blocked edges remain permanent. -->
+    <param name="blocked_cooldown_initial" value="20.0" />
+    <param name="blocked_cooldown_max" value="120.0" />
+    <param name="blocked_backoff_factor" value="2.0" />
+    <param name="blocked_wait_timeout" value="180.0" />
   </node>
 
 

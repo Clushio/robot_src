@@ -19,4 +19,6 @@ MyGlobalPlanner:                                  # Also see: http://wiki.ros.or
   distance_check_obstacle: 1.0  
   distance_behind_obstacle: 1.0
   wait_time: 3.0
-
+  # AutoNAV owns topology replanning. Keep stopped after the wait instead of
+  # generating a z=0 detour plan that switches the local controller to DWA.
+  enable_dwa_obstacle_avoidance: false
