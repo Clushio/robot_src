@@ -711,8 +711,11 @@ namespace myglobal_planner
   {
     //return makePlan(start, goal, default_tolerance_, plan);
     plan.clear();
+    const double distance_to_goal = comDistance(start, goal);
+    const double terminal_replan_freeze_distance = 0.15;
     const bool start_changed =
-        iniStart.header.frame_id.empty() || comDistance(iniStart, start) > 0.02;
+        distance_to_goal > terminal_replan_freeze_distance &&
+        (iniStart.header.frame_id.empty() || comDistance(iniStart, start) > 0.02);
     if (start_changed || !comparePose(iniGoal, goal))//当传进来的goal或start与上次不一致时，重新进行直线规划
     {
       ROS_INFO("new goal or start" );

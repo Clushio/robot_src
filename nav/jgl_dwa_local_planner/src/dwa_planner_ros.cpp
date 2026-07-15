@@ -300,25 +300,19 @@ bool DWAPlannerROS::mygoalReachPanduan()
    
 void DWAPlannerROS::computeRelativePosition(const geometry_msgs::PoseStamped& p, const geometry_msgs::PoseStamped& q)
 {
-    // 提取位置
-    Eigen::Vector3d pos_p(p.pose.position.x, p.pose.position.y, p.pose.position.z);
-    Eigen::Vector3d pos_q(q.pose.position.x, q.pose.position.y, q.pose.position.z);
+    // 导航路径是二维的，position.z 被全局规划器用作控制模式标记
+    // (1: 纯追踪, 2: 停止等待)。不能将该 z 值和实车 roll/pitch 参与
+    // 三维旋转，否则会在 Qtar.x/y 中产生虚假的终点距离。
+    const double dx = q.pose.position.x - p.pose.position.x;
+    const double dy = q.pose.position.y - p.pose.position.y;
+    const double robot_yaw = tf::getYaw(p.pose.orientation);
+    const double cos_yaw = std::cos(robot_yaw);
+    const double sin_yaw = std::sin(robot_yaw);
 
-
-
-    // 提取旋转（四元数）
-    Eigen::Quaterniond quat_p(p.pose.orientation.w, p.pose.orientation.x, p.pose.orientation.y, p.pose.orientation.z);
-
-    // 计算相对位置
-    Eigen::Vector3d relative_pos = pos_q - pos_p;
-
-    // 将相对位置从全局坐标系转换到局部坐标系
-    Eigen::Vector3d local_relative_pos = quat_p.inverse() * relative_pos;
-
-    // 将结果填充到 Qtar
-    Qtar.pose.position.x = local_relative_pos.x();
-    Qtar.pose.position.y = local_relative_pos.y();
-    Qtar.pose.position.z = local_relative_pos.z();
+    // 将全局 XY 差值旋转到机器人平面坐标系（旋转 -yaw）。
+    Qtar.pose.position.x = cos_yaw * dx + sin_yaw * dy;
+    Qtar.pose.position.y = -sin_yaw * dx + cos_yaw * dy;
+    Qtar.pose.position.z = 0.0;
 
     // 设置时间戳和参考坐标系
     Qtar.header.stamp = q.header.stamp; // 使用 q 的时间戳
@@ -585,6 +579,11 @@ double DWAPlannerROS::signedDistanceToLine(const geometry_msgs::PoseStamped& A, 
 
 bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseStamped> linePath, geometry_msgs::Twist &cmd_vel)
 {
+  if (linePath.size() < 2)
+  {
+    return false;
+  }
+
   computeRelativePosition(current_pose_,linePath.back());
   dis2line = signedDistanceToLine(linePath.at(0),linePath.back(),current_pose_);
 
@@ -593,17 +592,6 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseS
            // ss1<<"goal: x="<<linePath.back().pose.position.x<<" y="<<linePath.back().pose.position.y<<std::endl;
             //ss1<<"stop cmd at: x="<<current_pose_.pose.position.x<<" y="<<current_pose_.pose.position.y<<std::endl;
             //
-
-
-  if(mygoalReachPanduan())
-  {
-    status = 3;
-  }
-  //std::cout<<"QX="
- if (linePath.size() < 2)
-  {
-    return false;
-  }
 
   for (int i = 0; i < linePath.size(); i++)
   {
@@ -638,6 +626,13 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseS
   }
  // ROS_INFO_STREAM( "self rotation:" << goal_yaw_err );
 
+  // 到达判断必须使用本控制周期刚计算出的 yaw 误差。
+  if(mygoalReachPanduan())
+  {
+    status = 3;
+  }
+  //std::cout<<"QX="
+
   double angle_line = atan2(linePath.back().pose.position.y - linePath[0].pose.position.y, linePath.back().pose.position.x - linePath[0].pose.position.x);
   double angle_Robot2End = atan2(linePath.back().pose.position.y - state.y, linePath.back().pose.position.x - state.x);
 //计算机器人当前朝向和直线朝向的误差
@@ -671,26 +666,31 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseS
     }
   }
 
-//状态切换，当前状态为1，且机器人朝向与直线方向角度误差小于1时转化到状态0，当前状态为0且机器人朝向与直线方向角度误差大于2转化到状态1，当前状态为0，且机器人距离终点小于指定距离进入状态2
+// 状态切换：终点位置判断必须优先于路径方向对正。
+// 终点附近重新生成的“当前位置->终点”直线可能因越点而翻转约 PI，
+// 此时禁止进入 status 1，否则会先朝错误的路径方向原地旋转。
   float angleerr_staChange1 = angle_err_H*1.5;
   float angleerr_staChange2 = 0.6;
-  if(status==1 && fabs(angle_err)<angleerr_staChange1){
-    status=4;
-    state4counter = 8;
-  }else if(status==0 && fabs(angle_err)>angleerr_staChange2){
-    status=1;
-  }
-  else if(status==0 && (Qtar.pose.position.x<xdis*0.1+frontdis_X))//&&((abs(Qtar.pose.position.y)<xdis)))
-  {
-    //status=2;
-    std::stringstream ss1;
-    ss1<<"_______________________________"<<std::endl;
-    ss1 << "stage 0 stop at:"<<" Qx err = "<<Qtar.pose.position.x<<" Qy err = "<<Qtar.pose.position.y<<std::endl;     
-    logToFile(ss1.str(),logfilename);
-
+  const double xy_error = hypot(Qtar.pose.position.x, Qtar.pose.position.y);
+  const double terminal_capture_distance = xdis;
+  const double terminal_no_realign_distance = 0.10;
+  if((status==0 || status==1) && xy_error<=terminal_capture_distance){
     status = 5;
     state5counter = 8;
-  }else if(status==2&&mygoalReachPanduan_angle())
+    ROS_INFO("Terminal position captured at %.3f m; switch to final-yaw preparation.",
+             xy_error);
+  }else if(status==1 && xy_error<=terminal_no_realign_distance){
+    status = 0;
+    ROS_WARN("Suppress path realignment near goal at %.3f m.", xy_error);
+  }else if(status==1 && fabs(angle_err)<angleerr_staChange1){
+    status=4;
+    state4counter = 8;
+  }else if(status==0 &&
+           xy_error>terminal_no_realign_distance &&
+           fabs(angle_err)>angleerr_staChange2){
+    status=1;
+  }
+  else if(status==2&&mygoalReachPanduan_angle())
   {
     status=3;
   }
