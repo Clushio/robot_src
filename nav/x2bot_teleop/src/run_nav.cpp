@@ -1,10 +1,13 @@
 #include <actionlib/client/simple_action_client.h>
+#include <boost/bind.hpp>
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/Quaternion.h>
 #include <geometry_msgs/TransformStamped.h>
 #include <geometry_msgs/Twist.h>
+#include <geometry_msgs/Vector3Stamped.h>
 #include <move_base_msgs/MoveBaseAction.h>
 #include <nav_msgs/Path.h>
+#include <ros/callback_queue.h>
 #include <ros/ros.h>
 #include <sensor_msgs/Joy.h>
 #include <tf/transform_listener.h>
@@ -22,6 +25,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <queue>
 #include <set>
 #include <sstream>
@@ -56,6 +60,7 @@ public:
         : global_ac(nullptr),
           nh_(),
           tf_listener_(tf_buffer_),
+          reference_status_spinner_(1, &reference_status_queue_),
           current_pose_index(0),
           numofpnts(0),
           current_pnt(0),
@@ -119,6 +124,13 @@ public:
         marker_pub = nh_.advertise<visualization_msgs::Marker>("visualization_marker", 1);
         marker_array_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("topology_markers", 1, true);
         path_pub_ = nh_.advertise<nav_msgs::Path>("topology_plan", 1, true);
+        ros::SubscribeOptions status_options =
+            ros::SubscribeOptions::create<geometry_msgs::Vector3Stamped>(
+                "/bspline_status", 1,
+                boost::bind(&mynav::referenceStatusCallback, this, _1),
+                ros::VoidPtr(), &reference_status_queue_);
+        reference_status_sub_ = nh_.subscribe(status_options);
+        reference_status_spinner_.start();
 
         plan_path_service = nh_.advertiseService("plan_path_and_go", &mynav::planPathCallback, this);
         ROS_INFO("Topology navigation service /plan_path_and_go started.");
@@ -387,6 +399,13 @@ private:
     ros::Publisher marker_pub;
     ros::Publisher marker_array_pub_;
     ros::Publisher path_pub_;
+    ros::CallbackQueue reference_status_queue_;
+    ros::AsyncSpinner reference_status_spinner_;
+    ros::Subscriber reference_status_sub_;
+    std::mutex reference_status_mutex_;
+    ros::Time reference_status_stamp_;
+    int reference_status_path_index_ = -1;
+    int reference_status_code_ = 0;
     ros::ServiceServer plan_path_service;
 
     int current_pose_index;
@@ -1395,7 +1414,57 @@ private:
         ROS_INFO("Connected to move_base action server");
     }
 
-    bool sendGoalAndMonitor(int target_index, int previous_index, bool final_goal)
+    enum ReferenceStatusCode
+    {
+        REFERENCE_ACTIVE = 1,
+        REFERENCE_PASSED = 2,
+        REFERENCE_PATH_DEVIATED = 3
+    };
+
+    enum GoalMonitorResult
+    {
+        GOAL_REACHED,
+        GOAL_FAILED,
+        GOAL_PATH_DEVIATED
+    };
+
+    void referenceStatusCallback(const geometry_msgs::Vector3Stamped::ConstPtr &msg)
+    {
+        std::lock_guard<std::mutex> lock(reference_status_mutex_);
+        reference_status_stamp_ = msg->header.stamp;
+        reference_status_path_index_ = static_cast<int>(std::lround(msg->vector.y));
+        reference_status_code_ = static_cast<int>(std::lround(msg->vector.z));
+    }
+
+    void resetReferenceStatus()
+    {
+        std::lock_guard<std::mutex> lock(reference_status_mutex_);
+        reference_status_stamp_ = ros::Time(0);
+        reference_status_path_index_ = -1;
+        reference_status_code_ = 0;
+    }
+
+    bool referenceStatusMatches(int topology_path_index, int status_code,
+                                const ros::Time &goal_start_time)
+    {
+        std::lock_guard<std::mutex> lock(reference_status_mutex_);
+        return reference_status_stamp_ >= goal_start_time &&
+               reference_status_path_index_ == topology_path_index &&
+               reference_status_code_ == status_code;
+    }
+
+    bool referenceTrackingOrPassed(int topology_path_index,
+                                   const ros::Time &goal_start_time)
+    {
+        std::lock_guard<std::mutex> lock(reference_status_mutex_);
+        return reference_status_stamp_ >= goal_start_time &&
+               reference_status_path_index_ == topology_path_index &&
+               (reference_status_code_ == REFERENCE_ACTIVE ||
+                reference_status_code_ == REFERENCE_PASSED);
+    }
+
+    GoalMonitorResult sendGoalAndMonitor(int target_index, int previous_index,
+                                         bool final_goal, int topology_path_index)
     {
         const TargetPose &target_pose = target_poses[target_index];
         move_base_msgs::MoveBaseGoal mb_goal;
@@ -1414,10 +1483,12 @@ private:
         }
 
         active_next_index_ = target_index;
+        resetReferenceStatus();
         publishTopologyMarkers();
         ROS_INFO_STREAM("Sending topology " << (final_goal ? "final" : "pass-through")
                                             << " goal P" << target_index << ": ("
                                             << target_pose.x << ", " << target_pose.y << ")");
+        const ros::Time goal_start_time = ros::Time::now();
         global_ac->sendGoal(mb_goal);
 
         geometry_msgs::PoseStamped last_progress_pose;
@@ -1431,7 +1502,7 @@ private:
             {
                 global_ac->cancelAllGoals();
                 stopRobot();
-                return false;
+                return GOAL_FAILED;
             }
 
             while (pause_robot && ros::ok())
@@ -1441,8 +1512,32 @@ private:
                 ros::Duration(0.2).sleep();
             }
 
+            if (referenceStatusMatches(topology_path_index,
+                                       REFERENCE_PATH_DEVIATED,
+                                       goal_start_time))
+            {
+                ROS_WARN("B-spline path deviation at topology path index %d; "
+                         "stop the current action and hand re-entry to topology.",
+                         topology_path_index);
+                global_ac->cancelGoal();
+                stopRobot();
+                active_next_index_ = -1;
+                publishTopologyMarkers();
+                return GOAL_PATH_DEVIATED;
+            }
+
             if (global_ac->waitForResult(ros::Duration(0.2)))
             {
+                if (referenceStatusMatches(topology_path_index,
+                                           REFERENCE_PATH_DEVIATED,
+                                           goal_start_time))
+                {
+                    global_ac->cancelGoal();
+                    stopRobot();
+                    active_next_index_ = -1;
+                    publishTopologyMarkers();
+                    return GOAL_PATH_DEVIATED;
+                }
                 const actionlib::SimpleClientGoalState state = global_ac->getState();
                 if (state == actionlib::SimpleClientGoalState::SUCCEEDED)
                 {
@@ -1471,7 +1566,7 @@ private:
                     current_pose_index = target_index;
                     active_next_index_ = -1;
                     publishTopologyMarkers();
-                    return true;
+                    return GOAL_REACHED;
                 }
                 ROS_WARN_STREAM("Goal P" << target_index << " failed with state: " << state.toString());
                 while (ros::ok() &&
@@ -1480,12 +1575,25 @@ private:
                     if (stop_and_quit)
                     {
                         stopRobot();
-                        return false;
+                        return GOAL_FAILED;
                     }
                     stopRobot();
                     ros::Duration(0.2).sleep();
                 }
-                return false;
+                return GOAL_FAILED;
+            }
+
+            if (!final_goal &&
+                referenceStatusMatches(topology_path_index, REFERENCE_PASSED,
+                                       goal_start_time))
+            {
+                ROS_INFO("B-spline pass-through P%d reached at topology path index %d; "
+                         "send the next goal without cancelling or stopping.",
+                         target_index, topology_path_index);
+                current_pose_index = target_index;
+                active_next_index_ = -1;
+                publishTopologyMarkers();
+                return GOAL_REACHED;
             }
 
             geometry_msgs::PoseStamped current_pose;
@@ -1494,13 +1602,20 @@ private:
                 const double target_distance = distanceToNode(current_pose, target_index);
                 if (!final_goal && target_distance <= waypoint_reached_distance_)
                 {
-                    ROS_INFO("Pass-through waypoint P%d reached by XY distance %.2f m.",
-                             target_index, target_distance);
-                    global_ac->cancelGoal();
+                    const bool bspline_tracking =
+                        referenceTrackingOrPassed(topology_path_index, goal_start_time);
+                    ROS_INFO("Pass-through waypoint P%d reached by XY distance %.2f m%s.",
+                             target_index, target_distance,
+                             bspline_tracking ?
+                                 "; keep the B-spline action live for seamless preemption" : "");
+                    if (!bspline_tracking)
+                    {
+                        global_ac->cancelGoal();
+                    }
                     current_pose_index = target_index;
                     active_next_index_ = -1;
                     publishTopologyMarkers();
-                    return true;
+                    return GOAL_REACHED;
                 }
                 if (final_goal && target_distance <= waypoint_reached_distance_)
                 {
@@ -1526,7 +1641,7 @@ private:
                 stopRobot();
                 active_next_index_ = -1;
                 publishTopologyMarkers();
-                return false;
+                return GOAL_FAILED;
             }
             if ((now - start_time).toSec() >= goal_timeout_)
             {
@@ -1535,14 +1650,14 @@ private:
                 stopRobot();
                 active_next_index_ = -1;
                 publishTopologyMarkers();
-                return false;
+                return GOAL_FAILED;
             }
         }
 
         stopRobot();
         active_next_index_ = -1;
         publishTopologyMarkers();
-        return false;
+        return GOAL_FAILED;
     }
 
     bool runTopologyMission(int target_index, std::vector<int> path_indices)
@@ -1577,7 +1692,10 @@ private:
 
                 const int previous_index = (i == 0) ? -1 : path_indices[i - 1];
                 const bool final_goal = next_index == target_index;
-                if (sendGoalAndMonitor(next_index, previous_index, final_goal))
+                const GoalMonitorResult goal_result =
+                    sendGoalAndMonitor(next_index, previous_index, final_goal,
+                                       static_cast<int>(i));
+                if (goal_result == GOAL_REACHED)
                 {
                     if (validIndex(previous_index))
                     {
@@ -1593,7 +1711,8 @@ private:
                     continue;
                 }
 
-                if (validIndex(previous_index))
+                const bool path_deviated = goal_result == GOAL_PATH_DEVIATED;
+                if (!path_deviated && validIndex(previous_index))
                 {
                     blockEdge(previous_index, next_index);
                 }
@@ -1616,7 +1735,10 @@ private:
                     }
                 }
                 publishTopologyPath(path_indices);
-                ROS_WARN_STREAM(formatPathMessage("replan after blocked edge:", path_indices));
+                ROS_WARN_STREAM(formatPathMessage(
+                    path_deviated ? "topology re-entry after B-spline deviation:"
+                                  : "replan after blocked edge:",
+                    path_indices));
                 break;
             }
         }

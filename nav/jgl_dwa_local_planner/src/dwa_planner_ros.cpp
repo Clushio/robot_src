@@ -183,6 +183,17 @@ namespace jgl_dwa_local_planner
     cmd_vel.angular.z = 0.0;
   }
 
+  void DWAPlannerROS::publishReferenceStatus(ReferenceStatus status)
+  {
+    geometry_msgs::Vector3Stamped message;
+    message.header.stamp = ros::Time::now();
+    message.header.frame_id = "map";
+    message.vector.x = static_cast<double>(reference_path_manager_.topologyVersion());
+    message.vector.y = static_cast<double>(current_topology_goal_index_);
+    message.vector.z = static_cast<double>(status);
+    reference_status_pub_.publish(message);
+  }
+
   void DWAPlannerROS::updateLineGoalRelativeState()
   {
     if (linePath.empty())
@@ -451,7 +462,7 @@ namespace jgl_dwa_local_planner
     {
       return;
     }
-    if (!reference_path_manager_.needRegenerate(current_pose_))
+    if (!reference_path_manager_.needRegenerate())
     {
       return;
     }
@@ -730,6 +741,8 @@ namespace jgl_dwa_local_planner
       return false;
     }
 
+    publishReferenceStatus(REFERENCE_ACTIVE);
+
     unsigned int reached_goal_path_index = 0;
     double reached_remaining_reference_distance = 0.0;
     double reached_goal_distance = 0.0;
@@ -907,6 +920,7 @@ namespace jgl_dwa_local_planner
     if (!syncReferencePathIndex(&distance_to_reference, &nearest_reference_index))
     {
       stopCmd(cmd_vel);
+      publishReferenceStatus(REFERENCE_PATH_DEVIATED);
       hard_failure = true;
       ROS_WARN_THROTTLE(1.0,
                         "JGL reference path: robot is %.3f m away from reference path at nearest idx=%u, threshold=%.3f. Stop instead of chasing a far reference.",
@@ -934,16 +948,15 @@ namespace jgl_dwa_local_planner
                                              &remaining_to_goal_on_reference,
                                              &direct_goal_distance))
     {
-      reference_goal_reached_ = true;
-      stopCmd(cmd_vel);
-      ROS_INFO("JGL reference path: pass-through goal idx=%d reached by reference progress "
-               "(path_idx=%u target_path_idx=%u remain=%.3f direct_dist=%.3f).",
-               current_topology_goal_index_,
-               reference_path_manager_.currentPathIndex(),
-               goal_path_index,
-               remaining_to_goal_on_reference,
-               direct_goal_distance);
-      return true;
+      publishReferenceStatus(REFERENCE_PASSED);
+      ROS_INFO_THROTTLE(1.0,
+                        "JGL reference path: pass-through goal idx=%d reached; keep following without stopping "
+                        "(path_idx=%u target_path_idx=%u remain=%.3f direct_dist=%.3f).",
+                        current_topology_goal_index_,
+                        reference_path_manager_.currentPathIndex(),
+                        goal_path_index,
+                        remaining_to_goal_on_reference,
+                        direct_goal_distance);
     }
 
     if (referencePathBlocked(reference_path))
@@ -982,16 +995,7 @@ namespace jgl_dwa_local_planner
                                              &remaining_to_goal_on_reference,
                                              &direct_goal_distance))
     {
-      reference_goal_reached_ = true;
-      stopCmd(cmd_vel);
-      ROS_INFO("JGL reference path: pass-through goal idx=%d reached by reference progress "
-               "(path_idx=%u target_path_idx=%u remain=%.3f direct_dist=%.3f).",
-               current_topology_goal_index_,
-               reference_path_manager_.currentPathIndex(),
-               goal_path_index,
-               remaining_to_goal_on_reference,
-               direct_goal_distance);
-      return true;
+      publishReferenceStatus(REFERENCE_PASSED);
     }
 
     std::vector<geometry_msgs::PoseStamped> local_reference;
@@ -1058,6 +1062,8 @@ namespace jgl_dwa_local_planner
         reference_path_pub_ = node_nh.advertise<nav_msgs::Path>("/reference_path", 1, true);
         reference_path_marker_pub_ =
             node_nh.advertise<visualization_msgs::Marker>("/reference_path_marker", 1, true);
+        reference_status_pub_ =
+            node_nh.advertise<geometry_msgs::Vector3Stamped>("/bspline_status", 1, false);
         trajectory_generator_.initialize(private_nh, node_nh);
         reference_path_manager_.initialize(node_nh, private_nh);
         path_follower_.loadParams(private_nh);
@@ -1238,6 +1244,15 @@ bool DWAPlannerROS::isGoalReached()
 
     if (useLine>0) {
         ROS_INFO_STREAM("distance to goal:" << comDistance(current_pose_,linePath.back()) );
+        if (shouldUseReferencePath() &&
+            reference_path_manager_.hasValidPath() &&
+            referencePathCanFollowGoal(current_topology_goal_index_))
+        {
+            // A B-spline middle waypoint is a pass-through marker. run_nav will
+            // immediately preempt it with the next waypoint; completing this
+            // action here would make move_base publish a zero velocity.
+            return false;
+        }
         if (reference_goal_reached_)
         {
             ROS_INFO("Goal reached by reference path progress");

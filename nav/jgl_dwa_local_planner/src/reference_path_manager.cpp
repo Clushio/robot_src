@@ -12,7 +12,6 @@ ReferencePathManager::ReferencePathManager()
       topology_version_(0),
       path_version_(0),
       current_path_index_(0),
-      path_deviation_replan_threshold_(0.60),
       path_regenerate_cooldown_(1.0),
       waypoint_match_tolerance_(0.35)
 {
@@ -21,12 +20,9 @@ ReferencePathManager::ReferencePathManager()
 void ReferencePathManager::initialize(ros::NodeHandle &node_nh,
                                       ros::NodeHandle &private_nh)
 {
-  private_nh.param("path_deviation_replan_threshold",
-                   path_deviation_replan_threshold_, 0.60);
   private_nh.param("path_regenerate_cooldown",
                    path_regenerate_cooldown_, 1.0);
 
-  path_deviation_replan_threshold_ = std::max(0.05, path_deviation_replan_threshold_);
   path_regenerate_cooldown_ = std::max(0.0, path_regenerate_cooldown_);
 
   topology_sub_ = node_nh.subscribe("/topology_plan", 1,
@@ -36,6 +32,16 @@ void ReferencePathManager::initialize(ros::NodeHandle &node_nh,
 void ReferencePathManager::topologyCallback(const nav_msgs::Path::ConstPtr &msg)
 {
   boost::mutex::scoped_lock lock(mutex_);
+  const bool repeated_delivery =
+      sameTopology(topo_waypoints_, msg->poses) &&
+      !msg->header.stamp.isZero() &&
+      msg->header.stamp == last_topology_stamp_;
+  if (repeated_delivery)
+  {
+    return;
+  }
+  last_topology_stamp_ = msg->header.stamp;
+
   if (msg->poses.size() < 2)
   {
     topo_waypoints_.clear();
@@ -44,11 +50,6 @@ void ReferencePathManager::topologyCallback(const nav_msgs::Path::ConstPtr &msg)
     topology_changed_ = true;
     current_path_index_ = 0;
     topology_version_++;
-    return;
-  }
-
-  if (sameTopology(topo_waypoints_, msg->poses))
-  {
     return;
   }
 
@@ -138,8 +139,7 @@ void ReferencePathManager::advanceCurrentPathIndex(unsigned int index)
   current_path_index_ = std::min(max_index, std::max(current_path_index_, index));
 }
 
-bool ReferencePathManager::needRegenerate(
-    const geometry_msgs::PoseStamped &current_pose) const
+bool ReferencePathManager::needRegenerate() const
 {
   boost::mutex::scoped_lock lock(mutex_);
   if (topo_waypoints_.size() < 4)
@@ -158,16 +158,7 @@ bool ReferencePathManager::needRegenerate(
   {
     return true;
   }
-
-  unsigned int start_index =
-      std::min(current_path_index_,
-               static_cast<unsigned int>(reference_path_.poses.size() - 1));
-  double deviation = 1e9;
-  for (unsigned int i = start_index; i < reference_path_.poses.size(); ++i)
-  {
-    deviation = std::min(deviation, poseDistance(current_pose, reference_path_.poses[i]));
-  }
-  return deviation > path_deviation_replan_threshold_;
+  return false;
 }
 
 void ReferencePathManager::markRegenerateAttempt()

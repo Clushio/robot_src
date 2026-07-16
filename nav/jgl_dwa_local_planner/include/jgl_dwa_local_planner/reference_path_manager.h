@@ -32,7 +32,7 @@ public:
   unsigned int currentPathIndex() const;
   void advanceCurrentPathIndex(unsigned int index);
 
-  bool needRegenerate(const geometry_msgs::PoseStamped &current_pose) const;
+  bool needRegenerate() const;
   void markRegenerateAttempt();
 
   int goalIndex(const geometry_msgs::PoseStamped &goal) const;
@@ -65,8 +65,8 @@ private:
   int path_version_;
   unsigned int current_path_index_;
   ros::Time last_regenerate_attempt_;
+  ros::Time last_topology_stamp_;
 
-  double path_deviation_replan_threshold_;
   double path_regenerate_cooldown_;
   double waypoint_match_tolerance_;
 };

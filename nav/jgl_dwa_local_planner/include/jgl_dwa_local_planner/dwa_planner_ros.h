@@ -66,6 +66,7 @@
 #include <tf/transform_listener.h>
 
 #include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/Vector3Stamped.h>
 #include <Eigen/Dense>
 #include <tf2/LinearMath/Transform.h>
 #include <tf2/convert.h>
@@ -211,6 +212,13 @@ namespace jgl_dwa_local_planner
       void publishGlobalPlan(std::vector<geometry_msgs::PoseStamped> &path);
 
       void stopCmd(geometry_msgs::Twist &cmd_vel) const;
+      enum ReferenceStatus
+      {
+        REFERENCE_ACTIVE = 1,
+        REFERENCE_PASSED = 2,
+        REFERENCE_PATH_DEVIATED = 3
+      };
+      void publishReferenceStatus(ReferenceStatus status);
       bool shouldUseReferencePath();
       bool prepareReferencePath(bool &generation_pending,
                                 bool &generation_failed);
@@ -252,7 +260,7 @@ namespace jgl_dwa_local_planner
 
       // for visualisation, publishers of global and local plan
       ros::Publisher g_plan_pub_, l_plan_pub_, reference_path_pub_,
-          reference_path_marker_pub_;
+          reference_path_marker_pub_, reference_status_pub_;
 
       base_local_planner::LocalPlannerUtil planner_util_;
 
