@@ -126,6 +126,15 @@ namespace jgl_dwa_local_planner
   DWAPlannerROS::DWAPlannerROS() : initialized_(false),
                                    odom_helper_("odom"), setup_(false)
   {
+    useLine = 0;
+    goal_yaw_err = 0.0;
+    yaw_goal_tolerance = 0.0;
+    xy_goal_tolerance = 0.0;
+    status = 0;
+    is_start_rotating = false;
+    state4counter = 0;
+    state5counter = 0;
+    lastz = 1;
     enable_bspline_reference_path_ = false;
     reference_safe_distance_ = 0.25;
     reference_fallback_boundary_distance_ = 0.15;
@@ -1842,6 +1851,10 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseS
 
       return isOk;
     }
+
+    ROS_ERROR("DWA control dispatch reached an unexpected state.");
+    stopCmd(cmd_vel);
+    return false;
   }
 
   float DWAPlannerROS::base_plan_direction_check(const std::vector<geometry_msgs::PoseStamped> &orig_global_plan,
