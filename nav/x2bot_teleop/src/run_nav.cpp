@@ -18,6 +18,7 @@
 #include <x2bot_teleop/SetInt.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <fstream>
 #include <functional>
@@ -60,12 +61,14 @@ public:
         : global_ac(nullptr),
           nh_(),
           tf_listener_(tf_buffer_),
+          joy_spinner_(1, &joy_callback_queue_),
           reference_status_spinner_(1, &reference_status_queue_),
           current_pose_index(0),
           numofpnts(0),
           current_pnt(0),
           stop_and_quit(false),
           pause_robot(false),
+          pause_reentry_requested_(false),
           current_status(0),
           blocked_timeout_(10.0),
           blocked_cooldown_initial_(20.0),
@@ -120,7 +123,12 @@ public:
 
         initializeGlobalAC();
         vel_pub_ = nh_.advertise<geometry_msgs::Twist>("cmd_vel", 1, true);
-        joy_sub_ = nh_.subscribe<sensor_msgs::Joy>("joy", 10, &mynav::joyCallback, this);
+        ros::SubscribeOptions joy_options =
+            ros::SubscribeOptions::create<sensor_msgs::Joy>(
+                "joy", 10, boost::bind(&mynav::joyCallback, this, _1),
+                ros::VoidPtr(), &joy_callback_queue_);
+        joy_sub_ = nh_.subscribe(joy_options);
+        joy_spinner_.start();
         marker_pub = nh_.advertise<visualization_msgs::Marker>("visualization_marker", 1);
         marker_array_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("topology_markers", 1, true);
         path_pub_ = nh_.advertise<nav_msgs::Path>("topology_plan", 1, true);
@@ -138,6 +146,8 @@ public:
 
     ~mynav()
     {
+        joy_spinner_.stop();
+        reference_status_spinner_.stop();
         if (runth_ && runth_->joinable())
         {
             runth_->join();
@@ -395,6 +405,8 @@ private:
     tf2_ros::Buffer tf_buffer_;
     tf2_ros::TransformListener tf_listener_;
     ros::Publisher vel_pub_;
+    ros::CallbackQueue joy_callback_queue_;
+    ros::AsyncSpinner joy_spinner_;
     ros::Subscriber joy_sub_;
     ros::Publisher marker_pub;
     ros::Publisher marker_array_pub_;
@@ -414,7 +426,8 @@ private:
     int numofpnts;
     int current_pnt;
     bool stop_and_quit;
-    bool pause_robot;
+    std::atomic<bool> pause_robot;
+    std::atomic<bool> pause_reentry_requested_;
     std::map<int, std::vector<TopoEdge>> graph;
     int current_status; // 0 init, 1 load pnts ok, 2 running, 3 finished, 4 quit
 
@@ -881,6 +894,106 @@ private:
         ROS_WARN("No topology connect node is directly reachable in static map, fall back to nearest P%d at %.2f m.",
                  candidates.front().second, candidates.front().first);
         return candidates.front().second;
+    }
+
+    int forwardReentryPosition(const std::vector<int> &path_indices,
+                               std::size_t search_start)
+    {
+        geometry_msgs::PoseStamped robot_pose;
+        if (!getCurrentRobotPose(robot_pose) || path_indices.empty())
+        {
+            return -1;
+        }
+
+        search_start = std::min(search_start, path_indices.size() - 1);
+        for (std::size_t position = search_start;
+             position < path_indices.size(); ++position)
+        {
+            const int candidate = path_indices[position];
+            if (!validIndex(candidate))
+            {
+                continue;
+            }
+
+            if (position > 0)
+            {
+                const int previous = path_indices[position - 1];
+                if (!validIndex(previous))
+                {
+                    continue;
+                }
+                const double edge_x = target_poses[candidate].x - target_poses[previous].x;
+                const double edge_y = target_poses[candidate].y - target_poses[previous].y;
+                const double edge_length = std::hypot(edge_x, edge_y);
+                const double to_candidate_x =
+                    target_poses[candidate].x - robot_pose.pose.position.x;
+                const double to_candidate_y =
+                    target_poses[candidate].y - robot_pose.pose.position.y;
+                const double forward_projection =
+                    edge_x * to_candidate_x + edge_y * to_candidate_y;
+
+                // If the robot is already beyond this node in the route direction,
+                // reconnecting to it would make the vehicle reverse along the edge.
+                if (edge_length > 1e-6 &&
+                    forward_projection < -0.05 * edge_length)
+                {
+                    continue;
+                }
+            }
+
+            if (staticMapSegmentFree(robot_pose.pose.position.x,
+                                     robot_pose.pose.position.y,
+                                     target_poses[candidate].x,
+                                     target_poses[candidate].y))
+            {
+                ROS_INFO("Forward topology re-entry selects route position %zu, P%d (%.2f m).",
+                         position, candidate,
+                         distanceToNode(robot_pose, candidate));
+                return static_cast<int>(position);
+            }
+        }
+
+        ROS_WARN("No forward node on the remaining topology route is directly reachable.");
+        return -1;
+    }
+
+    bool buildForwardReentryPath(const std::vector<int> &current_path,
+                                 std::size_t current_position,
+                                 bool current_goal_passed,
+                                 std::vector<int> &reentry_path,
+                                 std::size_t &execution_start)
+    {
+        if (current_path.empty() || current_position >= current_path.size())
+        {
+            return false;
+        }
+
+        std::size_t search_start = current_position;
+        if (current_goal_passed && search_start + 1 < current_path.size())
+        {
+            ++search_start;
+        }
+
+        const int reentry_position =
+            forwardReentryPosition(current_path, search_start);
+        if (reentry_position < 0)
+        {
+            return false;
+        }
+
+        reentry_path.clear();
+        execution_start = 0;
+        if (reentry_position > 0)
+        {
+            // Keep the preceding node only as B-spline direction context. The
+            // execution loop starts at reentry_node and never drives back to it.
+            reentry_path.push_back(current_path[reentry_position - 1]);
+            execution_start = 1;
+        }
+        reentry_path.insert(reentry_path.end(),
+                            current_path.begin() + reentry_position,
+                            current_path.end());
+        return true;
     }
 
     void addDirectedEdge(int from, int to, double cost, bool trusted,
@@ -1425,7 +1538,9 @@ private:
     {
         GOAL_REACHED,
         GOAL_FAILED,
-        GOAL_PATH_DEVIATED
+        GOAL_PATH_DEVIATED,
+        GOAL_PAUSED,
+        GOAL_PAUSED_AFTER_PASS
     };
 
     void referenceStatusCallback(const geometry_msgs::Vector3Stamped::ConstPtr &msg)
@@ -1505,11 +1620,31 @@ private:
                 return GOAL_FAILED;
             }
 
-            while (pause_robot && ros::ok())
+            if (pause_reentry_requested_.load())
             {
-                global_ac->cancelAllGoals();
+                global_ac->cancelGoal();
                 stopRobot();
-                ros::Duration(0.2).sleep();
+                while (pause_robot.load() && ros::ok())
+                {
+                    stopRobot();
+                    ros::Duration(0.2).sleep();
+                }
+                if (!ros::ok())
+                {
+                    return GOAL_FAILED;
+                }
+
+                const bool current_goal_passed =
+                    referenceStatusMatches(topology_path_index,
+                                           REFERENCE_PASSED,
+                                           goal_start_time);
+                pause_reentry_requested_.store(false);
+                active_next_index_ = -1;
+                publishTopologyMarkers();
+                ROS_INFO("Resume via topology re-entry after pausing at path index %d%s.",
+                         topology_path_index,
+                         current_goal_passed ? " (current waypoint already passed)" : "");
+                return current_goal_passed ? GOAL_PAUSED_AFTER_PASS : GOAL_PAUSED;
             }
 
             if (referenceStatusMatches(topology_path_index,
@@ -1528,6 +1663,13 @@ private:
 
             if (global_ac->waitForResult(ros::Duration(0.2)))
             {
+                // pause() cancels the action from the independent Joy callback
+                // queue. Handle that cancellation as a resumable topology
+                // re-entry instead of a failed/blocked edge.
+                if (pause_reentry_requested_.load())
+                {
+                    continue;
+                }
                 if (referenceStatusMatches(topology_path_index,
                                            REFERENCE_PATH_DEVIATED,
                                            goal_start_time))
@@ -1663,6 +1805,7 @@ private:
     bool runTopologyMission(int target_index, std::vector<int> path_indices)
     {
         int start_index = path_indices.empty() ? nearestPoseIndex() : path_indices.front();
+        std::size_t execution_start = 0;
         int replan_count = 0;
         const int max_replans = std::max(3, static_cast<int>(target_poses.size()) * 2);
 
@@ -1677,11 +1820,12 @@ private:
                     stopRobot();
                     return false;
                 }
+                execution_start = 0;
                 publishTopologyPath(path_indices);
                 ROS_INFO_STREAM(formatPathMessage("replan ok:", path_indices));
             }
 
-            for (std::size_t i = 0; i < path_indices.size(); ++i)
+            for (std::size_t i = execution_start; i < path_indices.size(); ++i)
             {
                 const int next_index = path_indices[i];
                 if (!validIndex(next_index))
@@ -1712,7 +1856,36 @@ private:
                 }
 
                 const bool path_deviated = goal_result == GOAL_PATH_DEVIATED;
-                if (!path_deviated && validIndex(previous_index))
+                const bool paused = goal_result == GOAL_PAUSED ||
+                                    goal_result == GOAL_PAUSED_AFTER_PASS;
+                const bool needs_forward_reentry = path_deviated || paused;
+
+                if (needs_forward_reentry)
+                {
+                    std::vector<int> reentry_path;
+                    std::size_t reentry_execution_start = 0;
+                    const bool current_goal_passed =
+                        goal_result == GOAL_PAUSED_AFTER_PASS;
+                    if (buildForwardReentryPath(path_indices, i,
+                                                current_goal_passed,
+                                                reentry_path,
+                                                reentry_execution_start))
+                    {
+                        path_indices.swap(reentry_path);
+                        execution_start = reentry_execution_start;
+                        start_index = path_indices[execution_start];
+                        ++replan_count;
+                        publishTopologyPath(path_indices);
+                        ROS_WARN_STREAM(formatPathMessage(
+                            paused ? "topology forward re-entry after pause:"
+                                   : "topology forward re-entry after B-spline deviation:",
+                            path_indices));
+                        break;
+                    }
+                    ROS_WARN("Forward topology re-entry failed; fall back to nearest reachable node.");
+                }
+
+                if (!needs_forward_reentry && validIndex(previous_index))
                 {
                     blockEdge(previous_index, next_index);
                 }
@@ -1723,7 +1896,8 @@ private:
                     start_index = current_pose_index;
                 }
                 path_indices = dijkstraShortestPath(start_index, target_index);
-                replan_count++;
+                execution_start = 0;
+                ++replan_count;
                 if (path_indices.empty())
                 {
                     if (!waitForTemporaryPath(start_index, target_index, path_indices))
@@ -1736,8 +1910,8 @@ private:
                 }
                 publishTopologyPath(path_indices);
                 ROS_WARN_STREAM(formatPathMessage(
-                    path_deviated ? "topology re-entry after B-spline deviation:"
-                                  : "replan after blocked edge:",
+                    needs_forward_reentry ? "nearest-node topology re-entry fallback:"
+                                          : "replan after blocked edge:",
                     path_indices));
                 break;
             }
@@ -1783,17 +1957,17 @@ private:
 
     void pause()
     {
+        pause_robot.store(true);
+        pause_reentry_requested_.store(true);
         global_ac->cancelAllGoals();
-        pause_robot = true;
         stopRobot();
     }
 
     void resume()
     {
-        if (pause_robot)
+        if (pause_robot.exchange(false))
         {
-            ROS_INFO("Resume topology navigation at P%d.", current_pose_index);
-            pause_robot = false;
+            ROS_INFO("Resume topology navigation.");
         }
     }
 
@@ -1829,7 +2003,7 @@ private:
         if (Ypressed)
         {
             ROS_INFO("Y pressed, start or resume.");
-            pause_robot = false;
+            pause_robot.store(false);
             if ((nullptr == runth_) || (current_status == 3))
             {
                 start();
