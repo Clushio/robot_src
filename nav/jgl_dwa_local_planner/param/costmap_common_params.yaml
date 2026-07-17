@@ -54,7 +54,7 @@ blind_clear_layer:
 inflation_layer:
   enabled:              true
   cost_scaling_factor:  3 #3
-  inflation_radius:    0.55 #1.2  # max. distance from an obstacle at which costs are incurred for planning paths.
+  inflation_radius:    0.35 #1.2  # max. distance from an obstacle at which costs are incurred for planning paths.
   update_frequency: 5.0  # 高频率更新以快速响应变化
   publish_frequency: 2.0  # 适当频率发布更新
 

@@ -19,7 +19,7 @@ DWAPlannerROS:
   bspline_weight_obstacle: 2.0
   bspline_weight_topo: 0.6
   bspline_weight_curvature: 1.0
-  safe_distance: 0.25
+  safe_distance: 0.10
   reference_occupied_threshold: 98
   max_deviation_from_topo: 0.50
   max_curvature: 2.10
