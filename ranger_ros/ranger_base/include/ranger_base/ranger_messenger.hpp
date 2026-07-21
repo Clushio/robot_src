@@ -53,6 +53,7 @@ class RangerROSMessenger {
 
  public:
   RangerROSMessenger(ros::NodeHandle* nh);
+  ~RangerROSMessenger();
 
   void Run();
 
@@ -62,6 +63,10 @@ class RangerROSMessenger {
   void PublishStateToROS();
   void PublishSimStateToROS(double linear, double angular);
   void TwistCmdCallback(const geometry_msgs::Twist::ConstPtr& msg);
+  void CheckCmdVelWatchdog();
+  void SendZeroMotionCommand();
+  bool IsFiniteTwist(const geometry_msgs::Twist& msg) const;
+  bool IsZeroTwist(const geometry_msgs::Twist& msg) const;
   void LightCmdCallback(const ranger_msgs::RangerLightCmd::ConstPtr &msg);
   double CalculateSteeringAngle(geometry_msgs::Twist msg, double& radius);
   void UpdateOdometry(double linear, double angular, double angle, double dt);
@@ -85,6 +90,10 @@ class RangerROSMessenger {
   std::string odom_topic_name_;
   int update_rate_;
   bool publish_odom_tf_;
+  double cmd_vel_timeout_ = 0.25;
+  ros::WallTime last_cmd_vel_time_;
+  bool cmd_vel_received_ = false;
+  bool watchdog_active_ = true;
 
   uint8_t motion_mode_ = 0;
   bool parking_mode_;

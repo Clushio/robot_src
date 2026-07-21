@@ -6,8 +6,7 @@
   <node pkg="x2bot_teleop" type="x2bot_joy_PXN" name="x2bot_joy_PXN" output="screen">
     <param name="scale_angular" value="1"/>
     <param name="scale_linear" value="0.1"/>
-    <!--remap from="x2bot_joy/cmd_vel" to="teleop_velocity_smoother/raw_cmd_vel"/-->
-    <remap from="x2bot_joy_PXN/cmd_vel" to="cmd_vel"/>
+    <param name="cmd_vel_topic" value="/cmd_vel/teleop"/>
   </node>
 
   <node pkg="joy" type="joy_node" name="joystick">

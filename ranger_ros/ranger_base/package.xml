@@ -40,6 +40,7 @@
   <exec_depend>ranger_msgs</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>cmd_vel_arbiter</exec_depend>
 
   <build_export_depend>roscpp</build_export_depend>
   <build_export_depend>roslaunch</build_export_depend>

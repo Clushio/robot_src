@@ -83,8 +83,11 @@ public:
         // 订阅 /tag_position 话题
         tag_subscriber_ = nh_.subscribe("/tag_position", 10, &RobotController::tagCallback, this);
 
-        // 发布 /cmd_vel 消息
-        cmd_vel_publisher_ = nh_.advertise<geometry_msgs::Twist>("/cmd_vel", 10);
+        // 发布到仲裁器输入；只有 cmd_vel_arbiter 可以发布 /cmd_vel。
+        std::string cmd_vel_topic;
+        private_nh.param("cmd_vel_topic", cmd_vel_topic,
+                         std::string("/cmd_vel/tag"));
+        cmd_vel_publisher_ = nh_.advertise<geometry_msgs::Twist>(cmd_vel_topic, 10);
 
         // 创建服务
         service_ = nh_.advertiseService("set_target_y", &RobotController::handleSetTargetY, this);

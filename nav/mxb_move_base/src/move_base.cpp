@@ -93,8 +93,11 @@ namespace move_base {
     //set up the planner's thread
     planner_thread_ = new boost::thread(boost::bind(&MoveBase::planThread, this));
 
-    //for commanding the base
-    vel_pub_ = nh.advertise<geometry_msgs::Twist>("cmd_vel", 1);
+    // Publish to an arbiter input. Only cmd_vel_arbiter may publish /cmd_vel.
+    std::string cmd_vel_topic;
+    private_nh.param("cmd_vel_topic", cmd_vel_topic,
+                     std::string("/cmd_vel/nav"));
+    vel_pub_ = nh.advertise<geometry_msgs::Twist>(cmd_vel_topic, 1);
     current_goal_pub_ = private_nh.advertise<geometry_msgs::PoseStamped>("current_goal", 0 );
 
     ros::NodeHandle action_nh("move_base");

@@ -7,6 +7,10 @@
     <arg name="update_rate" default="50" />
     <arg name="odom_topic_name" default="odom" />
     <arg name="publish_odom_tf" default="false" />
+    <arg name="cmd_vel_timeout" default="0.25" />
+
+    <!-- The arbiter is the only publisher allowed to drive /cmd_vel. -->
+    <include file="$(find cmd_vel_arbiter)/launch/cmd_vel_arbiter.launch" />
 
     <node name="ranger_base_node" pkg="ranger_base" type="ranger_base_node" output="screen">
         <param name="port_name" type="string" value="$(arg port_name)" />
@@ -16,5 +20,6 @@
         <param name="update_rate" type="int" value="$(arg update_rate)" />
         <param name="odom_topic_name" type="string" value="$(arg odom_topic_name)" />  
         <param name="publish_odom_tf" type="bool" value="$(arg publish_odom_tf)" />
+        <param name="cmd_vel_timeout" type="double" value="$(arg cmd_vel_timeout)" />
     </node>
 </launch>

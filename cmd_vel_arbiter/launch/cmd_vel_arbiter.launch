@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<launch>
+  <node name="cmd_vel_arbiter" pkg="cmd_vel_arbiter"
+        type="cmd_vel_arbiter_node" output="screen" required="true">
+    <rosparam command="load"
+              file="$(find cmd_vel_arbiter)/config/cmd_vel_arbiter.yaml" />
+  </node>
+</launch>

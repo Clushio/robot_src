@@ -122,7 +122,10 @@ public:
                          static_map_inflation_radius_);
 
         initializeGlobalAC();
-        vel_pub_ = nh_.advertise<geometry_msgs::Twist>("cmd_vel", 1, true);
+        std::string cmd_vel_topic;
+        private_nh.param("cmd_vel_topic", cmd_vel_topic,
+                         std::string("/cmd_vel/safety"));
+        vel_pub_ = nh_.advertise<geometry_msgs::Twist>(cmd_vel_topic, 1);
         ros::SubscribeOptions joy_options =
             ros::SubscribeOptions::create<sensor_msgs::Joy>(
                 "joy", 10, boost::bind(&mynav::joyCallback, this, _1),

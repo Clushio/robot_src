@@ -9,6 +9,7 @@
 
 #include "ranger_base/ranger_messenger.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 #include <ros/ros.h>
@@ -61,12 +62,22 @@ RangerROSMessenger::RangerROSMessenger(ros::NodeHandle* nh) : nh_(nh) {
   SetupSubscription();
 }
 
+RangerROSMessenger::~RangerROSMessenger() { SendZeroMotionCommand(); }
+
 void RangerROSMessenger::Run() {
   ros::Rate rate(update_rate_);
   while (ros::ok()) {
-    PublishStateToROS();
     ros::spinOnce();
+    CheckCmdVelWatchdog();
+    PublishStateToROS();
     rate.sleep();
+  }
+
+  // Best effort stop on an orderly ROS shutdown. Repetition increases the
+  // chance that at least one CAN command is transmitted before process exit.
+  for (int i = 0; i < 3; ++i) {
+    SendZeroMotionCommand();
+    ros::WallDuration(0.02).sleep();
   }
 }
 
@@ -80,15 +91,17 @@ void RangerROSMessenger::LoadParameters() {
   nh_->param<std::string>("odom_topic_name", odom_topic_name_,
                           std::string("odom"));
   nh_->param<bool>("publish_odom_tf", publish_odom_tf_, false);
+  nh_->param<double>("cmd_vel_timeout", cmd_vel_timeout_, 0.25);
+  cmd_vel_timeout_ = std::max(0.02, cmd_vel_timeout_);
 
   ROS_INFO(
       "Successfully loaded the following parameters: \n port_name: %s\n "
       "robot_model: %s\n odom_frame: %s\n base_frame: %s\n "
       "update_rate: %d\n odom_topic_name: %s\n "
-      "publish_odom_tf: %d\n",
+      "publish_odom_tf: %d\n cmd_vel_timeout: %.3f s\n",
       port_name_.c_str(), robot_model_.c_str(), odom_frame_.c_str(),
       base_frame_.c_str(), update_rate_, odom_topic_name_.c_str(),
-      publish_odom_tf_);
+      publish_odom_tf_, cmd_vel_timeout_);
 
   // load robot parameters
   if (robot_model_ == "ranger_mini_v1") {
@@ -415,6 +428,26 @@ void RangerROSMessenger::TwistCmdCallback(
   double steer_cmd;
   double radius;
 
+  if (!IsFiniteTwist(*msg)) {
+    ROS_ERROR_THROTTLE(1.0,
+                       "Rejected non-finite /cmd_vel; commanding zero speed");
+    cmd_vel_received_ = false;
+    watchdog_active_ = true;
+    SendZeroMotionCommand();
+    return;
+  }
+
+  last_cmd_vel_time_ = ros::WallTime::now();
+  cmd_vel_received_ = true;
+  watchdog_active_ = false;
+
+  // Avoid 0 / 0 in CalculateSteeringAngle() and make a stop command
+  // independent of the currently selected Ranger motion mode.
+  if (IsZeroTwist(*msg)) {
+    SendZeroMotionCommand();
+    return;
+  }
+
   // analyze Twist msg and switch motion_mode
   // check for parking mode, only applicable to RangerMiniV2
   if (parking_mode_ && robot_type_ == RangerSubType::kRangerMiniV2) {
@@ -497,6 +530,46 @@ void RangerROSMessenger::TwistCmdCallback(
       break;
     }
   }
+}
+
+void RangerROSMessenger::CheckCmdVelWatchdog() {
+  const bool timed_out =
+      !cmd_vel_received_ ||
+      (ros::WallTime::now() - last_cmd_vel_time_).toSec() > cmd_vel_timeout_;
+  if (!timed_out) {
+    return;
+  }
+
+  if (!watchdog_active_) {
+    ROS_WARN("/cmd_vel timeout after %.3f s; commanding zero speed",
+             cmd_vel_timeout_);
+  }
+  watchdog_active_ = true;
+  SendZeroMotionCommand();
+}
+
+void RangerROSMessenger::SendZeroMotionCommand() {
+  if (robot_) {
+    robot_->SetMotionCommand(0.0, 0.0, 0.0);
+  }
+}
+
+bool RangerROSMessenger::IsFiniteTwist(
+    const geometry_msgs::Twist& msg) const {
+  return std::isfinite(msg.linear.x) && std::isfinite(msg.linear.y) &&
+         std::isfinite(msg.linear.z) && std::isfinite(msg.angular.x) &&
+         std::isfinite(msg.angular.y) && std::isfinite(msg.angular.z);
+}
+
+bool RangerROSMessenger::IsZeroTwist(
+    const geometry_msgs::Twist& msg) const {
+  constexpr double kEpsilon = 1e-9;
+  return std::abs(msg.linear.x) <= kEpsilon &&
+         std::abs(msg.linear.y) <= kEpsilon &&
+         std::abs(msg.linear.z) <= kEpsilon &&
+         std::abs(msg.angular.x) <= kEpsilon &&
+         std::abs(msg.angular.y) <= kEpsilon &&
+         std::abs(msg.angular.z) <= kEpsilon;
 }
 
 void RangerROSMessenger::LightCmdCallback(

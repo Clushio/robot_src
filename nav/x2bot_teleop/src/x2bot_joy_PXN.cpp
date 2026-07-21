@@ -48,10 +48,14 @@ X2botTeleop::X2botTeleop():
   ph_.param("scale_angular", a_scale_, a_scale_);
   ph_.param("scale_linear", l_scale_, l_scale_);
 
+  std::string cmd_vel_topic;
+  ph_.param("cmd_vel_topic", cmd_vel_topic,
+            std::string("/cmd_vel/teleop"));
+
   deadman_pressed_ = false;
   zero_twist_published_ = false;
 
-  vel_pub_ = ph_.advertise<geometry_msgs::Twist>("cmd_vel", 1, true);
+  vel_pub_ = nh_.advertise<geometry_msgs::Twist>(cmd_vel_topic, 1);
   joy_sub_ = nh_.subscribe<sensor_msgs::Joy>("joy", 10, &X2botTeleop::joyCallback, this);
 
   timer_ = nh_.createTimer(ros::Duration(0.1), boost::bind(&X2botTeleop::publish, this));
@@ -79,7 +83,8 @@ void X2botTeleop::publish()
   }
   else if(!deadman_pressed_ && !zero_twist_published_)
   {
-    vel_pub_.publish(*new geometry_msgs::Twist());//没有按下deadman开关则发送的速度均为0
+    geometry_msgs::Twist zero_twist;
+    vel_pub_.publish(zero_twist);//没有按下deadman开关则发送的速度均为0
     zero_twist_published_=true;
     std::cout<<"stop"<<std::endl;
   }

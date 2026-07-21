@@ -1,0 +1,36 @@
+output_topic: /cmd_vel
+publish_rate: 50.0
+switch_stop_cycles: 1
+
+# Freshness uses wall time, so a frozen /use_sim_time cannot keep a command alive.
+safety_topic: /cmd_vel/safety
+safety_priority: 100
+safety_timeout: 0.25
+safety_max_linear_x: 0.0
+safety_max_linear_y: 0.0
+safety_max_angular_z: 0.0
+
+# PXN launch maxima are 0.25 m/s and 1.0 rad/s; keep 0.10 margin.
+teleop_topic: /cmd_vel/teleop
+teleop_priority: 80
+teleop_timeout: 0.25
+teleop_max_linear_x: 0.35
+teleop_max_linear_y: 0.10
+teleop_max_angular_z: 1.10
+
+# TagCtl maxima are 0.05 m/s and 0.15 rad/s; keep 0.10 margin.
+tag_topic: /cmd_vel/tag
+tag_priority: 60
+tag_timeout: 0.25
+tag_max_linear_x: 0.15
+tag_max_linear_y: 0.15
+tag_max_angular_z: 0.25
+
+# B-spline following normally stays below 0.42 rad/s, while the active DWA
+# fallback/goal-rotation configuration allows 4.0 rad/s; keep 0.10 margin.
+nav_topic: /cmd_vel/nav
+nav_priority: 20
+nav_timeout: 0.25
+nav_max_linear_x: 0.30
+nav_max_linear_y: 0.10
+nav_max_angular_z: 4.10
