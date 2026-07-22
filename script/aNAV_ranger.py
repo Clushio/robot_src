@@ -72,6 +72,20 @@ ROBOT_R_PATH = robot_r_path()
 PANEL_RVIZ_CONFIG = os.path.join(ROBOT_R_PATH, 'rviz', 'nav_rviz.rviz')
 PLAIN_RVIZ_CONFIG = os.path.join(ROBOT_R_PATH, 'rviz', 'nav_rviz_no_panel.rviz')
 
+
+class TerminalTabProcess:
+    """Expose the terminal child PID while using gnome-terminal --wait for lifecycle checks."""
+
+    def __init__(self, launcher, child_pid):
+        self.launcher = launcher
+        self.pid = child_pid
+
+    def poll(self):
+        return self.launcher.poll()
+
+    def wait(self, timeout=None):
+        return self.launcher.wait(timeout=timeout)
+
 def check_and_start_roscore():
     """确保 ROS master 可用，且不让 GUI 在等待窗口标题时无限卡住。"""
     try:
@@ -126,6 +140,7 @@ class MyWindow(QWidget):
         self.runPntsNavProcess = None
         self.moveBaseProcess = None
         self.baseProcess = None
+        self.joyProcess = None
         self.auto_nav_start_pending = False
         self.move_base_wait_attempts = 0
         self.add_pnt.hide()
@@ -662,6 +677,45 @@ class MyWindow(QWidget):
         """直接启动子进程并创建独立进程组，便于可靠停止 roslaunch 及其子节点。"""
         return subprocess.Popen(command, start_new_session=True)
 
+    def start_terminal_tab_process(self, command, title):
+        """在当前 Terminal 窗口新建标签页，同时记录真实命令 PID。"""
+        pid_file = os.path.join(
+            '/tmp', f'anav_gui_{os.getpid()}_{time.time_ns()}.pid'
+        )
+        command_text = ' '.join(shlex.quote(str(part)) for part in command)
+        shell_command = (
+            f"printf '%s\\n' \"$$\" > {shlex.quote(pid_file)}; "
+            f"exec {command_text}"
+        )
+        launcher = subprocess.Popen([
+            'gnome-terminal', '--tab', '--active', f'--title={title}', '--wait',
+            '--working-directory=' + SCRIPT_DIR,
+            '--', 'bash', '-c', shell_command,
+        ])
+
+        child_pid = None
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            if os.path.isfile(pid_file):
+                try:
+                    with open(pid_file, 'r', encoding='utf-8') as handle:
+                        child_pid = int(handle.read().strip())
+                    break
+                except (OSError, ValueError):
+                    pass
+            if launcher.poll() is not None:
+                break
+            time.sleep(0.05)
+        try:
+            os.unlink(pid_file)
+        except OSError:
+            pass
+        if child_pid is None:
+            if launcher.poll() is None:
+                launcher.terminate()
+            raise RuntimeError(f'无法获取“{title}”标签页中的进程 PID')
+        return TerminalTabProcess(launcher, child_pid)
+
     def stop_managed_process(self, process, label):
         """先请求 ROS 正常退出，超时后再逐级强制结束。"""
         if process is None:
@@ -753,7 +807,10 @@ class MyWindow(QWidget):
          # 构建完整的 ROS 命令
         ros_command = f'rosservice call {service_name} "{{target_x: {xx}, target_y: {yy}, target_angle: {aa}}}"'
        # 构建终端命令，使用 gnome-terminal 打开新的终端窗口并执行 ROS 命令
-        terminal_command = ['gnome-terminal', '--', 'bash', '-c', ros_command]
+        terminal_command = [
+            'gnome-terminal', '--tab', '--active', '--title=目标微调',
+            '--', 'bash', '-c', ros_command,
+        ]
             # 使用 subprocess.Popen 启动新的终端
         try:
             self.runGoProcess = subprocess.Popen(terminal_command, preexec_fn=os.setpgrp)
@@ -844,21 +901,30 @@ class MyWindow(QWidget):
         self.gotop(-station_id)
 
     def start_joy(self):
-        ros_command = 'roslaunch x2bot_teleop x2bot_joy_PXN.launch'
-            # 构建完整的终端命令，使用 gnome-terminal 打开新的终端窗口并执行 ROS 命令
-        terminal_command = ['gnome-terminal', '--', 'bash', '-c', ros_command + '; exec bash']          
-            # 使用 subprocess.Popen 启动新的终端
-        self.runJoyProcess = subprocess.Popen(terminal_command, preexec_fn=os.setpgrp)
-        self.set_status('手柄驱动已启动。', 'success')
+        if self.joyProcess and self.joyProcess.poll() is None:
+            self.set_status('手柄驱动已在运行。', 'info')
+            return
+        try:
+            self.joyProcess = self.start_terminal_tab_process(
+                ['roslaunch', 'x2bot_teleop', 'x2bot_joy_PXN.launch'], '手柄'
+            )
+        except (OSError, RuntimeError) as error:
+            self.set_status(f'手柄驱动启动失败：{error}', 'error')
+            return
+        self.set_status('手柄驱动已在新标签页启动。', 'success')
 
     def start_base(self):
-                     # 定义要执行的 ROS 命令
-        ros_command = 'roslaunch ranger_bringup ranger_mini_v2.launch'
-            # 构建完整的终端命令，使用 gnome-terminal 打开新的终端窗口并执行 ROS 命令
-        terminal_command = ['gnome-terminal', '--', 'bash', '-c', ros_command + '; exec bash']          
-            # 使用 subprocess.Popen 启动新的终端
-        self.baseProcess = subprocess.Popen(terminal_command, preexec_fn=os.setpgrp)
-        self.set_status('底盘驱动已启动。', 'success')
+        if self.baseProcess and self.baseProcess.poll() is None:
+            self.set_status('底盘驱动已在运行。', 'info')
+            return
+        try:
+            self.baseProcess = self.start_terminal_tab_process(
+                ['roslaunch', 'ranger_bringup', 'ranger_mini_v2.launch'], '底盘'
+            )
+        except (OSError, RuntimeError) as error:
+            self.set_status(f'底盘驱动启动失败：{error}', 'error')
+            return
+        self.set_status('底盘驱动已在新标签页启动。', 'success')
 
     def start_tag(self):
     # 创建完整的 gnome-terminal 命令字符串
@@ -883,7 +949,10 @@ class MyWindow(QWidget):
             can_command = "echo '1' | sudo -S ip link set can0 up type can bitrate 500000"
 
             # 构建完整的终端命令
-            terminal_command = ['gnome-terminal', '--', 'bash', '-c', can_command + '; exec bash']
+            terminal_command = [
+                'gnome-terminal', '--tab', '--active', '--title=CAN',
+                '--', 'bash', '-c', can_command + '; exec bash',
+            ]
 
             # 使用 subprocess.Popen 启动新的终端窗口
             subprocess.Popen(terminal_command)
@@ -978,10 +1047,10 @@ class MyWindow(QWidget):
             self.set_status('点位设置已在运行。', 'info')
             return
         try:
-            self.setpointProcess = self.start_managed_process(
-                ['roslaunch', 'robot_r', '3settinglocation.launch']
+            self.setpointProcess = self.start_terminal_tab_process(
+                ['roslaunch', 'robot_r', '3settinglocation.launch'], '点位设置'
             )
-        except OSError as error:
+        except (OSError, RuntimeError) as error:
             self.set_status(f'点位设置启动失败：{error}', 'error')
             return
         self.start_button.setEnabled(False)
@@ -1048,10 +1117,10 @@ class MyWindow(QWidget):
             self.set_status('MoveBase 正在启动…', 'info')
             return True
         try:
-            self.moveBaseProcess = self.start_managed_process(
-                ['roslaunch', 'robot_r', '5nav.launch']
+            self.moveBaseProcess = self.start_terminal_tab_process(
+                ['roslaunch', 'robot_r', '5nav.launch'], 'MoveBase'
             )
-        except OSError as error:
+        except (OSError, RuntimeError) as error:
             self.set_status(f'MoveBase 启动失败：{error}', 'error')
             return False
         self.quitnav_button.setEnabled(True)
@@ -1107,10 +1176,10 @@ class MyWindow(QWidget):
 
     def launch_auto_navigation(self):
         try:
-            self.runPntsNavProcess = self.start_managed_process(
-                ['roslaunch', 'robot_r', '3navlocations.launch']
+            self.runPntsNavProcess = self.start_terminal_tab_process(
+                ['roslaunch', 'robot_r', '3navlocations.launch'], 'AutoNav'
             )
-        except OSError as error:
+        except (OSError, RuntimeError) as error:
             self.nav_button.setEnabled(True)
             self.set_status(f'自动导航启动失败：{error}', 'error')
             return
