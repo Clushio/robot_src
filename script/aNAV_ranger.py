@@ -7,7 +7,7 @@ import subprocess
 import time
 import shlex
 
-from PyQt5.QtCore import Qt,QTimer
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QDoubleValidator
 
 import os
@@ -108,6 +108,8 @@ def check_and_start_roscore():
     return False
 
 class MyWindow(QWidget):
+    status_requested = pyqtSignal(str, str)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle('移动机器人作业控制台')
@@ -126,6 +128,7 @@ class MyWindow(QWidget):
                 self.ros_available = False
 
         self.initUI()
+        self.status_requested.connect(self.set_status)
         self.set_chip(
             self.ros_chip,
             'ROS 已连接' if self.ros_available else 'ROS 未连接',
@@ -139,6 +142,7 @@ class MyWindow(QWidget):
         self.rviz_panel_mode = False
         self.runPntsNavProcess = None
         self.moveBaseProcess = None
+        self.bsplineLogProcess = None
         self.baseProcess = None
         self.joyProcess = None
         self.auto_nav_start_pending = False
@@ -750,6 +754,25 @@ class MyWindow(QWidget):
         except (OSError, subprocess.TimeoutExpired):
             return False
 
+    def start_bspline_log(self):
+        if self.bsplineLogProcess and self.bsplineLogProcess.poll() is None:
+            return True
+        log_command = (
+            'echo "[B-spline] Only showing JGL reference path logs."; '
+            'echo "[B-spline] Press Ctrl+C to stop this log view."; '
+            'rostopic echo /rosout_agg/msg | '
+            'grep --line-buffered "JGL reference path"'
+        )
+        try:
+            self.bsplineLogProcess = self.start_terminal_tab_process(
+                ['bash', '-c', log_command], 'B-spline Log'
+            )
+            return True
+        except (OSError, RuntimeError) as error:
+            self.bsplineLogProcess = None
+            self.set_status(f'B-spline 日志标签页启动失败：{error}', 'warning')
+            return False
+
     def set_nav_shortcuts_visible(self, visible):
         for button in (
             self.p1_button, self.p2_button, self.p3_button, self.p4_button, self.p5_button,
@@ -889,9 +912,34 @@ class MyWindow(QWidget):
                     text=True
                 )
                 print("plan_path_and_go successful:", result.stdout)
-                self.currentID = id
-            except subprocess.CalledProcessError as e:
-                print("plan_path_and_go failed:", e.stderr)
+                response_lines = [line.strip() for line in result.stdout.splitlines()]
+                success_value = next(
+                    (line.split(':', 1)[1].strip().lower()
+                     for line in response_lines if line.lower().startswith('success:')),
+                    '',
+                )
+                message = next(
+                    (line.split(':', 1)[1].strip().strip('"\'')
+                     for line in response_lines if line.lower().startswith('message:')),
+                    '',
+                )
+                if success_value in ('true', '1') and 'arrived:' in result.stdout.lower():
+                    self.currentID = id
+                    self.status_requested.emit(f'已到达：{target_name}', 'success')
+                elif success_value in ('true', '1'):
+                    self.currentID = id
+                    self.status_requested.emit(f'任务已完成：{target_name}', 'success')
+                else:
+                    detail = message or '服务未返回成功状态'
+                    self.status_requested.emit(
+                        f'未能到达 {target_name}：{detail}', 'error'
+                    )
+            except (subprocess.CalledProcessError, OSError) as e:
+                detail = getattr(e, 'stderr', '') or str(e)
+                print("plan_path_and_go failed:", detail)
+                self.status_requested.emit(
+                    f'目标调用失败（{target_name}）：{detail.strip()}', 'error'
+                )
 
         thread = threading.Thread(target=call_service)
         thread.daemon = True
@@ -1111,9 +1159,11 @@ class MyWindow(QWidget):
 
     def nav5(self):
         if self.is_move_base_ready():
+            self.start_bspline_log()
             self.set_status('MoveBase 已在运行。', 'info')
             return True
         if self.moveBaseProcess and self.moveBaseProcess.poll() is None:
+            self.start_bspline_log()
             self.set_status('MoveBase 正在启动…', 'info')
             return True
         try:
@@ -1123,6 +1173,7 @@ class MyWindow(QWidget):
         except (OSError, RuntimeError) as error:
             self.set_status(f'MoveBase 启动失败：{error}', 'error')
             return False
+        self.start_bspline_log()
         self.quitnav_button.setEnabled(True)
         self.set_chip(self.nav_chip, '导航 启动中', False)
         self.set_status('MoveBase 正在启动…', 'info')
@@ -1137,6 +1188,7 @@ class MyWindow(QWidget):
             self.set_status('正在等待 MoveBase 就绪…', 'info')
             return
         if self.is_move_base_ready():
+            self.start_bspline_log()
             self.launch_auto_navigation()
             return
 
@@ -1163,6 +1215,8 @@ class MyWindow(QWidget):
             self.nav_button.setEnabled(True)
             self.quitnav_button.setEnabled(False)
             self.set_chip(self.nav_chip, '导航 启动失败', False)
+            self.stop_managed_process(self.bsplineLogProcess, 'B-spline log')
+            self.bsplineLogProcess = None
             self.set_status('MoveBase 进程已退出，自动导航未启动，请查看终端日志。', 'error')
             return
         self.move_base_wait_attempts += 1
@@ -1195,12 +1249,14 @@ class MyWindow(QWidget):
     def exitNAV(self):
         stopped = (
             self.auto_nav_start_pending or self.runPntsNavProcess is not None
-            or self.moveBaseProcess is not None
+            or self.moveBaseProcess is not None or self.bsplineLogProcess is not None
         )
         self.auto_nav_start_pending = False
         self.set_status('正在停止自动导航和 MoveBase…', 'info')
         self.stop_managed_process(self.runPntsNavProcess, 'auto navigation')
         self.runPntsNavProcess = None
+        self.stop_managed_process(self.bsplineLogProcess, 'B-spline log')
+        self.bsplineLogProcess = None
         self.stop_managed_process(self.moveBaseProcess, 'MoveBase')
         self.moveBaseProcess = None
         self.nav_button.setEnabled(True)
