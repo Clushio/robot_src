@@ -1,7 +1,11 @@
 import sys
-from PyQt5.QtWidgets import QApplication, QWidget, QPushButton ,QLabel, QVBoxLayout, QHBoxLayout, QLineEdit
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QPushButton, QLabel, QVBoxLayout, QHBoxLayout,
+    QGridLayout, QLineEdit, QGroupBox, QTabWidget, QFrame, QSizePolicy
+)
 import subprocess
 import time
+import shlex
 
 from PyQt5.QtCore import Qt,QTimer
 from PyQt5.QtGui import QDoubleValidator
@@ -16,12 +20,38 @@ from tagReader import SerialTagReader
 import threading
 
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+WORKSPACE_ROOT = os.path.dirname(SCRIPT_DIR)
+
+
+def load_workspace_environment():
+    """自动加载脚本所在 catkin 工作空间，避免要求用户先 source setup.bash。"""
+    env_script = os.path.join(WORKSPACE_ROOT, 'devel', 'env.sh')
+    if not os.path.isfile(env_script):
+        return False
+    try:
+        output = subprocess.check_output([env_script, 'env', '-0'])
+        loaded_environment = {}
+        for entry in os.fsdecode(output).split('\0'):
+            if '=' in entry:
+                key, value = entry.split('=', 1)
+                loaded_environment[key] = value
+        os.environ.update(loaded_environment)
+        return True
+    except (OSError, subprocess.CalledProcessError) as error:
+        print(f"Unable to load workspace environment: {error}")
+        return False
+
+
+WORKSPACE_ENV_LOADED = load_workspace_environment()
+
+
 
 def robot_r_path():
     try:
         return subprocess.check_output(['rospack', 'find', 'robot_r'], text=True).strip()
     except Exception:
-        return '/home/nav/suvrobot/src/robot_r'
+        return os.path.join(WORKSPACE_ROOT, 'robot_r')
 
 
 ROBOT_R_PATH = robot_r_path()
@@ -29,64 +59,67 @@ PANEL_RVIZ_CONFIG = os.path.join(ROBOT_R_PATH, 'rviz', 'nav_rviz.rviz')
 PLAIN_RVIZ_CONFIG = os.path.join(ROBOT_R_PATH, 'rviz', 'nav_rviz_no_panel.rviz')
 
 def check_and_start_roscore():
+    """确保 ROS master 可用，且不让 GUI 在等待窗口标题时无限卡住。"""
     try:
-        # 检查roscore是否已经在运行
-        result = subprocess.run(['pgrep', '-f', 'roscore'], capture_output=True, text=True)
-        if result.stdout.strip():
-            print("roscore is already running.")
-        else:
-            print("Starting roscore...")
-            # 启动roscore
-            roscore_process = subprocess.Popen(['gnome-terminal', '--hide-menubar', '--', 'roscore'])
-            
-            # 等待一段时间，确保roscore已经启动
-            time.sleep(3)
-            
-            # 获取 roscore 的窗口 ID
-            window_id = None
-            while not window_id:
-                try:
-                    window_id = subprocess.check_output(['wmctrl', '-l']).strip().decode('utf-8')
-                    for line in window_id.split('\n'):
-                        if 'roscore' in line:
-                            window_id = line.split()[0]
-                            break
-                except subprocess.CalledProcessError:
-                    pass
-                time.sleep(1)
-            
-            # 最小化窗口
-            if window_id:
-                subprocess.run(['wmctrl', '-i', '-r', window_id, '-b', 'add,hidden'])
+        result = subprocess.run(['rosnode', 'list'], capture_output=True, text=True, timeout=2)
+        if result.returncode == 0:
+            return True
+
+        print("Starting roscore...")
+        subprocess.Popen(
+            ['roscore'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            preexec_fn=os.setpgrp
+        )
+        for _ in range(16):
+            time.sleep(0.5)
+            result = subprocess.run(['rosnode', 'list'], capture_output=True, text=True, timeout=2)
+            if result.returncode == 0:
+                return True
     except Exception as e:
         print(f"Error checking or starting roscore: {e}")
-        sys.exit(1)
+    return False
 
 class MyWindow(QWidget):
     def __init__(self):
         super().__init__()
-        # 设置窗口始终在最上方
-        self.setWindowFlags(Qt.WindowStaysOnTopHint)
-        self.setFixedSize(480, 850)
+        self.setWindowTitle('移动机器人作业控制台')
+        self.setMinimumSize(820, 640)
+        self.resize(960, 700)
 
-        check_and_start_roscore()
-
-        # 初始化ROS节点
-        rospy.init_node('upmachine_publisher', anonymous=True)
-        self.joy_pub = rospy.Publisher('/joy', Joy, queue_size=10)
+        self.preview_mode = os.environ.get('ANAV_GUI_PREVIEW') == '1'
+        self.ros_available = False if self.preview_mode else check_and_start_roscore()
+        self.joy_pub = None
+        if self.ros_available:
+            try:
+                rospy.init_node('upmachine_publisher', anonymous=True, disable_signals=True)
+                self.joy_pub = rospy.Publisher('/joy', Joy, queue_size=10)
+            except Exception as error:
+                print(f"ROS initialization failed: {error}")
+                self.ros_available = False
 
         self.initUI()
+        self.set_chip(
+            self.ros_chip,
+            'ROS 已连接' if self.ros_available else 'ROS 未连接',
+            self.ros_available,
+        )
+        if not self.ros_available and not self.preview_mode:
+            self.set_status('ROS 连接失败，请检查 ROS_MASTER_URI 或启动日志。', 'error')
         self.setpointProcess = None
         self.localizationProcess = None
         self.rvizProcess = None
         self.rviz_panel_mode = False
         self.runPntsNavProcess = None
+        self.moveBaseProcess = None
+        self.baseProcess = None
+        self.auto_nav_start_pending = False
+        self.move_base_wait_attempts = 0
         self.add_pnt.hide()
         self.add_workstation.hide()
         self.location_pnt.hide()
-        self.nav_runstart.hide()
-        self.nav_Pause.hide()
-        self.nav_resume.hide()
+        self.nav_runstart.setEnabled(False)
+        self.nav_Pause.setEnabled(False)
+        self.nav_resume.setEnabled(False)
         self.set_nav_shortcuts_visible(False)
 
         self.currentID = 0
@@ -113,7 +146,8 @@ class MyWindow(QWidget):
     def update_position(self):
         # 定时触发时启动线程获取数据（这里可以省略，因为线程在后台持续运行）
         self.position_label.setText(
-            f"X={self.reader.latest_position['x']:.1f}, Y={self.reader.latest_position['y']:.1f}, 角度={self.reader.latest_position['angle']:.1f}"
+            f"最新标签定位：X {self.reader.latest_position['x']:.1f}  ·  "
+            f"Y {self.reader.latest_position['y']:.1f}  ·  角度 {self.reader.latest_position['angle']:.1f}°"
         )
         pass  # 如果需要，可以在这里添加其他逻辑
 
@@ -315,21 +349,10 @@ class MyWindow(QWidget):
         self.joy_button.clicked.connect(self.start_joy)  # 直接连接到QWidget的close()方法
         self.joy_button.resize(75,70)
 
-        self.joy_button = QPushButton('TAG', self)
-        self.joy_button.move(288, 740)
-        self.joy_button.clicked.connect(self.start_tag)  # 直接连接到QWidget的close()方法
-        self.joy_button.resize(75,70)
-
-
-         # 创建退出按钮
-        self.quit_button = QPushButton('退出', self)
-        self.quit_button.move(378, 740)
-        self.quit_button.clicked.connect(self.close_app)  # 直接连接到QWidget的close()方法
-        self.quit_button.resize(75,70)
-        #self.initbash()
-
-        # 显示定start_tag)  # 直接连接到QWidget的close()方法
-        self.joy_button.resize(75,70)
+        self.tag_button = QPushButton('TAG', self)
+        self.tag_button.move(288, 740)
+        self.tag_button.clicked.connect(self.start_tag)
+        self.tag_button.resize(75,70)
 
 
          # 创建退出按钮
@@ -344,16 +367,327 @@ class MyWindow(QWidget):
         self.position_label.setStyleSheet("font-size: 14px; color: blue;")
         self.position_label.move(18, 825)
         self.position_label.resize(300,20)
-        #layout.addWidget(self.position_label)
+        self.build_user_layout()
 
-        #self.setLayout(layout)
+    def build_user_layout(self):
+        """将原有控件组织成面向操作员的工作流界面。"""
+        self.setStyleSheet("""
+            QWidget {
+                background: #F5F7FA;
+                color: #182230;
+                font-family: "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+                font-size: 14px;
+            }
+            QLabel#pageTitle { color: #101828; font-size: 24px; font-weight: 700; }
+            QLabel#subTitle { color: #667085; font-size: 13px; }
+            QLabel#chip {
+                background: #EEF2F7; color: #475467; border-radius: 12px;
+                padding: 5px 10px;
+            }
+            QLabel#statusBar {
+                background: #EEF4FF; color: #175CD3; border-radius: 7px;
+                padding: 9px 12px;
+            }
+            QGroupBox {
+                background: #FFFFFF; border: 1px solid #E1E7EF; border-radius: 10px;
+                margin-top: 14px; padding: 14px 12px 12px; font-weight: 600;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin; left: 12px; padding: 0 5px; color: #344054;
+            }
+            QGroupBox QLabel { background: transparent; }
+            QPushButton {
+                min-height: 36px; background: #FFFFFF; border: 1px solid #CDD5DF;
+                border-radius: 7px; padding: 4px 13px;
+            }
+            QPushButton:hover { background: #F8FAFC; border-color: #84A3CC; }
+            QPushButton:pressed { background: #EAF0F8; }
+            QPushButton:disabled { background: #F2F4F7; color: #98A2B3; border-color: #EAECF0; }
+            QPushButton[primary="true"] {
+                background: #1769E0; color: white; border-color: #1769E0; font-weight: 600;
+            }
+            QPushButton[primary="true"]:hover { background: #145BC2; }
+            QPushButton[danger="true"] { color: #B42318; border-color: #FDA29B; }
+            QPushButton[primary="true"]:disabled,
+            QPushButton[danger="true"]:disabled {
+                background: #F2F4F7; color: #98A2B3; border-color: #EAECF0;
+            }
+            QLineEdit {
+                min-height: 34px; background: #FFFFFF; border: 1px solid #CDD5DF;
+                border-radius: 6px; padding: 0 9px;
+            }
+            QLineEdit:focus { border: 2px solid #1769E0; }
+            QTabWidget::pane { border: 0; }
+            QTabBar::tab { background: transparent; color: #667085; padding: 10px 22px; }
+            QTabBar::tab:selected {
+                color: #175CD3; font-weight: 600; border-bottom: 2px solid #175CD3;
+            }
+        """)
+
+        self.g2d_button.setText('启动定位')
+        self.g2d_exit_button.setText('停止定位')
+        self.rviz_button.setText('打开 RViz')
+        self.nav_button.setText('启动自动导航')
+        self.nav5_button.setText('启动 MoveBase')
+        self.quitnav_button.setText('停止导航')
+        self.nav_runstart.setText('开始任务')
+        self.nav_Pause.setText('暂停任务')
+        self.nav_resume.setText('继续任务')
+        self.start_button.setText('进入点位设置')
+        self.stop_button.setText('结束点位设置')
+        self.add_pnt.setText('添加导航点')
+        self.add_workstation.setText('添加工位')
+        self.location_pnt.setText('在 RViz 显示点位')
+        self.target_send_button.setText('发送目标')
+        self.can_button.setText('启动 CAN')
+        self.base_button.setText('启动底盘')
+        self.joy_button.setText('启动手柄')
+        self.tag_button.setText('启动标签读取')
+        self.quit_button.setText('退出控制台')
+        self.position_label.setText('最新标签定位：暂无数据')
+
+        for button in (self.g2d_button, self.nav_button, self.nav_runstart, self.target_send_button,
+                       self.start_button):
+            button.setProperty('primary', True)
+        for button in (self.g2d_exit_button, self.quitnav_button, self.stop_button, self.quit_button):
+            button.setProperty('danger', True)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 16, 24, 14)
+        root.setSpacing(12)
+
+        header = QHBoxLayout()
+        heading = QVBoxLayout()
+        title = QLabel('移动机器人作业控制台')
+        title.setObjectName('pageTitle')
+        subtitle = QLabel('定位、目标下发与点位管理')
+        subtitle.setObjectName('subTitle')
+        heading.addWidget(title)
+        heading.addWidget(subtitle)
+        header.addLayout(heading)
+        header.addStretch()
+        self.ros_chip = self.create_status_chip('ROS 已连接')
+        self.localization_chip = self.create_status_chip('定位 未启动')
+        self.nav_chip = self.create_status_chip('导航 未启动')
+        header.addWidget(self.ros_chip)
+        header.addWidget(self.localization_chip)
+        header.addWidget(self.nav_chip)
+        root.addLayout(header)
+
+        divider = QFrame()
+        divider.setFrameShape(QFrame.HLine)
+        divider.setStyleSheet('color: #E1E7EF;')
+        root.addWidget(divider)
+
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self.build_navigation_page(), '导航作业')
+        self.tabs.addTab(self.build_points_page(), '点位管理')
+        self.tabs.addTab(self.build_tools_page(), '设备与工具')
+        root.addWidget(self.tabs, 1)
+
+        footer = QHBoxLayout()
+        self.status_label = QLabel('系统就绪，请先启动定位。')
+        self.status_label.setObjectName('statusBar')
+        self.status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        footer.addWidget(self.status_label, 1)
+        footer.addWidget(self.quit_button)
+        root.addLayout(footer)
+
+        self.stop_button.setEnabled(False)
+        self.g2d_exit_button.setEnabled(False)
+        self.quitnav_button.setEnabled(False)
+
+    def create_status_chip(self, text):
+        chip = QLabel(text)
+        chip.setObjectName('chip')
+        chip.setAlignment(Qt.AlignCenter)
+        return chip
+
+    def build_navigation_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 10, 0, 0)
+        layout.setSpacing(14)
+
+        startup = QGroupBox('1  作业准备')
+        startup_layout = QGridLayout(startup)
+        startup_layout.setHorizontalSpacing(10)
+        startup_layout.setVerticalSpacing(10)
+        help_text = QLabel('先完成定位，再启动导航。RViz 用于查看地图和机器人位姿。')
+        help_text.setObjectName('subTitle')
+        startup_buttons = (
+            self.g2d_button, self.g2d_exit_button, self.rviz_button,
+            self.nav_button, self.nav5_button, self.quitnav_button,
+        )
+        startup_layout.addWidget(help_text, 0, 0, 1, len(startup_buttons))
+        for column, button in enumerate(startup_buttons):
+            startup_layout.addWidget(button, 1, column)
+            startup_layout.setColumnStretch(column, 1)
+        layout.addWidget(startup)
+
+        task = QGroupBox('2  任务控制与快捷目标')
+        task_layout = QVBoxLayout(task)
+        task_layout.setSpacing(10)
+        control_row = QHBoxLayout()
+        control_row.setSpacing(8)
+        for button in (self.nav_runstart, self.nav_Pause, self.nav_resume):
+            control_row.addWidget(button)
+        control_row.addStretch()
+        task_layout.addLayout(control_row)
+        destination_grid = QGridLayout()
+        destination_grid.setHorizontalSpacing(8)
+        destination_grid.setVerticalSpacing(8)
+        destination_buttons = (
+            self.p1_button, self.p2_button, self.p3_button, self.p4_button, self.p5_button,
+            self.w1_button, self.w2_button, self.w3_button,
+        )
+        for index, button in enumerate(destination_buttons):
+            button.setText(f'导航点 {index + 1}' if index < 5 else f'工位 W{index - 4}')
+            destination_grid.addWidget(button, 0, index)
+            destination_grid.setColumnStretch(index, 1)
+        task_layout.addLayout(destination_grid)
+        layout.addWidget(task)
+
+        target = QGroupBox('3  精细调整')
+        target_layout = QVBoxLayout(target)
+        target_layout.setSpacing(9)
+        target_row = QHBoxLayout()
+        target_row.setSpacing(8)
+        self.x_label.setText('X (m)')
+        self.y_label.setText('Y (m)')
+        self.angle_label.setText('角度 (°)')
+        for label, editor in ((self.x_label, self.x_input), (self.y_label, self.y_input),
+                              (self.angle_label, self.angle_input)):
+            target_row.addWidget(label)
+            target_row.addWidget(editor)
+        target_row.addWidget(self.target_send_button)
+        target_layout.addLayout(target_row)
+        self.target_value_label.setText('当前目标：X 0.00 m  ·  Y 0.00 m  ·  角度 0.00°')
+        self.target_value_label.setObjectName('subTitle')
+        target_layout.addWidget(self.target_value_label)
+        quick_row = QHBoxLayout()
+        quick_row.setSpacing(8)
+        quick_row.addWidget(QLabel('Y 快捷值'))
+        quick_values = (-0.10, 0.00, 0.07, 0.10, 0.20)
+        for button, value in zip(self.y_quick_buttons, quick_values):
+            button.setText(f'{value:+.2f} m')
+            quick_row.addWidget(button)
+        quick_row.addStretch()
+        target_layout.addLayout(quick_row)
+        layout.addWidget(target)
+        layout.addStretch()
+        return page
+
+    def build_points_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 10, 0, 0)
+        layout.setSpacing(14)
+        editor = QGroupBox('点位采集')
+        editor_layout = QVBoxLayout(editor)
+        editor_layout.setSpacing(12)
+        note = QLabel('进入设置模式后，将机器人移到目标位置，再添加导航点或工位。')
+        note.setWordWrap(True)
+        note.setObjectName('subTitle')
+        editor_layout.addWidget(note)
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(10)
+        mode_row.addWidget(self.start_button)
+        mode_row.addWidget(self.stop_button)
+        mode_row.addStretch()
+        editor_layout.addLayout(mode_row)
+        action_row = QHBoxLayout()
+        action_row.setSpacing(10)
+        action_row.addWidget(self.add_pnt)
+        action_row.addWidget(self.add_workstation)
+        action_row.addWidget(self.location_pnt)
+        action_row.addStretch()
+        editor_layout.addLayout(action_row)
+        layout.addWidget(editor)
+        layout.addStretch()
+        return page
+
+    def build_tools_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 10, 0, 0)
+        layout.setSpacing(14)
+        devices = QGroupBox('设备启动')
+        grid = QGridLayout(devices)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+        for index, button in enumerate((self.can_button, self.base_button, self.joy_button, self.tag_button)):
+            grid.addWidget(button, index // 2, index % 2)
+        layout.addWidget(devices)
+        self.position_label.setObjectName('statusBar')
+        layout.addWidget(self.position_label)
+        layout.addStretch()
+        return page
+
+    def set_status(self, message, level='info'):
+        colors = {
+            'info': ('#EEF4FF', '#175CD3'),
+            'success': ('#ECFDF3', '#067647'),
+            'warning': ('#FFFAEB', '#B54708'),
+            'error': ('#FEF3F2', '#B42318'),
+        }
+        background, foreground = colors.get(level, colors['info'])
+        self.status_label.setText(message)
+        self.status_label.setStyleSheet(
+            f'background: {background}; color: {foreground}; border-radius: 7px; padding: 9px 12px;'
+        )
+
+    def set_chip(self, chip, text, active=False):
+        if active:
+            chip.setStyleSheet('background: #ECFDF3; color: #067647; border-radius: 12px; padding: 5px 10px;')
+        else:
+            chip.setStyleSheet('background: #EEF2F7; color: #475467; border-radius: 12px; padding: 5px 10px;')
+        chip.setText(text)
+
+    def start_managed_process(self, command):
+        """直接启动子进程并创建独立进程组，便于可靠停止 roslaunch 及其子节点。"""
+        return subprocess.Popen(command, start_new_session=True)
+
+    def stop_managed_process(self, process, label):
+        """先请求 ROS 正常退出，超时后再逐级强制结束。"""
+        if process is None:
+            return False
+        if process.poll() is not None:
+            return True
+        try:
+            os.killpg(process.pid, signal.SIGINT)
+            process.wait(timeout=4)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        except ProcessLookupError:
+            pass
+        except OSError as error:
+            print(f"Failed to stop {label}: {error}")
+            return False
+        return True
+
+    def is_move_base_ready(self):
+        try:
+            result = subprocess.run(
+                ['rosnode', 'list'], capture_output=True, text=True, timeout=1
+            )
+            nodes = {name.strip() for name in result.stdout.splitlines()}
+            return '/mxb_move_base' in nodes
+        except (OSError, subprocess.TimeoutExpired):
+            return False
 
     def set_nav_shortcuts_visible(self, visible):
         for button in (
             self.p1_button, self.p2_button, self.p3_button, self.p4_button, self.p5_button,
             self.w1_button, self.w2_button, self.w3_button
         ):
-            button.setVisible(visible)
+            button.setEnabled(visible)
 
     def read_target_input(self, line_edit):
         text = line_edit.text().strip()
@@ -369,7 +703,8 @@ class MyWindow(QWidget):
         self.y_input.setText(f"{self.current_target_y:.2f}")
         self.angle_input.setText(f"{self.current_target_angle:.2f}")
         self.target_value_label.setText(
-            f"目标 X={self.current_target_x:.2f} Y={self.current_target_y:.2f} Angle={self.current_target_angle:.2f}"
+            f"当前目标：X {self.current_target_x:.2f} m  ·  "
+            f"Y {self.current_target_y:.2f} m  ·  角度 {self.current_target_angle:.2f}°"
         )
         if send:
             self.slowMove(self.current_target_x, self.current_target_y, self.current_target_angle)
@@ -406,7 +741,14 @@ class MyWindow(QWidget):
        # 构建终端命令，使用 gnome-terminal 打开新的终端窗口并执行 ROS 命令
         terminal_command = ['gnome-terminal', '--', 'bash', '-c', ros_command]
             # 使用 subprocess.Popen 启动新的终端
-        self.runGoProcess = subprocess.Popen(terminal_command, preexec_fn=os.setpgrp)  # 记录进程    
+        try:
+            self.runGoProcess = subprocess.Popen(terminal_command, preexec_fn=os.setpgrp)
+            self.set_status(
+                f'已发送精细调整目标：X {float(posX):.2f} m，Y {float(posY):.2f} m，角度 {float(posAngle):.2f}°',
+                'success',
+            )
+        except Exception as error:
+            self.set_status(f'目标发送失败：{error}', 'error')
 
     #import subprocess
 
@@ -463,6 +805,9 @@ class MyWindow(QWidget):
         request = f"{{data: {data}, currentID: {curid}, run: {run}}}"
         command = ['rosservice', 'call', service_name, request]
 
+        target_name = f'导航点 {id + 1}' if id >= 0 else f'工位 W{-id}'
+        self.set_status(f'正在下发目标：{target_name}…', 'info')
+
         def call_service():
             try:
                 result = subprocess.run(
@@ -489,7 +834,8 @@ class MyWindow(QWidget):
             # 构建完整的终端命令，使用 gnome-terminal 打开新的终端窗口并执行 ROS 命令
         terminal_command = ['gnome-terminal', '--', 'bash', '-c', ros_command + '; exec bash']          
             # 使用 subprocess.Popen 启动新的终端
-        self.runJoyProcess = subprocess.Popen(terminal_command, preexec_fn=os.setpgrp)  # 记录进程    
+        self.runJoyProcess = subprocess.Popen(terminal_command, preexec_fn=os.setpgrp)
+        self.set_status('手柄驱动已启动。', 'success')
 
     def start_base(self):
                      # 定义要执行的 ROS 命令
@@ -497,42 +843,51 @@ class MyWindow(QWidget):
             # 构建完整的终端命令，使用 gnome-terminal 打开新的终端窗口并执行 ROS 命令
         terminal_command = ['gnome-terminal', '--', 'bash', '-c', ros_command + '; exec bash']          
             # 使用 subprocess.Popen 启动新的终端
-        self.run5NavProcess = subprocess.Popen(terminal_command, preexec_fn=os.setpgrp)  # 记录进程    
+        self.baseProcess = subprocess.Popen(terminal_command, preexec_fn=os.setpgrp)
+        self.set_status('底盘驱动已启动。', 'success')
 
     def start_tag(self):
     # 创建完整的 gnome-terminal 命令字符串
     # 定义每个标签页的命令
+        tcp_server = shlex.quote(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tcpserver.py'))
         commands = [
             ['gnome-terminal', '--tab', '--title=MM3V Tag', '--', 'bash', '-c', 'roslaunch robot_r 6tagReadAndCtl_mm3v.launch; exec bash'],
-            ['gnome-terminal', '--tab', '--title=TCP Server', '--', 'bash', '-c', 'python3 tcpserver.py; exec bash']
+            ['gnome-terminal', '--tab', '--title=TCP Server', '--', 'bash', '-c', f'python3 {tcp_server}; exec bash']
         ]
         try:
             # 分别启动每个标签页
             for cmd in commands:
                 subprocess.Popen(cmd)
+            self.set_status('标签读取与 TCP 服务已启动。', 'success')
         except Exception as e:
             print(f"Failed to run command: {e}")
+            self.set_status(f'标签服务启动失败：{e}', 'error')
                             
     def start_can(self):
         try:
-            # 构建设置 CAN 接口的命令（自动提供密码）
-            can_command = "echo '1' | sudo -S ip link set can0 up type can bitrate 500000"
+            # 不在代码中保存 sudo 密码，由系统终端正常请求授权。
+            can_command = "sudo ip link set can0 up type can bitrate 500000"
 
             # 构建完整的终端命令
             terminal_command = ['gnome-terminal', '--', 'bash', '-c', can_command + '; exec bash']
 
             # 使用 subprocess.Popen 启动新的终端窗口
             subprocess.Popen(terminal_command)
+            self.set_status('CAN 启动命令已打开，请在终端完成授权。', 'warning')
 
             # 显示成功消息
             #QMessageBox.information(self, '成功', '已启动新的终端并设置 CAN 接口！')
         except Exception as e:
             # 如果失败，显示错误消息
             error_message = f"错误: {str(e)}"
+            self.set_status(f'CAN 启动失败：{error_message}', 'error')
             #QMessageBox.critical(self, '错误', error_message)
 
     def send_joy_message(self,cmd):
         #"""发送 /joy 消息"""
+        if self.joy_pub is None:
+            self.set_status('ROS 未连接，无法发送点位指令。', 'error')
+            return
         if(cmd=="add"):
             joy_msg = Joy()
             joy_msg.axes = [0.0, 0.0, 0.0]  # 根据需要设置轴值
@@ -576,53 +931,63 @@ class MyWindow(QWidget):
 
     def add_pnt_fun(self):
         self.send_joy_message("add")
+        if self.joy_pub is not None:
+            self.set_status('已发送“添加导航点”指令。', 'success')
 
     def add_workstation_fun(self):
         self.send_joy_message("add_workstation")
+        if self.joy_pub is not None:
+            self.set_status('已发送“添加工位”指令。', 'success')
 
     def show_pnt_fun(self):
         self.send_joy_message("show")
+        if self.joy_pub is not None:
+            self.set_status('已在 RViz 中请求显示点位。', 'success')
 
     def Nav_start(self):
         self.send_joy_message("NavStart")
+        if self.joy_pub is not None:
+            self.set_status('自动导航任务已开始。', 'success')
     
     def Nav_Zanting(self):
         self.send_joy_message("NavPause")
+        if self.joy_pub is not None:
+            self.set_status('自动导航任务已暂停。', 'warning')
     
     def Nav_jixu(self):
         self.send_joy_message("Navresume")
+        if self.joy_pub is not None:
+            self.set_status('自动导航任务已继续。', 'success')
 
     def start_setlocation(self):
-            # 定义要执行的 ROS 命令
-        ros_command = 'roslaunch robot_r 3settinglocation.launch'          
-            # 构建完整的终端命令，使用 gnome-terminal 打开新的终端窗口并执行 ROS 命令
-        terminal_command = ['gnome-terminal', '--', 'bash', '-c', ros_command + '; exec bash']          
-            # 使用 subprocess.Popen 启动新的终端
-        self.setpointProcess = subprocess.Popen(terminal_command, preexec_fn=os.setpgrp)  # 记录进程          
-            # 禁用启动按钮
+        if self.setpointProcess and self.setpointProcess.poll() is None:
+            self.set_status('点位设置已在运行。', 'info')
+            return
+        try:
+            self.setpointProcess = self.start_managed_process(
+                ['roslaunch', 'robot_r', '3settinglocation.launch']
+            )
+        except OSError as error:
+            self.set_status(f'点位设置启动失败：{error}', 'error')
+            return
         self.start_button.setEnabled(False)
-                  # 禁用终止按钮
         self.stop_button.setEnabled(True)
         self.location_pnt.show()
         self.add_pnt.show()
         self.add_workstation.show()
+        self.set_status('已进入点位设置模式，请移动机器人后添加点位。', 'success')
 
     def stop_setlocation(self):
-        if self.setpointProcess:
-                    # 获取进程组 ID
-            pgid = os.getpgid(self.setpointProcess.pid)              
-                # 使用 subprocess.call 发送 kill 命令
-            # 使用 pkill 命令终止进程组
-            subprocess.call(['pkill', '-9', '-g', str(pgid)])
-                # 重置进程变量
-            self.setpointProcess = None          
-                # 重新启用启动按钮
-            self.start_button.setEnabled(True)     
-                # 禁用终止按钮
-            self.stop_button.setEnabled(False)
-            self.add_pnt.hide()
-            self.add_workstation.hide()
-            self.location_pnt.hide()
+        had_process = self.setpointProcess is not None
+        self.stop_managed_process(self.setpointProcess, 'point setting')
+        self.setpointProcess = None
+        self.start_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self.add_pnt.hide()
+        self.add_workstation.hide()
+        self.location_pnt.hide()
+        if had_process:
+            self.set_status('已结束点位设置，相关 ROS 节点已退出。', 'info')
 
     def is_rviz_running(self):
         if self.rvizProcess and self.rvizProcess.poll() is None:
@@ -646,74 +1011,124 @@ class MyWindow(QWidget):
             self.localizationProcess = subprocess.Popen(command, preexec_fn=os.setpgrp)
             self.g2d_button.setEnabled(False)
             self.g2d_exit_button.setEnabled(True)
+            self.set_chip(self.localization_chip, '定位 运行中', True)
+            self.set_status('定位已启动，正在等待地图和位姿数据。', 'success')
         if not self.is_rviz_running():
             self.start_plain_rviz()
 
     def start_rviz(self):
         if self.is_rviz_running():
-            print('RViz is already running.')
+            self.set_status('RViz 已在运行。', 'info')
             return
         command = ['rviz', '-d', PANEL_RVIZ_CONFIG]
         self.rvizProcess = subprocess.Popen(command, preexec_fn=os.setpgrp)
         self.rviz_panel_mode = True
         self.rviz_button.setEnabled(False)
+        self.set_status('RViz 已启动。', 'success')
 
     def nav5(self):
-                  # 定义要执行的 ROS 命令
-        ros_command = 'roslaunch robot_r 5nav.launch'
-        move_base_command = (
-            'bash -lc "' + ros_command.replace('\\', '\\\\').replace('"', '\\"') +
-            '; exec bash"'
-        )
-        bspline_log_command = (
-            'bash -lc "'
-            'echo \\"[B-spline] Only showing JGL reference path logs.\\"; '
-            'echo \\"[B-spline] Press Ctrl+C to stop this log view.\\"; '
-            'rostopic echo /rosout_agg/msg | grep --line-buffered \\"JGL reference path\\"; '
-            'exec bash"'
-        )
-            # 使用同一个 gnome-terminal 窗口的两个 tab：MoveBase 和 B-spline 日志
-        terminal_command = [
-            'gnome-terminal',
-            '--window', '--title=MoveBase', '--command=' + move_base_command,
-            '--tab', '--title=B-spline Log', '--command=' + bspline_log_command
-        ]
-            # 使用 subprocess.Popen 启动新的终端
-        self.run5NavProcess = subprocess.Popen(terminal_command, preexec_fn=os.setpgrp)  # 记录进程     
+        if self.is_move_base_ready():
+            self.set_status('MoveBase 已在运行。', 'info')
+            return True
+        if self.moveBaseProcess and self.moveBaseProcess.poll() is None:
+            self.set_status('MoveBase 正在启动…', 'info')
+            return True
+        try:
+            self.moveBaseProcess = self.start_managed_process(
+                ['roslaunch', 'robot_r', '5nav.launch']
+            )
+        except OSError as error:
+            self.set_status(f'MoveBase 启动失败：{error}', 'error')
+            return False
+        self.quitnav_button.setEnabled(True)
+        self.set_chip(self.nav_chip, '导航 启动中', False)
+        self.set_status('MoveBase 正在启动…', 'info')
+        return True
 
     # load points and auto run
     def startNAV(self):
-          # 定义要执行的 ROS 命令
-        ros_command = 'roslaunch robot_r 3navlocations.launch'          
-            # 构建完整的终端命令，使用 gnome-terminal 打开新的终端窗口并执行 ROS 命令
-        terminal_command = ['gnome-terminal', '--', 'bash', '-c', ros_command + '; exec bash']          
-            # 使用 subprocess.Popen 启动新的终端
-        self.runPntsNavProcess = subprocess.Popen(terminal_command, preexec_fn=os.setpgrp)  # 记录进程          
+        if self.runPntsNavProcess and self.runPntsNavProcess.poll() is None:
+            self.set_status('自动导航已在运行。', 'info')
+            return
+        if self.auto_nav_start_pending:
+            self.set_status('正在等待 MoveBase 就绪…', 'info')
+            return
+        if self.is_move_base_ready():
+            self.launch_auto_navigation()
+            return
+
+        self.auto_nav_start_pending = True
+        self.move_base_wait_attempts = 0
         self.nav_button.setEnabled(False)
-        #self.nav_button.setText("启动OK")
         self.quitnav_button.setEnabled(True)
-        self.nav_runstart.show()
-        self.nav_Pause.show()
-        self.nav_resume.show()
+        if not self.nav5():
+            self.auto_nav_start_pending = False
+            self.nav_button.setEnabled(True)
+            return
+        self.set_status('未检测到 MoveBase，已自动启动，正在等待就绪…', 'info')
+        QTimer.singleShot(500, self.wait_for_move_base_then_start_auto_nav)
+
+    def wait_for_move_base_then_start_auto_nav(self):
+        if not self.auto_nav_start_pending:
+            return
+        if self.is_move_base_ready():
+            self.auto_nav_start_pending = False
+            self.launch_auto_navigation()
+            return
+        if self.moveBaseProcess and self.moveBaseProcess.poll() is not None:
+            self.auto_nav_start_pending = False
+            self.nav_button.setEnabled(True)
+            self.quitnav_button.setEnabled(False)
+            self.set_chip(self.nav_chip, '导航 启动失败', False)
+            self.set_status('MoveBase 进程已退出，自动导航未启动，请查看终端日志。', 'error')
+            return
+        self.move_base_wait_attempts += 1
+        if self.move_base_wait_attempts >= 60:
+            self.auto_nav_start_pending = False
+            self.nav_button.setEnabled(True)
+            self.set_chip(self.nav_chip, '导航 启动超时', False)
+            self.set_status('MoveBase 在 30 秒内未就绪，已取消启动自动导航。', 'error')
+            return
+        QTimer.singleShot(500, self.wait_for_move_base_then_start_auto_nav)
+
+    def launch_auto_navigation(self):
+        try:
+            self.runPntsNavProcess = self.start_managed_process(
+                ['roslaunch', 'robot_r', '3navlocations.launch']
+            )
+        except OSError as error:
+            self.nav_button.setEnabled(True)
+            self.set_status(f'自动导航启动失败：{error}', 'error')
+            return
+        self.nav_button.setEnabled(False)
+        self.quitnav_button.setEnabled(True)
+        self.nav_runstart.setEnabled(True)
+        self.nav_Pause.setEnabled(True)
+        self.nav_resume.setEnabled(True)
         self.set_nav_shortcuts_visible(True)
+        self.set_chip(self.nav_chip, '导航 运行中', True)
+        self.set_status('自动导航已启动，可选择快捷目标。', 'success')
 
     def exitNAV(self):
-        if self.runPntsNavProcess:
-                    # 获取进程组 ID
-            pgid = os.getpgid(self.runPntsNavProcess.pid)              
-                # 使用 subprocess.call 发送 kill 命令
-            # 使用 pkill 命令终止进程组
-            subprocess.call(['pkill', '-9', '-g', str(pgid)])
-                # 重置进程变量
-            self.runPntsNavProcess = None          
-                # 重新启用启动按钮
-            self.nav_button.setEnabled(True)     
-                # 禁用终止按钮
-            self.quitnav_button.setEnabled(False)
-            self.nav_runstart.hide()
-            self.nav_Pause.hide()
-            self.nav_resume.hide()
-            self.set_nav_shortcuts_visible(False)
+        stopped = (
+            self.auto_nav_start_pending or self.runPntsNavProcess is not None
+            or self.moveBaseProcess is not None
+        )
+        self.auto_nav_start_pending = False
+        self.set_status('正在停止自动导航和 MoveBase…', 'info')
+        self.stop_managed_process(self.runPntsNavProcess, 'auto navigation')
+        self.runPntsNavProcess = None
+        self.stop_managed_process(self.moveBaseProcess, 'MoveBase')
+        self.moveBaseProcess = None
+        self.nav_button.setEnabled(True)
+        self.quitnav_button.setEnabled(False)
+        self.nav_runstart.setEnabled(False)
+        self.nav_Pause.setEnabled(False)
+        self.nav_resume.setEnabled(False)
+        self.set_nav_shortcuts_visible(False)
+        if stopped:
+            self.set_chip(self.nav_chip, '导航 未启动', False)
+            self.set_status('自动导航和 MoveBase 已停止。', 'info')
 
 
     def quit_navigation(self):
@@ -730,6 +1145,9 @@ class MyWindow(QWidget):
             for pid in process_id.split():
                 subprocess.call(['kill', '-15', pid])
         self.g2d_button.setEnabled(True)
+        self.g2d_exit_button.setEnabled(False)
+        self.set_chip(self.localization_chip, '定位 未启动', False)
+        self.set_status('定位已停止。', 'info')
 
     def stop_rviz(self):
         if self.rvizProcess and self.rvizProcess.poll() is None:
