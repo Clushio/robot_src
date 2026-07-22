@@ -71,6 +71,7 @@ def robot_r_path():
 ROBOT_R_PATH = robot_r_path()
 PANEL_RVIZ_CONFIG = os.path.join(ROBOT_R_PATH, 'rviz', 'nav_rviz.rviz')
 PLAIN_RVIZ_CONFIG = os.path.join(ROBOT_R_PATH, 'rviz', 'nav_rviz_no_panel.rviz')
+MAP_OUTPUT_PREFIX = os.path.join(os.path.expanduser('~'), 'maps', 'map')
 
 
 class TerminalTabProcess:
@@ -145,6 +146,10 @@ class MyWindow(QWidget):
         self.bsplineLogProcess = None
         self.baseProcess = None
         self.joyProcess = None
+        self.mappingProcess = None
+        self.g2dProcess = None
+        self.mapSaverProcess = None
+        self.map_save_generation = 0
         self.auto_nav_start_pending = False
         self.move_base_wait_attempts = 0
         self.add_pnt.hide()
@@ -515,6 +520,7 @@ class MyWindow(QWidget):
         self.tabs = QTabWidget()
         self.tabs.addTab(self.build_navigation_page(), '导航作业')
         self.tabs.addTab(self.build_points_page(), '点位管理')
+        self.tabs.addTab(self.build_mapping_page(), '地图构建')
         self.tabs.addTab(self.build_tools_page(), '设备与工具')
         root.addWidget(self.tabs, 1)
 
@@ -637,6 +643,64 @@ class MyWindow(QWidget):
         action_row.addStretch()
         editor_layout.addLayout(action_row)
         layout.addWidget(editor)
+        layout.addStretch()
+        return page
+
+    def build_mapping_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 10, 0, 0)
+        layout.setSpacing(14)
+
+        introduction = QLabel(
+            '先构建三维点云地图，结束构建后再生成并保存二维占据地图。'
+        )
+        introduction.setObjectName('subTitle')
+        introduction.setWordWrap(True)
+        layout.addWidget(introduction)
+
+        mapping_group = QGroupBox('1  构建三维地图')
+        mapping_layout = QVBoxLayout(mapping_group)
+        mapping_layout.setSpacing(10)
+        mapping_note = QLabel('启动 LIO 建图后，控制机器人完成场地扫描。')
+        mapping_note.setObjectName('subTitle')
+        mapping_layout.addWidget(mapping_note)
+        mapping_buttons = QHBoxLayout()
+        mapping_buttons.setSpacing(10)
+        self.mapping_start_button = QPushButton('开始构建地图')
+        self.mapping_start_button.setProperty('primary', True)
+        self.mapping_start_button.clicked.connect(self.start_mapping)
+        self.mapping_stop_button = QPushButton('结束地图构建')
+        self.mapping_stop_button.setProperty('danger', True)
+        self.mapping_stop_button.setEnabled(False)
+        self.mapping_stop_button.clicked.connect(self.stop_mapping)
+        mapping_buttons.addWidget(self.mapping_start_button)
+        mapping_buttons.addWidget(self.mapping_stop_button)
+        mapping_buttons.addStretch()
+        mapping_layout.addLayout(mapping_buttons)
+        layout.addWidget(mapping_group)
+
+        map_2d_group = QGroupBox('2  生成二维地图')
+        map_2d_layout = QVBoxLayout(map_2d_group)
+        map_2d_layout.setSpacing(10)
+        output_label = QLabel(f'保存位置：{MAP_OUTPUT_PREFIX}.yaml / .pgm')
+        output_label.setObjectName('subTitle')
+        output_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        map_2d_layout.addWidget(output_label)
+        map_2d_buttons = QHBoxLayout()
+        map_2d_buttons.setSpacing(10)
+        self.generate_2d_button = QPushButton('生成并保存二维地图')
+        self.generate_2d_button.setProperty('primary', True)
+        self.generate_2d_button.clicked.connect(self.start_2d_map_generation)
+        self.stop_2d_button = QPushButton('停止二维地图生成')
+        self.stop_2d_button.setProperty('danger', True)
+        self.stop_2d_button.setEnabled(False)
+        self.stop_2d_button.clicked.connect(self.stop_2d_map_generation)
+        map_2d_buttons.addWidget(self.generate_2d_button)
+        map_2d_buttons.addWidget(self.stop_2d_button)
+        map_2d_buttons.addStretch()
+        map_2d_layout.addLayout(map_2d_buttons)
+        layout.addWidget(map_2d_group)
         layout.addStretch()
         return page
 
@@ -772,6 +836,93 @@ class MyWindow(QWidget):
             self.bsplineLogProcess = None
             self.set_status(f'B-spline 日志标签页启动失败：{error}', 'warning')
             return False
+
+    def start_mapping(self):
+        if self.mappingProcess and self.mappingProcess.poll() is None:
+            self.set_status('地图构建已在运行。', 'info')
+            return
+        try:
+            self.mappingProcess = self.start_terminal_tab_process(
+                ['roslaunch', 'robot_r', 's2lam.launch'], '地图构建'
+            )
+        except (OSError, RuntimeError) as error:
+            self.set_status(f'地图构建启动失败：{error}', 'error')
+            return
+        self.mapping_start_button.setEnabled(False)
+        self.mapping_stop_button.setEnabled(True)
+        self.set_status('三维地图构建已在新标签页启动。', 'success')
+
+    def stop_mapping(self):
+        had_process = self.mappingProcess is not None
+        self.stop_managed_process(self.mappingProcess, 'mapping')
+        self.mappingProcess = None
+        self.mapping_start_button.setEnabled(True)
+        self.mapping_stop_button.setEnabled(False)
+        if had_process:
+            self.set_status('地图构建已结束。', 'info')
+
+    def start_2d_map_generation(self):
+        if self.g2dProcess and self.g2dProcess.poll() is None:
+            self.set_status('二维地图生成已在运行。', 'info')
+            return
+        try:
+            self.g2dProcess = self.start_terminal_tab_process(
+                ['roslaunch', 'robot_r', '4genmap.launch'], '生成二维地图'
+            )
+        except (OSError, RuntimeError) as error:
+            self.set_status(f'二维地图生成启动失败：{error}', 'error')
+            return
+        self.map_save_generation += 1
+        generation = self.map_save_generation
+        self.generate_2d_button.setEnabled(False)
+        self.stop_2d_button.setEnabled(True)
+        self.set_status('二维转换已启动，5 秒后自动保存地图…', 'info')
+        QTimer.singleShot(5000, lambda: self.save_2d_map(generation))
+
+    def save_2d_map(self, generation):
+        if generation != self.map_save_generation:
+            return
+        if not self.g2dProcess or self.g2dProcess.poll() is not None:
+            self.generate_2d_button.setEnabled(True)
+            self.stop_2d_button.setEnabled(False)
+            self.set_status('二维转换进程已退出，地图未保存。', 'error')
+            return
+        try:
+            os.makedirs(os.path.dirname(MAP_OUTPUT_PREFIX), exist_ok=True)
+            self.mapSaverProcess = self.start_managed_process([
+                'rosrun', 'map_server', 'map_saver', '__name:=map_saver',
+                '-f', MAP_OUTPUT_PREFIX,
+            ])
+        except OSError as error:
+            self.set_status(f'地图保存启动失败：{error}', 'error')
+            return
+        self.set_status('正在保存二维地图…', 'info')
+        QTimer.singleShot(300, lambda: self.check_map_saver(generation))
+
+    def check_map_saver(self, generation):
+        if generation != self.map_save_generation or self.mapSaverProcess is None:
+            return
+        return_code = self.mapSaverProcess.poll()
+        if return_code is None:
+            QTimer.singleShot(300, lambda: self.check_map_saver(generation))
+            return
+        self.mapSaverProcess = None
+        if return_code == 0:
+            self.set_status(f'二维地图已保存：{MAP_OUTPUT_PREFIX}.yaml / .pgm', 'success')
+        else:
+            self.set_status(f'地图保存失败，map_saver 退出码：{return_code}', 'error')
+
+    def stop_2d_map_generation(self):
+        had_process = self.g2dProcess is not None or self.mapSaverProcess is not None
+        self.map_save_generation += 1
+        self.stop_managed_process(self.mapSaverProcess, 'map saver')
+        self.mapSaverProcess = None
+        self.stop_managed_process(self.g2dProcess, '2D map generation')
+        self.g2dProcess = None
+        self.generate_2d_button.setEnabled(True)
+        self.stop_2d_button.setEnabled(False)
+        if had_process:
+            self.set_status('二维地图生成已停止。', 'info')
 
     def set_nav_shortcuts_visible(self, visible):
         for button in (
@@ -1302,6 +1453,8 @@ class MyWindow(QWidget):
         self.quit_navigation()
         self.stop_rviz()
         self.stop_setlocation()
+        self.stop_2d_map_generation()
+        self.stop_mapping()
         self.close()  # 关闭窗口，这将触发closeEvent事件，从而结束整个应用程序
 
     def closeEvent(self, event):
