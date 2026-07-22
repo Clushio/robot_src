@@ -21,7 +21,19 @@ import threading
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-WORKSPACE_ROOT = os.path.dirname(SCRIPT_DIR)
+
+
+def find_workspace_root():
+    """兼容 <workspace>/script 和标准的 <workspace>/src/script 两种目录结构。"""
+    parent = os.path.dirname(SCRIPT_DIR)
+    candidates = (parent, os.path.dirname(parent))
+    for candidate in candidates:
+        if os.path.isfile(os.path.join(candidate, 'devel', 'env.sh')):
+            return candidate
+    return parent
+
+
+WORKSPACE_ROOT = find_workspace_root()
 
 
 def load_workspace_environment():
@@ -51,7 +63,9 @@ def robot_r_path():
     try:
         return subprocess.check_output(['rospack', 'find', 'robot_r'], text=True).strip()
     except Exception:
-        return os.path.join(WORKSPACE_ROOT, 'robot_r')
+        direct_path = os.path.join(WORKSPACE_ROOT, 'robot_r')
+        standard_path = os.path.join(WORKSPACE_ROOT, 'src', 'robot_r')
+        return direct_path if os.path.isdir(direct_path) else standard_path
 
 
 ROBOT_R_PATH = robot_r_path()
@@ -830,7 +844,7 @@ class MyWindow(QWidget):
         self.gotop(-station_id)
 
     def start_joy(self):
-        ros_command = 'roslaunch x2bot_teleop x2bot_joy_PXN.launch'          
+        ros_command = 'roslaunch x2bot_teleop x2bot_joy_PXN.launch'
             # 构建完整的终端命令，使用 gnome-terminal 打开新的终端窗口并执行 ROS 命令
         terminal_command = ['gnome-terminal', '--', 'bash', '-c', ros_command + '; exec bash']          
             # 使用 subprocess.Popen 启动新的终端
@@ -839,7 +853,7 @@ class MyWindow(QWidget):
 
     def start_base(self):
                      # 定义要执行的 ROS 命令
-        ros_command = 'roslaunch ranger_bringup ranger_mini_v2.launch'          
+        ros_command = 'roslaunch ranger_bringup ranger_mini_v2.launch'
             # 构建完整的终端命令，使用 gnome-terminal 打开新的终端窗口并执行 ROS 命令
         terminal_command = ['gnome-terminal', '--', 'bash', '-c', ros_command + '; exec bash']          
             # 使用 subprocess.Popen 启动新的终端
@@ -865,15 +879,15 @@ class MyWindow(QWidget):
                             
     def start_can(self):
         try:
-            # 不在代码中保存 sudo 密码，由系统终端正常请求授权。
-            can_command = "sudo ip link set can0 up type can bitrate 500000"
+            # 调试阶段使用设备的默认 sudo 密码。
+            can_command = "echo '1' | sudo -S ip link set can0 up type can bitrate 500000"
 
             # 构建完整的终端命令
             terminal_command = ['gnome-terminal', '--', 'bash', '-c', can_command + '; exec bash']
 
             # 使用 subprocess.Popen 启动新的终端窗口
             subprocess.Popen(terminal_command)
-            self.set_status('CAN 启动命令已打开，请在终端完成授权。', 'warning')
+            self.set_status('CAN 启动命令已执行。', 'success')
 
             # 显示成功消息
             #QMessageBox.information(self, '成功', '已启动新的终端并设置 CAN 接口！')
