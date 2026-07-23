@@ -15,6 +15,7 @@ import signal
 
 import rospy
 from sensor_msgs.msg import Joy
+from nav_msgs.msg import Odometry
 from std_msgs.msg import String
 
 from tagReader import SerialTagReader
@@ -111,6 +112,7 @@ def check_and_start_roscore():
 
 class MyWindow(QWidget):
     status_requested = pyqtSignal(str, str)
+    localization_ready_requested = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -122,6 +124,9 @@ class MyWindow(QWidget):
         self.ros_available = False if self.preview_mode else check_and_start_roscore()
         self.joy_pub = None
         self.task_status_sub = None
+        self.localization_odom_sub = None
+        self.localizationProcess = None
+        self.localization_ready = False
         self.currentID = 0
         if self.ros_available:
             try:
@@ -133,13 +138,17 @@ class MyWindow(QWidget):
 
         self.initUI()
         self.status_requested.connect(self.set_status)
+        self.localization_ready_requested.connect(self.mark_localization_ready)
         if self.ros_available:
             try:
                 self.task_status_sub = rospy.Subscriber(
                     '/anav/task_status', String, self.on_task_status, queue_size=10
                 )
+                self.localization_odom_sub = rospy.Subscriber(
+                    '/Odometry', Odometry, self.on_localization_odometry, queue_size=1
+                )
             except Exception as error:
-                print(f"Task status subscription failed: {error}")
+                print(f"ROS status subscription failed: {error}")
         self.set_chip(
             self.ros_chip,
             'ROS 已连接' if self.ros_available else 'ROS 未连接',
@@ -148,7 +157,6 @@ class MyWindow(QWidget):
         if not self.ros_available and not self.preview_mode:
             self.set_status('ROS 连接失败，请检查 ROS_MASTER_URI 或启动日志。', 'error')
         self.setpointProcess = None
-        self.localizationProcess = None
         self.rvizProcess = None
         self.rviz_panel_mode = False
         self.runPntsNavProcess = None
@@ -767,6 +775,25 @@ class MyWindow(QWidget):
                 f'导航失败（{target_name}）：{failure_detail}', 'error'
             )
 
+    def on_localization_odometry(self, _message):
+        """LIO 仅在全局定位成功后发布 /Odometry。"""
+        process = self.localizationProcess
+        if (
+            self.localization_ready
+            or process is None
+            or process.poll() is not None
+        ):
+            return
+        self.localization_ready = True
+        self.localization_ready_requested.emit()
+
+    def mark_localization_ready(self):
+        process = self.localizationProcess
+        if process is None or process.poll() is not None:
+            return
+        self.set_chip(self.localization_chip, '定位 已就绪', True)
+        self.set_status('定位成功，已接收到有效位姿数据。', 'success')
+
     def set_chip(self, chip, text, active=False):
         if active:
             chip.setStyleSheet('background: #ECFDF3; color: #067647; border-radius: 12px; padding: 5px 10px;')
@@ -1321,13 +1348,18 @@ class MyWindow(QWidget):
     def start_navgation(self):
         if self.localizationProcess and self.localizationProcess.poll() is None:
             print('3startlocation.launch is already running.')
+            if self.localization_ready:
+                self.set_status('定位已成功，位姿数据正在持续更新。', 'success')
+            else:
+                self.set_status('定位正在运行，等待有效位姿数据。', 'info')
         else:
+            self.localization_ready = False
             command = ['roslaunch', 'robot_r', '3startlocation.launch', 'rviz_enable:=false']
             self.localizationProcess = subprocess.Popen(command, preexec_fn=os.setpgrp)
             self.g2d_button.setEnabled(False)
             self.g2d_exit_button.setEnabled(True)
             self.set_chip(self.localization_chip, '定位 运行中', True)
-            self.set_status('定位已启动，正在等待地图和位姿数据。', 'success')
+            self.set_status('定位已启动，正在等待地图和位姿数据。', 'info')
         if not self.is_rviz_running():
             self.start_plain_rviz()
 
@@ -1467,6 +1499,7 @@ class MyWindow(QWidget):
                 process_id = ''
             for pid in process_id.split():
                 subprocess.call(['kill', '-15', pid])
+        self.localization_ready = False
         self.g2d_button.setEnabled(True)
         self.g2d_exit_button.setEnabled(False)
         self.set_chip(self.localization_chip, '定位 未启动', False)
