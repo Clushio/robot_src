@@ -10,6 +10,7 @@
 #include <ros/callback_queue.h>
 #include <ros/ros.h>
 #include <sensor_msgs/Joy.h>
+#include <std_msgs/String.h>
 #include <tf/transform_listener.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
@@ -135,6 +136,7 @@ public:
         marker_pub = nh_.advertise<visualization_msgs::Marker>("visualization_marker", 1);
         marker_array_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("topology_markers", 1, true);
         path_pub_ = nh_.advertise<nav_msgs::Path>("topology_plan", 1, true);
+        task_status_pub_ = nh_.advertise<std_msgs::String>("/anav/task_status", 10, true);
         ros::SubscribeOptions status_options =
             ros::SubscribeOptions::create<geometry_msgs::Vector3Stamped>(
                 "/bspline_status", 1,
@@ -164,11 +166,13 @@ public:
         const int target_index = resolvePoseIndex(req.data);
         const int requested_current = resolvePoseIndex(req.currentID);
         const bool exec_path = req.run > 0;
+        const std::string target_name = requestedTargetName(req.data);
 
         if (!validIndex(target_index))
         {
             res.success = false;
             res.message = "目标点序号无效";
+            publishTaskStatus("failed", req.data, target_name, res.message);
             ROS_ERROR("Invalid target index request: %d", req.data);
             return true;
         }
@@ -182,8 +186,14 @@ public:
         {
             res.success = false;
             res.message = "当前点序号无效";
+            publishTaskStatus("failed", req.data, target_name, res.message);
             ROS_ERROR("Invalid current index request: %d", req.currentID);
             return true;
+        }
+
+        if (exec_path)
+        {
+            publishTaskStatus("running", req.data, target_name, "正在规划导航路径");
         }
 
         current_pose_index = start_index;
@@ -197,6 +207,7 @@ public:
             res.success = false;
             res.message = "无法找到从 P" + std::to_string(start_index) +
                           " 到 P" + std::to_string(target_index) + " 的拓扑路径";
+            publishTaskStatus("failed", req.data, target_name, res.message);
             ROS_ERROR_STREAM(res.message);
             stopRobot();
             return true;
@@ -213,15 +224,18 @@ public:
             if (ok)
             {
                 res.message = "arrived:" + formatPathMessage("", path_indices);
+                publishTaskStatus("arrived", req.data, target_name, res.message);
             }
             else
             {
                 res.message = "目标暂时不可达，已停车";
+                publishTaskStatus("failed", req.data, target_name, res.message);
             }
         }
         else
         {
             res.success = true;
+            publishTaskStatus("planned", req.data, target_name, res.message);
         }
 
         return true;
@@ -414,6 +428,7 @@ private:
     ros::Publisher marker_pub;
     ros::Publisher marker_array_pub_;
     ros::Publisher path_pub_;
+    ros::Publisher task_status_pub_;
     ros::CallbackQueue reference_status_queue_;
     ros::AsyncSpinner reference_status_spinner_;
     ros::Subscriber reference_status_sub_;
@@ -769,6 +784,32 @@ private:
             return -1;
         }
         return it->second;
+    }
+
+    std::string requestedTargetName(int requested_index) const
+    {
+        if (requested_index < 0)
+        {
+            return "工位 W" + std::to_string(-requested_index);
+        }
+        return "导航点 " + std::to_string(requested_index + 1);
+    }
+
+    std::string cleanStatusField(std::string value) const
+    {
+        std::replace(value.begin(), value.end(), '\t', ' ');
+        std::replace(value.begin(), value.end(), '\n', ' ');
+        std::replace(value.begin(), value.end(), '\r', ' ');
+        return value;
+    }
+
+    void publishTaskStatus(const std::string &state, int requested_index,
+                           const std::string &target_name, const std::string &detail)
+    {
+        std_msgs::String status;
+        status.data = cleanStatusField(state) + "\t" + std::to_string(requested_index) +
+                      "\t" + cleanStatusField(target_name) + "\t" + cleanStatusField(detail);
+        task_status_pub_.publish(status);
     }
 
     geometry_msgs::PoseStamped toPoseStamped(const TargetPose &pose)

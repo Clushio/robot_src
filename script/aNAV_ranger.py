@@ -15,6 +15,7 @@ import signal
 
 import rospy
 from sensor_msgs.msg import Joy
+from std_msgs.msg import String
 
 from tagReader import SerialTagReader
 import threading
@@ -120,6 +121,8 @@ class MyWindow(QWidget):
         self.preview_mode = os.environ.get('ANAV_GUI_PREVIEW') == '1'
         self.ros_available = False if self.preview_mode else check_and_start_roscore()
         self.joy_pub = None
+        self.task_status_sub = None
+        self.currentID = 0
         if self.ros_available:
             try:
                 rospy.init_node('upmachine_publisher', anonymous=True, disable_signals=True)
@@ -130,6 +133,13 @@ class MyWindow(QWidget):
 
         self.initUI()
         self.status_requested.connect(self.set_status)
+        if self.ros_available:
+            try:
+                self.task_status_sub = rospy.Subscriber(
+                    '/anav/task_status', String, self.on_task_status, queue_size=10
+                )
+            except Exception as error:
+                print(f"Task status subscription failed: {error}")
         self.set_chip(
             self.ros_chip,
             'ROS 已连接' if self.ros_available else 'ROS 未连接',
@@ -160,7 +170,6 @@ class MyWindow(QWidget):
         self.nav_resume.setEnabled(False)
         self.set_nav_shortcuts_visible(False)
 
-        self.currentID = 0
         self.current_target_x = 0.0
         self.current_target_y = 0.0
         self.current_target_angle = 0.0
@@ -733,6 +742,30 @@ class MyWindow(QWidget):
         self.status_label.setStyleSheet(
             f'background: {background}; color: {foreground}; border-radius: 7px; padding: 9px 12px;'
         )
+
+    def on_task_status(self, message):
+        """显示所有 /plan_path_and_go 调用的状态，包括 TCP 发起的任务。"""
+        fields = message.data.split('\t', 3)
+        if len(fields) != 4:
+            print(f"Invalid /anav/task_status message: {message.data!r}")
+            return
+
+        state, requested_id_text, target_name, detail = fields
+        if state == 'running':
+            self.status_requested.emit(f'正在前往：{target_name}', 'info')
+        elif state == 'arrived':
+            try:
+                self.currentID = int(requested_id_text)
+            except ValueError:
+                pass
+            self.status_requested.emit(f'已到达：{target_name}', 'success')
+        elif state == 'planned':
+            self.status_requested.emit(f'路径规划完成：{target_name}', 'success')
+        elif state == 'failed':
+            failure_detail = detail or '未知原因'
+            self.status_requested.emit(
+                f'导航失败（{target_name}）：{failure_detail}', 'error'
+            )
 
     def set_chip(self, chip, text, active=False):
         if active:
