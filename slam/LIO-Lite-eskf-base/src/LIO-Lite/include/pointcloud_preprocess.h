@@ -100,6 +100,9 @@ class PointCloudPreprocess {
     int &PointFilterNum() { return point_filter_num_; }
     bool &FeatureEnabled() { return feature_enabled_; }
     float &TimeScale() { return time_scale_; }
+    bool &AngleFilterEnabled() { return angle_filter_enabled_; }
+    double &MinAngleDeg() { return min_angle_deg_; }
+    double &MaxAngleDeg() { return max_angle_deg_; }
     LidarType GetLidarType() const { return lidar_type_; }
     void SetLidarType(LidarType lt) { lidar_type_ = lt; }
 
@@ -119,6 +122,9 @@ class PointCloudPreprocess {
     double max_range2_ = 10000;  // 100m
     float time_scale_ = 1e-3;
     bool given_offset_time_ = false;
+    bool angle_filter_enabled_ = false;
+    double min_angle_deg_ = -180.0;
+    double max_angle_deg_ = 180.0;
 };
 }  // namespace lio_lite
 

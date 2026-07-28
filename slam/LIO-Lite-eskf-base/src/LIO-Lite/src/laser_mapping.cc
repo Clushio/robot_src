@@ -93,8 +93,15 @@ bool LaserMapping::LoadParams(ros::NodeHandle &nh) {
     nh.param<double>("mapping/b_acc_cov", b_acc_cov, 0.0001);
     nh.param<double>("preprocess/blind2", preprocess_->Blind(), 0.3);
     nh.param<double>("preprocess/max_range2", preprocess_->MaxRange(), 100);
+    nh.param<bool>("preprocess/angle_filter_en", preprocess_->AngleFilterEnabled(), false);
+    nh.param<double>("preprocess/min_angle_deg", preprocess_->MinAngleDeg(), -180.0);
+    nh.param<double>("preprocess/max_angle_deg", preprocess_->MaxAngleDeg(), 180.0);
 
     printf("_________________________________________________________initial data from code! lowrange=%f, highrange = %f",preprocess_->Blind(),preprocess_->MaxRange());
+    LOG(INFO) << "Livox horizontal angle filter: "
+              << (preprocess_->AngleFilterEnabled() ? "enabled" : "disabled")
+              << ", range=[" << preprocess_->MinAngleDeg()
+              << ", " << preprocess_->MaxAngleDeg() << "] deg";
 
     nh.param<float>("preprocess/time_scale", preprocess_->TimeScale(), 1e-3);
     nh.param<int>("preprocess/lidar_type", lidar_type, 1);
@@ -210,6 +217,15 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
         b_gyr_cov = yaml["mapping"]["b_gyr_cov"].as<float>();
         b_acc_cov = yaml["mapping"]["b_acc_cov"].as<float>();
         preprocess_->Blind() = yaml["preprocess"]["blind"].as<double>();
+        if (yaml["preprocess"]["angle_filter_en"]) {
+            preprocess_->AngleFilterEnabled() = yaml["preprocess"]["angle_filter_en"].as<bool>();
+        }
+        if (yaml["preprocess"]["min_angle_deg"]) {
+            preprocess_->MinAngleDeg() = yaml["preprocess"]["min_angle_deg"].as<double>();
+        }
+        if (yaml["preprocess"]["max_angle_deg"]) {
+            preprocess_->MaxAngleDeg() = yaml["preprocess"]["max_angle_deg"].as<double>();
+        }
         preprocess_->TimeScale() = yaml["preprocess"]["time_scale"].as<double>();
         lidar_type = yaml["preprocess"]["lidar_type"].as<int>();
         preprocess_->NumScans() = yaml["preprocess"]["scan_line"].as<int>();
