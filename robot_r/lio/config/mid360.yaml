@@ -21,7 +21,7 @@ mapping:
   fov_degree: 360             # Legacy parameter; current LIO does not read it.
   det_range: 40
   extrinsic_est_en: false      # true: enable the online estimation of IMU-LiDAR extrinsic
-  extrinsic_T: [ 0, 0, 0 ]
+  extrinsic_T: [ -0.011, -0.02329, 0.04412 ]
   extrinsic_R: [ 1, 0, 0,
                  0, 1, 0,
                  0, 0, 1 ]
