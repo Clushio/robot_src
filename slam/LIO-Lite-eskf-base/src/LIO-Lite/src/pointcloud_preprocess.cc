@@ -5,6 +5,19 @@
 
 namespace lio_lite {
 
+namespace {
+constexpr double kRadToDeg = 57.29577951308232;
+
+bool IsAngleInRange(double angle_deg, double min_angle_deg, double max_angle_deg) {
+    if (min_angle_deg <= max_angle_deg) {
+        return angle_deg >= min_angle_deg && angle_deg <= max_angle_deg;
+    }
+
+    // Support ranges crossing -180/180 degrees, for example [170, -170].
+    return angle_deg >= min_angle_deg || angle_deg <= max_angle_deg;
+}
+}  // namespace
+
 void PointCloudPreprocess::Set(LidarType lid_type, double bld, int pfilt_num) {
     lidar_type_ = lid_type;
     blind_ = bld;
@@ -59,6 +72,14 @@ void PointCloudPreprocess::AviaHandler(const livox_ros_driver::CustomMsg::ConstP
             ((msg->points[i].tag & 0x30) == 0x10 || (msg->points[i].tag & 0x30) == 0x00)) 
         {
             if (i % point_filter_num_ == 0) {
+                if (angle_filter_enabled_) {
+                    const double angle_deg =
+                        std::atan2(msg->points[i].y, msg->points[i].x) * kRadToDeg;
+                    if (!IsAngleInRange(angle_deg, min_angle_deg_, max_angle_deg_)) {
+                        return;
+                    }
+                }
+
                 cloud_full_[i].x = msg->points[i].x;
                 cloud_full_[i].y = msg->points[i].y;
                 cloud_full_[i].z = msg->points[i].z;

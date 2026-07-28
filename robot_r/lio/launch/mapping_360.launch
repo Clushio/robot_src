@@ -3,7 +3,7 @@
 
 	<arg name="rviz" default="true" />
 
-	<rosparam command="load" file="/home/nav/map/config/mid360.yaml" />
+	<rosparam command="load" file="$(find robot_r)/lio/config/mid360.yaml" />
 
 	<param name="feature_extract_enable" type="bool" value="0"/>
 	<param name="point_filter_num_" type="int" value="3"/>

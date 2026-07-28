@@ -9,13 +9,16 @@ preprocess:
   blind2: 1.5                  # 3.2 * 3.2    Adjust according to actual situation.
   max_range2: 1600            # 20*20 = 400 
   time_scale: 1e-3
+  angle_filter_en: true       # Keep the front sector before LIO mapping.
+  min_angle_deg: -110.0       # LiDAR +X is forward; angle is atan2(y, x).
+  max_angle_deg: 110.0
 
 mapping:
   acc_cov: 0.1
   gyr_cov: 0.1
   b_acc_cov: 0.0001
   b_gyr_cov: 0.0001
-  fov_degree: 360
+  fov_degree: 360             # Legacy parameter; current LIO does not read it.
   det_range: 40
   extrinsic_est_en: false      # true: enable the online estimation of IMU-LiDAR extrinsic
   extrinsic_T: [ 0, 0, 0 ]
