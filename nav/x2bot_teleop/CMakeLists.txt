@@ -168,8 +168,10 @@ target_link_libraries(saveLocation ${catkin_LIBRARIES})
 
 add_executable(runnav src/run_nav.cpp)
 target_link_libraries(runnav ${catkin_LIBRARIES})
+add_dependencies(runnav ${PROJECT_NAME}_gencpp ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
 add_executable(TagCtl src/TagCtl_srv.cpp)
+add_dependencies(TagCtl ${PROJECT_NAME}_gencpp ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 target_link_libraries(TagCtl ${catkin_LIBRARIES})
 
 #############

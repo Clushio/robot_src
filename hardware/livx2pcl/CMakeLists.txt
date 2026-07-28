@@ -39,11 +39,22 @@ catkin_package(
 )
 
 add_executable(livox_repub livox2pcl.cpp)
-target_link_libraries(livox_repub ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBS})
-
+add_dependencies(livox_repub livox_ros_driver_generate_messages_cpp)
+target_link_libraries(
+  livox_repub
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBS}
+)
 
 add_executable(livox_repub_ang livox2pcl_ang.cpp)
-target_link_libraries(livox_repub_ang ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBS})
+add_dependencies(livox_repub_ang livox_ros_driver_generate_messages_cpp)
+target_link_libraries(
+  livox_repub_ang
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBS}
+)
 
 add_executable(livox_pcl_to_scan_clear livox_pcl_to_scan_clear.cpp)
 target_link_libraries(livox_pcl_to_scan_clear ${catkin_LIBRARIES})
