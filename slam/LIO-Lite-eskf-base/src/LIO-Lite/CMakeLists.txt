@@ -27,6 +27,7 @@ endif()
 # Generate Library
 add_library(${PROJECT_NAME}
         src/laser_mapping.cc
+        src/static_map_filter.cc
         src/pointcloud_preprocess.cc
         src/options.cc
         src/utils.cc
@@ -66,3 +67,12 @@ add_executable(test_load src/test/test_load.cc)
 target_link_libraries(test_load
         ${PROJECT_NAME} gflags
         )
+
+add_executable(test_static_map_filter src/test/test_static_map_filter.cc)
+target_link_libraries(test_static_map_filter
+        ${PROJECT_NAME}
+        )
+
+if (CATKIN_ENABLE_TESTING)
+    add_test(NAME static_map_filter_synthetic COMMAND test_static_map_filter)
+endif ()
