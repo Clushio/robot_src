@@ -6,4 +6,11 @@
       aNAV control panel for starting simulator, relocalization, and MoveBase.
     </description>
   </class>
+  <class name="robot_r/RecordPoseTool"
+         type="robot_r::RecordPoseTool"
+         base_class_type="rviz::Tool">
+    <description>
+      Record a map pose to /anav/record_pose without sending a navigation goal.
+    </description>
+  </class>
 </library>

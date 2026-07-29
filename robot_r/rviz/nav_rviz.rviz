@@ -154,6 +154,14 @@ Visualization Manager:
         {}
       Queue Size: 100
       Value: true
+    - Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: /anav/record_markers
+      Name: RViz Record Points
+      Namespaces:
+        {}
+      Queue Size: 100
+      Value: true
     - Alpha: 1
       Class: rviz/Polygon
       Color: 239; 41; 41
@@ -194,6 +202,8 @@ Visualization Manager:
       Y std deviation: 0.5
     - Class: rviz/SetGoal
       Topic: /move_base_simple/goal
+    - Class: robot_r/RecordPoseTool
+      Topic: /anav/record_pose
     - Class: rviz/PublishPoint
       Single click: true
       Topic: /clicked_point
