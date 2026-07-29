@@ -1,11 +1,14 @@
 import sys
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QPushButton, QLabel, QVBoxLayout, QHBoxLayout,
-    QGridLayout, QLineEdit, QGroupBox, QTabWidget, QFrame, QSizePolicy
+    QGridLayout, QLineEdit, QGroupBox, QTabWidget, QFrame, QSizePolicy,
+    QRadioButton
 )
 import subprocess
 import time
 import shlex
+import shutil
+import math
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QDoubleValidator
@@ -17,6 +20,8 @@ import rospy
 from sensor_msgs.msg import Joy
 from nav_msgs.msg import Odometry
 from std_msgs.msg import String
+from geometry_msgs.msg import PoseStamped
+from visualization_msgs.msg import Marker, MarkerArray
 
 from tagReader import SerialTagReader
 import threading
@@ -74,6 +79,11 @@ ROBOT_R_PATH = robot_r_path()
 PANEL_RVIZ_CONFIG = os.path.join(ROBOT_R_PATH, 'rviz', 'nav_rviz.rviz')
 PLAIN_RVIZ_CONFIG = os.path.join(ROBOT_R_PATH, 'rviz', 'nav_rviz_no_panel.rviz')
 MAP_OUTPUT_PREFIX = os.path.join(os.path.expanduser('~'), 'maps', 'map')
+ROBOT_POSITIONS_FILE = os.path.join(
+    os.path.expanduser('~'), 'maps', 'robot_positions.txt'
+)
+RVIZ_RECORD_POSE_TOPIC = '/anav/record_pose'
+RVIZ_RECORD_MARKER_TOPIC = '/anav/record_markers'
 
 
 class TerminalTabProcess:
@@ -113,6 +123,7 @@ def check_and_start_roscore():
 class MyWindow(QWidget):
     status_requested = pyqtSignal(str, str)
     localization_ready_requested = pyqtSignal()
+    record_pose_requested = pyqtSignal(float, float, float, str)
 
     def __init__(self):
         super().__init__()
@@ -125,13 +136,21 @@ class MyWindow(QWidget):
         self.joy_pub = None
         self.task_status_sub = None
         self.localization_odom_sub = None
+        self.record_pose_sub = None
+        self.record_marker_pub = None
         self.localizationProcess = None
         self.localization_ready = False
         self.currentID = 0
+        self.pending_record_pose = None
+        self.record_session_active = False
+        self.record_file_backup = ''
         if self.ros_available:
             try:
                 rospy.init_node('upmachine_publisher', anonymous=True, disable_signals=True)
                 self.joy_pub = rospy.Publisher('/joy', Joy, queue_size=10)
+                self.record_marker_pub = rospy.Publisher(
+                    RVIZ_RECORD_MARKER_TOPIC, MarkerArray, queue_size=1, latch=True
+                )
             except Exception as error:
                 print(f"ROS initialization failed: {error}")
                 self.ros_available = False
@@ -139,6 +158,7 @@ class MyWindow(QWidget):
         self.initUI()
         self.status_requested.connect(self.set_status)
         self.localization_ready_requested.connect(self.mark_localization_ready)
+        self.record_pose_requested.connect(self.accept_record_pose)
         if self.ros_available:
             try:
                 self.task_status_sub = rospy.Subscriber(
@@ -146,6 +166,12 @@ class MyWindow(QWidget):
                 )
                 self.localization_odom_sub = rospy.Subscriber(
                     '/Odometry', Odometry, self.on_localization_odometry, queue_size=1
+                )
+                self.record_pose_sub = rospy.Subscriber(
+                    RVIZ_RECORD_POSE_TOPIC,
+                    PoseStamped,
+                    self.on_record_pose,
+                    queue_size=1,
                 )
             except Exception as error:
                 print(f"ROS status subscription failed: {error}")
@@ -239,6 +265,18 @@ class MyWindow(QWidget):
         self.location_pnt.move(318, 100)
         self.location_pnt.clicked.connect(self.show_pnt_fun)
         self.location_pnt.resize(138,70)
+
+        self.real_record_mode = QRadioButton('实车采点', self)
+        self.rviz_record_mode = QRadioButton('RViz 采点（无需动车）', self)
+        self.real_record_mode.setChecked(True)
+        self.real_record_mode.toggled.connect(self.on_record_mode_changed)
+
+        self.record_mode_note = QLabel(self)
+        self.record_mode_note.setWordWrap(True)
+        self.record_mode_note.setObjectName('subTitle')
+        self.record_pose_label = QLabel('尚未从 RViz 选择目标位姿', self)
+        self.record_pose_label.setWordWrap(True)
+        self.record_pose_label.setObjectName('subTitle')
 
         # 创建2d按钮
         self.g2d_button = QPushButton('开始定位', self)
@@ -642,10 +680,15 @@ class MyWindow(QWidget):
         editor = QGroupBox('点位采集')
         editor_layout = QVBoxLayout(editor)
         editor_layout.setSpacing(12)
-        note = QLabel('进入设置模式后，将机器人移到目标位置，再添加导航点或工位。')
-        note.setWordWrap(True)
-        note.setObjectName('subTitle')
-        editor_layout.addWidget(note)
+        mode_select_row = QHBoxLayout()
+        mode_select_row.setSpacing(18)
+        mode_select_row.addWidget(QLabel('采集方式'))
+        mode_select_row.addWidget(self.real_record_mode)
+        mode_select_row.addWidget(self.rviz_record_mode)
+        mode_select_row.addStretch()
+        editor_layout.addLayout(mode_select_row)
+        editor_layout.addWidget(self.record_mode_note)
+        editor_layout.addWidget(self.record_pose_label)
         mode_row = QHBoxLayout()
         mode_row.setSpacing(10)
         mode_row.addWidget(self.start_button)
@@ -661,6 +704,7 @@ class MyWindow(QWidget):
         editor_layout.addLayout(action_row)
         layout.addWidget(editor)
         layout.addStretch()
+        self.on_record_mode_changed()
         return page
 
     def build_mapping_page(self):
@@ -774,6 +818,221 @@ class MyWindow(QWidget):
             self.status_requested.emit(
                 f'导航失败（{target_name}）：{failure_detail}', 'error'
             )
+
+    def on_record_mode_changed(self, _checked=False):
+        if self.rviz_record_mode.isChecked():
+            self.record_mode_note.setText(
+                '进入设置后，在 RViz 工具栏选择“记录点位”（快捷键 R），'
+                '在地图上拖出箭头确定位置和朝向。'
+            )
+            self.record_pose_label.show()
+        else:
+            self.record_mode_note.setText(
+                '进入设置后，将机器人移动到目标位置，再添加导航点或工位。'
+            )
+            self.record_pose_label.hide()
+
+    def on_record_pose(self, message):
+        """ROS 回调只解析消息，界面更新交给 Qt 主线程。"""
+        if not self.record_session_active or not self.rviz_record_mode.isChecked():
+            return
+        frame_id = message.header.frame_id or 'map'
+        if frame_id != 'map':
+            self.status_requested.emit(
+                f'拒绝记录 {frame_id} 坐标系的点；RViz Fixed Frame 必须设为 map。',
+                'error',
+            )
+            return
+
+        q = message.pose.orientation
+        yaw = math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+        )
+        self.record_pose_requested.emit(
+            message.pose.position.x,
+            message.pose.position.y,
+            yaw,
+            frame_id,
+        )
+
+    def accept_record_pose(self, x, y, yaw, frame_id):
+        if not self.record_session_active or not self.rviz_record_mode.isChecked():
+            return
+        if not all(math.isfinite(value) for value in (x, y, yaw)):
+            self.set_status('RViz 返回的目标位姿包含无效数值。', 'error')
+            return
+        self.pending_record_pose = (x, y, yaw)
+        self.record_pose_label.setText(
+            f'待记录目标（{frame_id}）：X {x:.3f} m  ·  Y {y:.3f} m  ·  '
+            f'朝向 {math.degrees(yaw):.1f}°；Z/Roll/Pitch 保存时固定为 0'
+        )
+        self.publish_record_markers()
+        self.set_status(
+            '已收到 RViz 目标位姿，请选择“添加导航点”或“添加工位”。',
+            'success',
+        )
+
+    def backup_and_reset_record_file(self):
+        directory = os.path.dirname(ROBOT_POSITIONS_FILE)
+        os.makedirs(directory, exist_ok=True)
+        self.record_file_backup = ''
+        if (
+            os.path.isfile(ROBOT_POSITIONS_FILE)
+            and os.path.getsize(ROBOT_POSITIONS_FILE) > 0
+        ):
+            timestamp = time.strftime('%Y%m%d_%H%M%S')
+            backup = os.path.join(
+                directory, f'robot_positions_{timestamp}.txt'
+            )
+            suffix = 1
+            while os.path.exists(backup):
+                backup = os.path.join(
+                    directory, f'robot_positions_{timestamp}_{suffix}.txt'
+                )
+                suffix += 1
+            shutil.copy2(ROBOT_POSITIONS_FILE, backup)
+            self.record_file_backup = backup
+
+        with open(ROBOT_POSITIONS_FILE, 'w', encoding='utf-8'):
+            pass
+
+    def read_record_positions(self):
+        poses = []
+        if not os.path.isfile(ROBOT_POSITIONS_FILE):
+            return poses
+        try:
+            with open(ROBOT_POSITIONS_FILE, 'r', encoding='utf-8') as handle:
+                for line_number, raw_line in enumerate(handle, 1):
+                    parts = raw_line.split()
+                    if not parts:
+                        continue
+                    if len(parts) < 6:
+                        print(
+                            f'Ignore invalid point at line {line_number}: '
+                            f'{raw_line.rstrip()}'
+                        )
+                        continue
+                    poses.append({
+                        'x': float(parts[0]),
+                        'y': float(parts[1]),
+                        'yaw': float(parts[5]),
+                        'label': parts[6] if len(parts) > 6 else '',
+                    })
+        except (OSError, ValueError) as error:
+            print(f'Unable to read {ROBOT_POSITIONS_FILE}: {error}')
+        return poses
+
+    def next_workstation_label(self):
+        highest = 0
+        for pose in self.read_record_positions():
+            label = pose['label']
+            if label.startswith('W') and label[1:].isdigit():
+                highest = max(highest, int(label[1:]))
+        return f'W{highest + 1}'
+
+    def save_pending_record_pose(self, workstation=False):
+        if not self.record_session_active:
+            self.set_status('请先进入点位设置模式。', 'warning')
+            return False
+        if self.pending_record_pose is None:
+            self.set_status(
+                '尚未收到 RViz 目标位姿；请先在地图上拖出记录箭头。',
+                'warning',
+            )
+            return False
+
+        x, y, yaw = self.pending_record_pose
+        label = self.next_workstation_label() if workstation else ''
+        line = f'{x:.6f} {y:.6f} 0 0 0 {yaw:.6f}'
+        if label:
+            line += f' {label}'
+        try:
+            with open(ROBOT_POSITIONS_FILE, 'a', encoding='utf-8') as handle:
+                handle.write(line + '\n')
+        except OSError as error:
+            self.set_status(f'点位文件写入失败：{error}', 'error')
+            return False
+
+        point_number = len(self.read_record_positions())
+        point_name = label or f'导航点 P{point_number - 1}'
+        self.pending_record_pose = None
+        self.record_pose_label.setText(
+            f'已保存 {point_name}；请在 RViz 选择下一个目标位姿。'
+        )
+        self.publish_record_markers()
+        self.set_status(
+            f'已保存 {point_name}：X {x:.3f} m，Y {y:.3f} m，'
+            f'朝向 {math.degrees(yaw):.1f}°。',
+            'success',
+        )
+        return True
+
+    def publish_record_markers(self):
+        if self.record_marker_pub is None:
+            return
+
+        marker_array = MarkerArray()
+        clear = Marker()
+        clear.action = Marker.DELETEALL
+        marker_array.markers.append(clear)
+        poses = self.read_record_positions()
+        if self.pending_record_pose is not None:
+            x, y, yaw = self.pending_record_pose
+            poses.append({
+                'x': x,
+                'y': y,
+                'yaw': yaw,
+                'label': '待记录',
+                'pending': True,
+            })
+
+        stamp = rospy.Time.now()
+        for index, pose in enumerate(poses):
+            pending = pose.get('pending', False)
+            arrow = Marker()
+            arrow.header.frame_id = 'map'
+            arrow.header.stamp = stamp
+            arrow.ns = 'anav_record_pose'
+            arrow.id = index * 2
+            arrow.type = Marker.ARROW
+            arrow.action = Marker.ADD
+            arrow.pose.position.x = pose['x']
+            arrow.pose.position.y = pose['y']
+            arrow.pose.position.z = 0.06
+            arrow.pose.orientation.z = math.sin(pose['yaw'] / 2.0)
+            arrow.pose.orientation.w = math.cos(pose['yaw'] / 2.0)
+            arrow.scale.x = 0.45
+            arrow.scale.y = 0.09
+            arrow.scale.z = 0.09
+            arrow.color.r = 0.10 if pending else 1.0
+            arrow.color.g = 0.85 if pending else 0.70
+            arrow.color.b = 0.25 if pending else 0.05
+            arrow.color.a = 0.95
+            marker_array.markers.append(arrow)
+
+            text_marker = Marker()
+            text_marker.header.frame_id = 'map'
+            text_marker.header.stamp = stamp
+            text_marker.ns = 'anav_record_label'
+            text_marker.id = index * 2 + 1
+            text_marker.type = Marker.TEXT_VIEW_FACING
+            text_marker.action = Marker.ADD
+            text_marker.pose.position.x = pose['x']
+            text_marker.pose.position.y = pose['y']
+            text_marker.pose.position.z = 0.34
+            text_marker.pose.orientation.w = 1.0
+            text_marker.scale.z = 0.22
+            text_marker.color.r = 1.0
+            text_marker.color.g = 1.0
+            text_marker.color.b = 1.0
+            text_marker.color.a = 0.95
+            text_marker.text = (
+                pose['label'] or f'P{index}'
+            )
+            marker_array.markers.append(text_marker)
+
+        self.record_marker_pub.publish(marker_array)
 
     def on_localization_odometry(self, _message):
         """LIO 仅在全局定位成功后发布 /Odometry。"""
@@ -1272,16 +1531,26 @@ class MyWindow(QWidget):
             print("Joy Navresume message sent")
 
     def add_pnt_fun(self):
+        if self.rviz_record_mode.isChecked():
+            self.save_pending_record_pose(workstation=False)
+            return
         self.send_joy_message("add")
         if self.joy_pub is not None:
             self.set_status('已发送“添加导航点”指令。', 'success')
 
     def add_workstation_fun(self):
+        if self.rviz_record_mode.isChecked():
+            self.save_pending_record_pose(workstation=True)
+            return
         self.send_joy_message("add_workstation")
         if self.joy_pub is not None:
             self.set_status('已发送“添加工位”指令。', 'success')
 
     def show_pnt_fun(self):
+        if self.rviz_record_mode.isChecked():
+            self.publish_record_markers()
+            self.set_status('已在 RViz 中刷新当前录制点位。', 'success')
+            return
         self.send_joy_message("show")
         if self.joy_pub is not None:
             self.set_status('已在 RViz 中请求显示点位。', 'success')
@@ -1302,34 +1571,86 @@ class MyWindow(QWidget):
             self.set_status('自动导航任务已继续。', 'success')
 
     def start_setlocation(self):
-        if self.setpointProcess and self.setpointProcess.poll() is None:
+        if self.record_session_active:
             self.set_status('点位设置已在运行。', 'info')
             return
-        try:
-            self.setpointProcess = self.start_terminal_tab_process(
-                ['roslaunch', 'robot_r', '3settinglocation.launch'], '点位设置'
-            )
-        except (OSError, RuntimeError) as error:
-            self.set_status(f'点位设置启动失败：{error}', 'error')
+        if not self.ros_available:
+            self.set_status('ROS 未连接，无法进入点位设置模式。', 'error')
             return
+
+        rviz_mode = self.rviz_record_mode.isChecked()
+        if rviz_mode and self.is_move_base_ready():
+            self.set_status(
+                'MoveBase 正在运行。为避免记录箭头触发车辆动作，请先停止导航。',
+                'error',
+            )
+            return
+
+        if not rviz_mode:
+            try:
+                self.setpointProcess = self.start_terminal_tab_process(
+                    ['roslaunch', 'robot_r', '3settinglocation.launch'], '点位设置'
+                )
+            except (OSError, RuntimeError) as error:
+                self.set_status(f'点位设置启动失败：{error}', 'error')
+                return
+        else:
+            try:
+                if not self.is_rviz_running():
+                    self.start_plain_rviz()
+            except OSError as error:
+                self.set_status(f'RViz 启动失败：{error}', 'error')
+                return
+
+        try:
+            self.backup_and_reset_record_file()
+        except OSError as error:
+            self.stop_managed_process(self.setpointProcess, 'point setting')
+            self.setpointProcess = None
+            self.set_status(f'无法准备点位文件：{error}', 'error')
+            return
+
+        self.record_session_active = True
+        self.pending_record_pose = None
+        self.real_record_mode.setEnabled(False)
+        self.rviz_record_mode.setEnabled(False)
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.location_pnt.show()
         self.add_pnt.show()
         self.add_workstation.show()
-        self.set_status('已进入点位设置模式，请移动机器人后添加点位。', 'success')
+        self.publish_record_markers()
+        if rviz_mode:
+            self.record_pose_label.setText(
+                '等待 RViz 目标位姿：请选择工具栏中的“记录点位”'
+                '（快捷键 R）。'
+            )
+            message = '已进入 RViz 采点模式；请在地图上拖出记录箭头。'
+        else:
+            message = '已进入实车采点模式；请移动机器人后添加点位。'
+        if self.record_file_backup:
+            message += f' 原点位已备份到 {self.record_file_backup}。'
+        self.set_status(message, 'success')
 
     def stop_setlocation(self):
-        had_process = self.setpointProcess is not None
+        had_session = self.record_session_active
         self.stop_managed_process(self.setpointProcess, 'point setting')
         self.setpointProcess = None
+        self.record_session_active = False
+        self.pending_record_pose = None
+        self.real_record_mode.setEnabled(True)
+        self.rviz_record_mode.setEnabled(True)
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.add_pnt.hide()
         self.add_workstation.hide()
         self.location_pnt.hide()
-        if had_process:
-            self.set_status('已结束点位设置，相关 ROS 节点已退出。', 'info')
+        self.publish_record_markers()
+        if had_session:
+            self.set_status(
+                f'已结束点位设置，点位保存在 {ROBOT_POSITIONS_FILE}。',
+                'info',
+            )
 
     def is_rviz_running(self):
         if self.rvizProcess and self.rvizProcess.poll() is None:

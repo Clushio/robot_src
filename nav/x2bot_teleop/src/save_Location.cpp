@@ -64,7 +64,10 @@ bool lookupCurrentPose(double& x, double& y, double& z, double& roll, double& pi
 
     x = transform.transform.translation.x;
     y = transform.transform.translation.y;
-    z = transform.transform.translation.z;
+    // Topology navigation is planar.  map->base_link can contain accumulated
+    // height drift from the 3D localization, so never persist it as a waypoint
+    // height.  The navigation stack also reuses path z=1/2 as control markers.
+    z = 0.0;
 
     geometry_msgs::Quaternion quat = transform.transform.rotation;
     tf::Quaternion tf_quat(quat.x, quat.y, quat.z, quat.w);

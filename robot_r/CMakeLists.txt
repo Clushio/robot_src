@@ -129,7 +129,9 @@ include_directories(
 # )
 add_library(robot_r_anav_panel
   src/anav_panel.cpp
+  src/record_pose_tool.cpp
   include/robot_r/anav_panel.h
+  include/robot_r/record_pose_tool.h
 )
 
 target_link_libraries(robot_r_anav_panel
