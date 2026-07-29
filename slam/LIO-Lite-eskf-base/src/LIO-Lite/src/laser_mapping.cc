@@ -15,6 +15,10 @@ namespace lio_lite {
 
 bool LaserMapping::InitROS(ros::NodeHandle &nh) {
     LoadParams(nh);
+    if (flg_islocation_mode_ || !pcd_save_en_) {
+        dynamic_filter_options_.enabled = false;
+    }
+    static_map_filter_ = std::make_unique<StaticMapFilter>(dynamic_filter_options_);
    // time.sleep(3)
     SubAndPubToROS(nh);
 
@@ -43,6 +47,10 @@ bool LaserMapping::InitWithoutROS(const std::string &config_yaml) {
     if (!LoadParamsFromYAML(config_yaml)) {
         return false;
     }
+    if (flg_islocation_mode_ || !pcd_save_en_) {
+        dynamic_filter_options_.enabled = false;
+    }
+    static_map_filter_ = std::make_unique<StaticMapFilter>(dynamic_filter_options_);
 
     // localmap init (after LoadParams)
     ivox_ = std::make_shared<IVoxType>(ivox_options_);
@@ -112,6 +120,39 @@ bool LaserMapping::LoadParams(ros::NodeHandle &nh) {
     nh.param<bool>("mapping/extrinsic_est_en", extrinsic_est_en_, true);
     nh.param<bool>("pcd_save/pcd_save_en", pcd_save_en_, false);
     nh.param<int>("pcd_save/interval", pcd_save_interval_, -1);
+    nh.param<bool>("dynamic_filter/enabled", dynamic_filter_options_.enabled, false);
+    nh.param<double>("dynamic_filter/keyframe_interval",
+                     dynamic_filter_options_.keyframe_interval, 0.5);
+    nh.param<double>("dynamic_filter/voxel_size", dynamic_filter_options_.voxel_size, 0.30);
+    nh.param<double>("dynamic_filter/match_radius", dynamic_filter_options_.match_radius, 0.30);
+    nh.param<int>("dynamic_filter/min_hits", dynamic_filter_options_.min_hits, 3);
+    nh.param<double>("dynamic_filter/min_observation_span",
+                     dynamic_filter_options_.min_observation_span, 1.0);
+    nh.param<int>("dynamic_filter/free_keyframes_to_remove",
+                  dynamic_filter_options_.free_keyframes_to_remove, 3);
+    nh.param<double>("dynamic_filter/ray_end_margin",
+                     dynamic_filter_options_.ray_end_margin, 0.40);
+    nh.param<double>("dynamic_filter/candidate_timeout",
+                     dynamic_filter_options_.candidate_timeout, 5.0);
+    int max_global_samples = 80;
+    int max_feature_samples = 40;
+    int min_confirmed_voxels = 100;
+    nh.param<int>("dynamic_filter/max_global_samples_per_voxel", max_global_samples, 80);
+    nh.param<int>("dynamic_filter/max_feature_samples_per_voxel", max_feature_samples, 40);
+    nh.param<int>("dynamic_filter/min_confirmed_voxels", min_confirmed_voxels, 100);
+    dynamic_filter_options_.max_global_samples_per_voxel =
+        static_cast<std::size_t>(std::max(1, max_global_samples));
+    dynamic_filter_options_.max_feature_samples_per_voxel =
+        static_cast<std::size_t>(std::max(1, max_feature_samples));
+    dynamic_filter_options_.min_confirmed_voxels =
+        static_cast<std::size_t>(std::max(1, min_confirmed_voxels));
+    nh.param<bool>("dynamic_filter/publish_debug",
+                   dynamic_filter_options_.publish_debug, true);
+    nh.param<bool>("dynamic_filter/save_raw", dynamic_filter_options_.save_raw, true);
+    if (dynamic_filter_options_.enabled && pcd_save_interval_ != -1) {
+        LOG(WARNING) << "dynamic_filter requires pcd_save/interval=-1; forcing single-file mode";
+        pcd_save_interval_ = -1;
+    }
     nh.param<std::vector<double>>("mapping/extrinsic_T", extrinT_, std::vector<double>());
     nh.param<std::vector<double>>("mapping/extrinsic_R", extrinR_, std::vector<double>());
 
@@ -234,6 +275,64 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
         extrinsic_est_en_ = yaml["mapping"]["extrinsic_est_en"].as<bool>();
         pcd_save_en_ = yaml["pcd_save"]["pcd_save_en"].as<bool>();
         pcd_save_interval_ = yaml["pcd_save"]["interval"].as<int>();
+        if (yaml["dynamic_filter"]) {
+            const YAML::Node filter = yaml["dynamic_filter"];
+            if (filter["enabled"]) {
+                dynamic_filter_options_.enabled = filter["enabled"].as<bool>();
+            }
+            if (filter["keyframe_interval"]) {
+                dynamic_filter_options_.keyframe_interval =
+                    filter["keyframe_interval"].as<double>();
+            }
+            if (filter["voxel_size"]) {
+                dynamic_filter_options_.voxel_size = filter["voxel_size"].as<double>();
+            }
+            if (filter["match_radius"]) {
+                dynamic_filter_options_.match_radius = filter["match_radius"].as<double>();
+            }
+            if (filter["min_hits"]) {
+                dynamic_filter_options_.min_hits = filter["min_hits"].as<int>();
+            }
+            if (filter["min_observation_span"]) {
+                dynamic_filter_options_.min_observation_span =
+                    filter["min_observation_span"].as<double>();
+            }
+            if (filter["free_keyframes_to_remove"]) {
+                dynamic_filter_options_.free_keyframes_to_remove =
+                    filter["free_keyframes_to_remove"].as<int>();
+            }
+            if (filter["ray_end_margin"]) {
+                dynamic_filter_options_.ray_end_margin =
+                    filter["ray_end_margin"].as<double>();
+            }
+            if (filter["candidate_timeout"]) {
+                dynamic_filter_options_.candidate_timeout =
+                    filter["candidate_timeout"].as<double>();
+            }
+            if (filter["max_global_samples_per_voxel"]) {
+                dynamic_filter_options_.max_global_samples_per_voxel =
+                    filter["max_global_samples_per_voxel"].as<std::size_t>();
+            }
+            if (filter["max_feature_samples_per_voxel"]) {
+                dynamic_filter_options_.max_feature_samples_per_voxel =
+                    filter["max_feature_samples_per_voxel"].as<std::size_t>();
+            }
+            if (filter["min_confirmed_voxels"]) {
+                dynamic_filter_options_.min_confirmed_voxels =
+                    filter["min_confirmed_voxels"].as<std::size_t>();
+            }
+            if (filter["publish_debug"]) {
+                dynamic_filter_options_.publish_debug =
+                    filter["publish_debug"].as<bool>();
+            }
+            if (filter["save_raw"]) {
+                dynamic_filter_options_.save_raw = filter["save_raw"].as<bool>();
+            }
+        }
+        if (dynamic_filter_options_.enabled && pcd_save_interval_ != -1) {
+            LOG(WARNING) << "dynamic_filter requires pcd_save/interval=-1; forcing single-file mode";
+            pcd_save_interval_ = -1;
+        }
         extrinT_ = yaml["mapping"]["extrinsic_T"].as<std::vector<double>>();
         extrinR_ = yaml["mapping"]["extrinsic_R"].as<std::vector<double>>();
 
@@ -314,6 +413,12 @@ void LaserMapping::SubAndPubToROS(ros::NodeHandle &nh) {
     pub_laser_cloud_world_ = nh.advertise<sensor_msgs::PointCloud2>("/cloud_registered", 10);
     pub_laser_cloud_body_ = nh.advertise<sensor_msgs::PointCloud2>("/cloud_registered_body", 1000);
     pub_laser_cloud_effect_world_ = nh.advertise<sensor_msgs::PointCloud2>("/cloud_registered_effect_world", 10);
+    if (dynamic_filter_options_.enabled && dynamic_filter_options_.publish_debug) {
+        pub_static_cloud_ =
+            nh.advertise<sensor_msgs::PointCloud2>("/cloud_registered_static", 10);
+        pub_dynamic_candidate_cloud_ =
+            nh.advertise<sensor_msgs::PointCloud2>("/cloud_registered_dynamic_candidate", 10);
+    }
     pub_odom_aft_mapped_ = nh.advertise<nav_msgs::Odometry>("/Odometry", 10);
     pub_path_ = nh.advertise<nav_msgs::Path>("/path", 10);
 
@@ -1370,6 +1475,52 @@ void LaserMapping::PublishFrameWorld() {
         *pcl_wait_save_ += *laserCloudWorld;
         *pcl_feature_point_ += *featureCloudWorld;
 
+        if (static_map_filter_ && static_map_filter_->enabled()) {
+            PointCloudType static_debug;
+            PointCloudType dynamic_debug;
+            const Eigen::Vector3d sensor_origin(pos_lidar_(0), pos_lidar_(1), pos_lidar_(2));
+            const ros::WallTime filter_start = ros::WallTime::now();
+            const bool is_filter_keyframe =
+                static_map_filter_->ProcessFrame(*laserCloudWorld, *featureCloudWorld,
+                                                 sensor_origin, lidar_end_time_,
+                                                 dynamic_filter_options_.publish_debug
+                                                     ? &static_debug
+                                                     : nullptr,
+                                                 dynamic_filter_options_.publish_debug
+                                                     ? &dynamic_debug
+                                                     : nullptr);
+            const double filter_ms =
+                (ros::WallTime::now() - filter_start).toSec() * 1000.0;
+
+            if (is_filter_keyframe && dynamic_filter_options_.publish_debug) {
+                sensor_msgs::PointCloud2 static_msg;
+                pcl::toROSMsg(static_debug, static_msg);
+                static_msg.header.stamp = ros::Time().fromSec(lidar_end_time_);
+                static_msg.header.frame_id = "map";
+                pub_static_cloud_.publish(static_msg);
+
+                sensor_msgs::PointCloud2 dynamic_msg;
+                pcl::toROSMsg(dynamic_debug, dynamic_msg);
+                dynamic_msg.header.stamp = ros::Time().fromSec(lidar_end_time_);
+                dynamic_msg.header.frame_id = "map";
+                pub_dynamic_candidate_cloud_.publish(dynamic_msg);
+            }
+
+            if (is_filter_keyframe) {
+                const StaticMapFilter::Stats stats = static_map_filter_->GetStats();
+                ROS_INFO_STREAM_THROTTLE(
+                    1.0, "dynamic_filter keyframes=" << stats.processed_keyframes
+                         << " confirmed_voxels=" << stats.confirmed_voxels
+                         << " candidate_voxels=" << stats.candidate_voxels
+                         << " removed_voxels=" << stats.removed_voxels
+                         << " process_ms=" << filter_ms);
+                if (filter_ms > 100.0) {
+                    ROS_WARN_STREAM("dynamic_filter keyframe exceeded 100ms: "
+                                    << filter_ms << "ms");
+                }
+            }
+        }
+
         static int scan_wait_num = 0;
         scan_wait_num++;
         if (pcl_wait_save_->size() > 0 && pcd_save_interval_ > 0 && scan_wait_num >= pcd_save_interval_) {
@@ -1488,32 +1639,60 @@ void LaserMapping::Finish() {
         return;
     }
 
-    if (pcl_wait_save_->size() > 0 && pcd_save_en_) {
-        std::string file_name = std::string("GlobalMap.pcd");
-        std::string all_points_dir(std::string(ROOTDIR + "maps/") + file_name);
+    auto write_cloud = [](const std::string &file_name, const PointCloudType &cloud) {
+        if (cloud.empty()) {
+            LOG(WARNING) << "skip empty PCD: " << file_name;
+            return false;
+        }
+        const std::string all_points_dir(std::string(ROOTDIR + "maps/") + file_name);
         pcl::PCDWriter pcd_writer;
-        #ifdef DEBUG
-        LOG(INFO) << "\033[1;32m " << "current scan saved to /maps/" << file_name << "\033[0m";
-        LOG(INFO) << "\033[1;36m "<< file_name << " point size: " 
-              <<  pcl_wait_save_->size() <<  "\033[0m";
-        #endif
-        pcd_writer.writeBinary(all_points_dir, *pcl_wait_save_);
+        const int result = pcd_writer.writeBinary(all_points_dir, cloud);
+        if (result != 0) {
+            LOG(ERROR) << "failed to save " << all_points_dir << ", PCL error=" << result;
+            return false;
+        }
+        LOG(INFO) << "saved " << all_points_dir << ", points=" << cloud.size();
+        return true;
+    };
+
+    CloudPtr global_map_to_save = pcl_wait_save_;
+    CloudPtr feature_map_to_save = pcl_feature_point_;
+
+    if (static_map_filter_ && static_map_filter_->enabled()) {
+        const StaticMapFilter::Stats stats = static_map_filter_->GetStats();
+        CloudPtr filtered_global = static_map_filter_->BuildStaticMap();
+        CloudPtr filtered_feature = static_map_filter_->BuildStaticFeatureMap();
+        const bool filter_valid =
+            stats.processed_keyframes >= 3 &&
+            stats.confirmed_voxels >= dynamic_filter_options_.min_confirmed_voxels &&
+            !filtered_global->empty() && !filtered_feature->empty();
+
+        if (dynamic_filter_options_.save_raw) {
+            write_cloud("GlobalMap_raw.pcd", *pcl_wait_save_);
+            write_cloud("FeatureMap_raw.pcd", *pcl_feature_point_);
+        }
+
+        if (filter_valid) {
+            global_map_to_save = filtered_global;
+            feature_map_to_save = filtered_feature;
+            LOG(INFO) << "dynamic_filter accepted: keyframes=" << stats.processed_keyframes
+                      << ", confirmed_voxels=" << stats.confirmed_voxels
+                      << ", static_points=" << filtered_global->size()
+                      << ", static_feature_points=" << filtered_feature->size();
+        } else {
+            LOG(ERROR) << "dynamic_filter output invalid; falling back to raw map. keyframes="
+                       << stats.processed_keyframes
+                       << ", confirmed_voxels=" << stats.confirmed_voxels
+                       << ", static_points=" << filtered_global->size()
+                       << ", static_feature_points=" << filtered_feature->size();
+        }
     }
 
-    if (pcl_feature_point_->size() > 0 && pcd_save_en_) {
-        std::string file_name = std::string("FeatureMap.pcd");
-        std::string all_points_dir(std::string(ROOTDIR + "maps/") + file_name);
-        pcl::PCDWriter pcd_writer;
-        #ifdef DEBUG
-        LOG(INFO) << "\033[1;32m " << "current scan saved to /maps/" << file_name << "\033[0m";
-        LOG(INFO) << "\033[1;36m " << file_name << " point size: " 
-              <<  pcl_feature_point_->size() <<  "\033[0m";
-        #endif
-        pcd_writer.writeBinary(all_points_dir, *pcl_feature_point_);
-        
-        if(split_map_){
-            SplitMap(pcl_feature_point_);
-        }
+    write_cloud("GlobalMap.pcd", *global_map_to_save);
+    write_cloud("FeatureMap.pcd", *feature_map_to_save);
+
+    if (split_map_ && !feature_map_to_save->empty()) {
+        SplitMap(feature_map_to_save);
     }
 
     LOG(INFO) << "\033[1;32m "<< " finish done " << "\033[0m";

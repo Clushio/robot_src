@@ -7,6 +7,7 @@
 #include <ros/ros.h>
 #include <sensor_msgs/PointCloud2.h>
 #include <condition_variable>
+#include <memory>
 #include <thread>
 
 #include <mutex>
@@ -23,6 +24,7 @@
 #include "options.h"
 #include "pointcloud_preprocess.h"
 #include "register/ndt.hpp"
+#include "static_map_filter.h"
 
 namespace lio_lite {
 
@@ -168,6 +170,8 @@ class LaserMapping {
     ros::Publisher pub_laser_cloud_world_;
     ros::Publisher pub_laser_cloud_body_;
     ros::Publisher pub_laser_cloud_effect_world_;
+    ros::Publisher pub_static_cloud_;
+    ros::Publisher pub_dynamic_candidate_cloud_;
     ros::Publisher pub_odom_aft_mapped_;
     ros::Publisher pub_path_;
 
@@ -219,6 +223,8 @@ class LaserMapping {
 
     PointCloudType::Ptr pcl_wait_save_{new PointCloudType()};  // debug save
     CloudPtr pcl_feature_point_{new PointCloudType()};
+    StaticMapFilter::Options dynamic_filter_options_;
+    std::unique_ptr<StaticMapFilter> static_map_filter_;
     nav_msgs::Path path_;
     geometry_msgs::PoseStamped msg_body_pose_;
 
