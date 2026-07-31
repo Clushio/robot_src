@@ -2,13 +2,15 @@ import sys
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QPushButton, QLabel, QVBoxLayout, QHBoxLayout,
     QGridLayout, QLineEdit, QGroupBox, QTabWidget, QFrame, QSizePolicy,
-    QRadioButton
+    QRadioButton, QTableWidget, QTableWidgetItem, QHeaderView,
+    QAbstractItemView, QMessageBox, QInputDialog, QFileDialog
 )
 import subprocess
 import time
 import shlex
 import shutil
 import math
+import glob
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QDoubleValidator
@@ -20,7 +22,7 @@ import rospy
 from sensor_msgs.msg import Joy
 from nav_msgs.msg import Odometry
 from std_msgs.msg import String
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Twist
 from visualization_msgs.msg import Marker, MarkerArray
 
 from tagReader import SerialTagReader
@@ -82,6 +84,7 @@ MAP_OUTPUT_PREFIX = os.path.join(os.path.expanduser('~'), 'maps', 'map')
 ROBOT_POSITIONS_FILE = os.path.join(
     os.path.expanduser('~'), 'maps', 'robot_positions.txt'
 )
+TOPOLOGY_BUILDER = os.path.join(SCRIPT_DIR, 'build_topology.py')
 RVIZ_RECORD_POSE_TOPIC = '/anav/record_pose'
 RVIZ_RECORD_MARKER_TOPIC = '/anav/record_markers'
 
@@ -124,16 +127,20 @@ class MyWindow(QWidget):
     status_requested = pyqtSignal(str, str)
     localization_ready_requested = pyqtSignal()
     record_pose_requested = pyqtSignal(float, float, float, str)
+    odometry_requested = pyqtSignal(float, float, float, float, float)
+    health_snapshot_requested = pyqtSignal(object)
+    topology_finished_requested = pyqtSignal(bool, str)
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle('移动机器人作业控制台')
-        self.setMinimumSize(820, 640)
-        self.resize(960, 700)
+        self.setMinimumSize(820, 720)
+        self.resize(960, 820)
 
         self.preview_mode = os.environ.get('ANAV_GUI_PREVIEW') == '1'
         self.ros_available = False if self.preview_mode else check_and_start_roscore()
         self.joy_pub = None
+        self.safety_pub = None
         self.task_status_sub = None
         self.localization_odom_sub = None
         self.record_pose_sub = None
@@ -144,10 +151,22 @@ class MyWindow(QWidget):
         self.pending_record_pose = None
         self.record_session_active = False
         self.record_file_backup = ''
+        self.point_undo_stack = []
+        self.positions_file_stamp = None
+        self.dynamic_nav_buttons = []
+        self.nav_shortcuts_enabled = False
+        self.last_odom_monotonic = 0.0
+        self.health_check_running = False
+        self.estop_active = False
+        self.shutdown_in_progress = False
+        self.topology_build_running = False
         if self.ros_available:
             try:
                 rospy.init_node('upmachine_publisher', anonymous=True, disable_signals=True)
                 self.joy_pub = rospy.Publisher('/joy', Joy, queue_size=10)
+                self.safety_pub = rospy.Publisher(
+                    '/cmd_vel/safety', Twist, queue_size=1
+                )
                 self.record_marker_pub = rospy.Publisher(
                     RVIZ_RECORD_MARKER_TOPIC, MarkerArray, queue_size=1, latch=True
                 )
@@ -159,6 +178,9 @@ class MyWindow(QWidget):
         self.status_requested.connect(self.set_status)
         self.localization_ready_requested.connect(self.mark_localization_ready)
         self.record_pose_requested.connect(self.accept_record_pose)
+        self.odometry_requested.connect(self.update_odometry_display)
+        self.health_snapshot_requested.connect(self.apply_health_snapshot)
+        self.topology_finished_requested.connect(self.on_topology_finished)
         if self.ros_available:
             try:
                 self.task_status_sub = rospy.Subscriber(
@@ -190,6 +212,7 @@ class MyWindow(QWidget):
         self.bsplineLogProcess = None
         self.baseProcess = None
         self.joyProcess = None
+        self.tagProcesses = []
         self.mappingProcess = None
         self.g2dProcess = None
         self.mapSaverProcess = None
@@ -203,10 +226,18 @@ class MyWindow(QWidget):
         self.nav_Pause.setEnabled(False)
         self.nav_resume.setEnabled(False)
         self.set_nav_shortcuts_visible(False)
+        self.refresh_points_table()
 
         self.current_target_x = 0.0
         self.current_target_y = 0.0
         self.current_target_angle = 0.0
+
+        self.estop_timer = QTimer(self)
+        self.estop_timer.timeout.connect(self.publish_safety_stop)
+        self.health_timer = QTimer(self)
+        self.health_timer.timeout.connect(self.schedule_health_check)
+        self.health_timer.start(1000)
+        QTimer.singleShot(0, self.schedule_health_check)
 
         #self.init_reader()
 
@@ -481,6 +512,10 @@ class MyWindow(QWidget):
                 background: #EEF4FF; color: #175CD3; border-radius: 7px;
                 padding: 9px 12px;
             }
+            QLabel#dataValue {
+                background: #F8FAFC; color: #344054; border-radius: 7px;
+                padding: 9px 12px;
+            }
             QGroupBox {
                 background: #FFFFFF; border: 1px solid #E1E7EF; border-radius: 10px;
                 margin-top: 14px; padding: 14px 12px 12px; font-weight: 600;
@@ -501,8 +536,14 @@ class MyWindow(QWidget):
             }
             QPushButton[primary="true"]:hover { background: #145BC2; }
             QPushButton[danger="true"] { color: #B42318; border-color: #FDA29B; }
+            QPushButton[emergency="true"] {
+                background: #D92D20; color: white; border-color: #D92D20;
+                font-weight: 700;
+            }
+            QPushButton[emergency="true"]:hover { background: #B42318; }
             QPushButton[primary="true"]:disabled,
-            QPushButton[danger="true"]:disabled {
+            QPushButton[danger="true"]:disabled,
+            QPushButton[emergency="true"]:disabled {
                 background: #F2F4F7; color: #98A2B3; border-color: #EAECF0;
             }
             QLineEdit {
@@ -514,6 +555,16 @@ class MyWindow(QWidget):
             QTabBar::tab { background: transparent; color: #667085; padding: 10px 22px; }
             QTabBar::tab:selected {
                 color: #175CD3; font-weight: 600; border-bottom: 2px solid #175CD3;
+            }
+            QTableWidget {
+                background: #FFFFFF; alternate-background-color: #F8FAFC;
+                border: 1px solid #E1E7EF; border-radius: 7px;
+                gridline-color: #EAECF0;
+            }
+            QHeaderView::section {
+                background: #F2F4F7; color: #344054; border: 0;
+                border-bottom: 1px solid #D0D5DD; padding: 7px;
+                font-weight: 600;
             }
         """)
 
@@ -619,27 +670,44 @@ class MyWindow(QWidget):
             startup_layout.setColumnStretch(column, 1)
         layout.addWidget(startup)
 
-        task = QGroupBox('2  任务控制与快捷目标')
+        task = QGroupBox('2  任务控制与工位快捷目标')
         task_layout = QVBoxLayout(task)
         task_layout.setSpacing(10)
         control_row = QHBoxLayout()
         control_row.setSpacing(8)
         for button in (self.nav_runstart, self.nav_Pause, self.nav_resume):
             control_row.addWidget(button)
+        self.cancel_task_button = QPushButton('取消当前任务')
+        self.cancel_task_button.setProperty('danger', True)
+        self.cancel_task_button.clicked.connect(self.cancel_current_task)
+        self.cancel_task_button.setEnabled(False)
+        control_row.addWidget(self.cancel_task_button)
         control_row.addStretch()
+        self.estop_button = QPushButton('紧急停止')
+        self.estop_button.setProperty('emergency', True)
+        self.estop_button.clicked.connect(self.activate_emergency_stop)
+        self.release_estop_button = QPushButton('解除急停')
+        self.release_estop_button.clicked.connect(self.release_emergency_stop)
+        self.release_estop_button.setEnabled(False)
+        control_row.addWidget(self.estop_button)
+        control_row.addWidget(self.release_estop_button)
         task_layout.addLayout(control_row)
-        destination_grid = QGridLayout()
-        destination_grid.setHorizontalSpacing(8)
-        destination_grid.setVerticalSpacing(8)
-        destination_buttons = (
-            self.p1_button, self.p2_button, self.p3_button, self.p4_button, self.p5_button,
-            self.w1_button, self.w2_button, self.w3_button,
+        for button in (
+            self.p1_button, self.p2_button, self.p3_button, self.p4_button,
+            self.p5_button, self.w1_button, self.w2_button, self.w3_button,
+        ):
+            button.hide()
+        self.destination_hint = QLabel(
+            '暂无工位，请先在“点位管理”中添加或命名 W1、W2…工位。'
         )
-        for index, button in enumerate(destination_buttons):
-            button.setText(f'导航点 {index + 1}' if index < 5 else f'工位 W{index - 4}')
-            destination_grid.addWidget(button, 0, index)
-            destination_grid.setColumnStretch(index, 1)
-        task_layout.addLayout(destination_grid)
+        self.destination_hint.setObjectName('subTitle')
+        task_layout.addWidget(self.destination_hint)
+        self.dynamic_destination_widget = QWidget()
+        self.dynamic_destination_grid = QGridLayout(self.dynamic_destination_widget)
+        self.dynamic_destination_grid.setContentsMargins(0, 0, 0, 0)
+        self.dynamic_destination_grid.setHorizontalSpacing(8)
+        self.dynamic_destination_grid.setVerticalSpacing(8)
+        task_layout.addWidget(self.dynamic_destination_widget)
         layout.addWidget(task)
 
         target = QGroupBox('3  精细调整')
@@ -703,6 +771,62 @@ class MyWindow(QWidget):
         action_row.addStretch()
         editor_layout.addLayout(action_row)
         layout.addWidget(editor)
+
+        point_list = QGroupBox('已保存点位')
+        point_list_layout = QVBoxLayout(point_list)
+        point_list_layout.setSpacing(10)
+        self.points_table = QTableWidget(0, 6)
+        self.points_table.setHorizontalHeaderLabels(
+            ('序号', '类型/名称', 'X (m)', 'Y (m)', '朝向 (°)', '操作目标')
+        )
+        self.points_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.points_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.points_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.points_table.setAlternatingRowColors(True)
+        self.points_table.verticalHeader().setVisible(False)
+        self.points_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.points_table.cellDoubleClicked.connect(
+            lambda _row, _column: self.navigate_selected_point()
+        )
+        point_list_layout.addWidget(self.points_table)
+
+        point_actions = QGridLayout()
+        point_actions.setHorizontalSpacing(8)
+        point_actions.setVerticalSpacing(8)
+        self.refresh_points_button = QPushButton('刷新点位')
+        self.refresh_points_button.clicked.connect(self.refresh_points_table)
+        self.navigate_point_button = QPushButton('导航到选中点')
+        self.navigate_point_button.setProperty('primary', True)
+        self.navigate_point_button.clicked.connect(self.navigate_selected_point)
+        self.rename_point_button = QPushButton('修改名称')
+        self.rename_point_button.clicked.connect(self.rename_selected_point)
+        self.delete_point_button = QPushButton('删除选中点')
+        self.delete_point_button.setProperty('danger', True)
+        self.delete_point_button.clicked.connect(self.delete_selected_point)
+        self.move_point_up_button = QPushButton('上移')
+        self.move_point_up_button.clicked.connect(lambda: self.move_selected_point(-1))
+        self.move_point_down_button = QPushButton('下移')
+        self.move_point_down_button.clicked.connect(lambda: self.move_selected_point(1))
+        self.undo_point_button = QPushButton('撤销修改')
+        self.undo_point_button.clicked.connect(self.undo_point_change)
+        self.restore_points_button = QPushButton('恢复最近备份')
+        self.restore_points_button.clicked.connect(self.restore_latest_points_backup)
+        self.import_points_button = QPushButton('导入点位')
+        self.import_points_button.clicked.connect(self.import_points_file)
+        self.export_points_button = QPushButton('导出点位')
+        self.export_points_button.clicked.connect(self.export_points_file)
+        point_action_buttons = (
+            self.refresh_points_button, self.navigate_point_button,
+            self.rename_point_button, self.delete_point_button,
+            self.move_point_up_button, self.move_point_down_button,
+            self.undo_point_button, self.restore_points_button,
+            self.import_points_button, self.export_points_button,
+        )
+        for index, button in enumerate(point_action_buttons):
+            point_actions.addWidget(button, index // 5, index % 5)
+            point_actions.setColumnStretch(index % 5, 1)
+        point_list_layout.addLayout(point_actions)
+        layout.addWidget(point_list)
         layout.addStretch()
         self.on_record_mode_changed()
         return page
@@ -769,16 +893,67 @@ class MyWindow(QWidget):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 10, 0, 0)
-        layout.setSpacing(14)
+        layout.setSpacing(12)
+
         devices = QGroupBox('设备启动')
         grid = QGridLayout(devices)
         grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(10)
-        for index, button in enumerate((self.can_button, self.base_button, self.joy_button, self.tag_button)):
-            grid.addWidget(button, index // 2, index % 2)
+        device_buttons = (
+            self.can_button, self.base_button, self.joy_button, self.tag_button
+        )
+        for index, button in enumerate(device_buttons):
+            grid.addWidget(button, 0, index)
+            grid.setColumnStretch(index, 1)
         layout.addWidget(devices)
-        self.position_label.setObjectName('statusBar')
-        layout.addWidget(self.position_label)
+
+        health = QGroupBox('实时运行状态')
+        health_grid = QGridLayout(health)
+        health_grid.setHorizontalSpacing(10)
+        health_grid.setVerticalSpacing(8)
+        health_names = (
+            ('can', 'CAN'), ('base', '底盘'), ('arbiter', '速度仲裁'),
+            ('localization', '定位数据'), ('move_base', 'MoveBase'),
+            ('auto_nav', 'AutoNAV'), ('tag', '标签读取'),
+        )
+        self.health_chips = {}
+        self.health_display_names = {}
+        for index, (key, name) in enumerate(health_names):
+            chip = self.create_status_chip(f'{name} · 未检测')
+            chip.setMinimumHeight(30)
+            self.health_chips[key] = chip
+            self.health_display_names[key] = name
+            row = index // 4
+            column = index % 4
+            health_grid.addWidget(chip, row, column)
+            health_grid.setColumnStretch(column, 1)
+        layout.addWidget(health)
+
+        live_data = QGroupBox('实时数据')
+        live_data_layout = QVBoxLayout(live_data)
+        live_data_layout.setSpacing(8)
+        self.odometry_label = QLabel('机器人位姿：暂无有效定位数据')
+        self.odometry_label.setObjectName('dataValue')
+        self.odometry_label.setMinimumHeight(36)
+        self.odometry_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.position_label.setObjectName('dataValue')
+        self.position_label.setMinimumHeight(36)
+        live_data_layout.addWidget(self.odometry_label)
+        live_data_layout.addWidget(self.position_label)
+        layout.addWidget(live_data)
+
+        topology = QGroupBox('导航功能')
+        topology_layout = QHBoxLayout(topology)
+        self.build_topology_button = QPushButton('构建导航拓扑')
+        self.build_topology_button.setProperty('primary', True)
+        self.build_topology_button.clicked.connect(self.build_topology)
+        topology_note = QLabel(
+            '根据 robot_positions.txt 与 map.yaml 生成 ~/maps/topology.yaml'
+        )
+        topology_note.setObjectName('subTitle')
+        topology_layout.addWidget(self.build_topology_button)
+        topology_layout.addWidget(topology_note, 1)
+        layout.addWidget(topology)
+
         layout.addStretch()
         return page
 
@@ -913,15 +1088,362 @@ class MyWindow(QWidget):
                             f'{raw_line.rstrip()}'
                         )
                         continue
-                    poses.append({
-                        'x': float(parts[0]),
-                        'y': float(parts[1]),
-                        'yaw': float(parts[5]),
-                        'label': parts[6] if len(parts) > 6 else '',
-                    })
-        except (OSError, ValueError) as error:
+                    try:
+                        poses.append({
+                            'x': float(parts[0]),
+                            'y': float(parts[1]),
+                            'z': float(parts[2]),
+                            'roll': float(parts[3]),
+                            'pitch': float(parts[4]),
+                            'yaw': float(parts[5]),
+                            'label': parts[6] if len(parts) > 6 else '',
+                        })
+                    except ValueError:
+                        print(
+                            f'Ignore invalid numeric point at line {line_number}: '
+                            f'{raw_line.rstrip()}'
+                        )
+        except OSError as error:
             print(f'Unable to read {ROBOT_POSITIONS_FILE}: {error}')
         return poses
+
+    def point_request_id(self, index, pose):
+        label = pose.get('label', '')
+        if label.startswith('W') and label[1:].isdigit():
+            return -int(label[1:])
+        return index
+
+    def point_display_name(self, index, pose):
+        return pose.get('label') or f'P{index}'
+
+    def refresh_points_table(self):
+        if not hasattr(self, 'points_table'):
+            return
+        poses = self.read_record_positions()
+        self.points_table.setRowCount(len(poses))
+        for index, pose in enumerate(poses):
+            label = pose.get('label', '')
+            point_type = label if label else f'导航点 P{index}'
+            request_id = self.point_request_id(index, pose)
+            values = (
+                str(index),
+                point_type,
+                f"{pose['x']:.3f}",
+                f"{pose['y']:.3f}",
+                f"{math.degrees(pose['yaw']):.1f}",
+                str(request_id),
+            )
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setTextAlignment(Qt.AlignCenter)
+                if column == 0:
+                    item.setData(Qt.UserRole, index)
+                self.points_table.setItem(index, column, item)
+        self.points_table.resizeRowsToContents()
+        self.positions_file_stamp = self.positions_file_signature()
+        self.refresh_navigation_shortcuts(poses)
+        has_points = bool(poses)
+        for button in (
+            self.rename_point_button, self.delete_point_button, self.move_point_up_button,
+            self.move_point_down_button, self.export_points_button,
+        ):
+            button.setEnabled(has_points)
+        self.navigate_point_button.setEnabled(
+            has_points and self.nav_shortcuts_enabled
+        )
+        self.undo_point_button.setEnabled(bool(self.point_undo_stack))
+
+    def positions_file_signature(self):
+        try:
+            stat = os.stat(ROBOT_POSITIONS_FILE)
+            return stat.st_mtime_ns, stat.st_size
+        except OSError:
+            return None
+
+    def maybe_refresh_points(self):
+        if not hasattr(self, 'points_table'):
+            return
+        signature = self.positions_file_signature()
+        if signature != self.positions_file_stamp:
+            self.refresh_points_table()
+
+    def refresh_navigation_shortcuts(self, poses=None):
+        if not hasattr(self, 'dynamic_destination_grid'):
+            return
+        while self.dynamic_destination_grid.count():
+            item = self.dynamic_destination_grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.dynamic_nav_buttons = []
+        poses = self.read_record_positions() if poses is None else poses
+        workstations = [
+            (index, pose) for index, pose in enumerate(poses)
+            if pose.get('label', '').startswith('W')
+            and pose.get('label', '')[1:].isdigit()
+        ]
+        self.destination_hint.setVisible(not workstations)
+        for column in range(4):
+            self.dynamic_destination_grid.setColumnStretch(column, 0)
+        self.dynamic_destination_grid.setColumnStretch(4, 1)
+        for button_index, (index, pose) in enumerate(workstations):
+            label = self.point_display_name(index, pose)
+            request_id = self.point_request_id(index, pose)
+            button = QPushButton(label)
+            button.setToolTip(
+                f"目标 {label}：X {pose['x']:.3f} m，Y {pose['y']:.3f} m，"
+                f"朝向 {math.degrees(pose['yaw']):.1f}°"
+            )
+            button.clicked.connect(
+                lambda _checked=False, target=request_id: self.gotop(target)
+            )
+            button.setFixedWidth(132)
+            button.setEnabled(self.nav_shortcuts_enabled)
+            self.dynamic_destination_grid.addWidget(
+                button, button_index // 4, button_index % 4
+            )
+            self.dynamic_nav_buttons.append(button)
+
+    def selected_point_index(self):
+        selection = self.points_table.selectionModel().selectedRows()
+        if not selection:
+            self.set_status('请先在点位列表中选择一行。', 'warning')
+            return None
+        return selection[0].row()
+
+    def navigate_selected_point(self):
+        index = self.selected_point_index()
+        if index is None:
+            return
+        poses = self.read_record_positions()
+        if index >= len(poses):
+            self.refresh_points_table()
+            self.set_status('点位文件已变化，请重新选择目标。', 'warning')
+            return
+        self.gotop(self.point_request_id(index, poses[index]))
+
+    def ensure_points_editable(self):
+        if self.record_session_active:
+            self.set_status('请先结束点位采集，再编辑点位列表。', 'warning')
+            return False
+        return True
+
+    def snapshot_points_for_undo(self):
+        try:
+            with open(ROBOT_POSITIONS_FILE, 'r', encoding='utf-8') as handle:
+                content = handle.read()
+        except FileNotFoundError:
+            content = ''
+        self.point_undo_stack.append(content)
+        if len(self.point_undo_stack) > 20:
+            self.point_undo_stack.pop(0)
+
+    def write_record_positions(self, poses, remember=True):
+        if remember:
+            self.snapshot_points_for_undo()
+        directory = os.path.dirname(ROBOT_POSITIONS_FILE)
+        os.makedirs(directory, exist_ok=True)
+        temporary = f'{ROBOT_POSITIONS_FILE}.tmp.{os.getpid()}'
+        try:
+            with open(temporary, 'w', encoding='utf-8') as handle:
+                for pose in poses:
+                    line = (
+                        f"{pose['x']:.6f} {pose.get('y', 0.0):.6f} "
+                        f"{pose.get('z', 0.0):.6f} {pose.get('roll', 0.0):.6f} "
+                        f"{pose.get('pitch', 0.0):.6f} {pose['yaw']:.6f}"
+                    )
+                    if pose.get('label'):
+                        line += f" {pose['label']}"
+                    handle.write(line + '\n')
+            os.replace(temporary, ROBOT_POSITIONS_FILE)
+        except OSError:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            raise
+        self.refresh_points_table()
+        self.publish_record_markers()
+
+    def rename_selected_point(self):
+        if not self.ensure_points_editable():
+            return
+        index = self.selected_point_index()
+        if index is None:
+            return
+        poses = self.read_record_positions()
+        current = poses[index].get('label', '')
+        name, accepted = QInputDialog.getText(
+            self, '修改点位名称',
+            '名称（工位请使用 W1、W2…；留空表示普通导航点）：',
+            text=current,
+        )
+        if not accepted:
+            return
+        name = name.strip()
+        if any(character.isspace() for character in name):
+            self.set_status('点位名称不能包含空格。', 'error')
+            return
+        if name.startswith('W'):
+            if not name[1:].isdigit() or int(name[1:]) <= 0:
+                self.set_status('工位名称必须是 W1、W2…格式。', 'error')
+                return
+            if any(
+                row != index and pose.get('label') == name
+                for row, pose in enumerate(poses)
+            ):
+                self.set_status(f'工位名称 {name} 已存在。', 'error')
+                return
+        poses[index]['label'] = name
+        try:
+            self.write_record_positions(poses)
+        except OSError as error:
+            self.set_status(f'点位名称保存失败：{error}', 'error')
+            return
+        self.points_table.selectRow(index)
+        self.set_status('点位名称已修改；导航前请重新构建拓扑。', 'success')
+
+    def delete_selected_point(self):
+        if not self.ensure_points_editable():
+            return
+        index = self.selected_point_index()
+        if index is None:
+            return
+        poses = self.read_record_positions()
+        name = self.point_display_name(index, poses[index])
+        answer = QMessageBox.question(
+            self, '删除点位', f'确定删除 {name} 吗？',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        poses.pop(index)
+        try:
+            self.write_record_positions(poses)
+        except OSError as error:
+            self.set_status(f'删除点位失败：{error}', 'error')
+            return
+        self.set_status(f'已删除 {name}；导航前请重新构建拓扑。', 'success')
+
+    def move_selected_point(self, offset):
+        if not self.ensure_points_editable():
+            return
+        index = self.selected_point_index()
+        if index is None:
+            return
+        poses = self.read_record_positions()
+        target = index + offset
+        if target < 0 or target >= len(poses):
+            self.set_status('点位已经在列表边界。', 'info')
+            return
+        poses[index], poses[target] = poses[target], poses[index]
+        try:
+            self.write_record_positions(poses)
+        except OSError as error:
+            self.set_status(f'调整点位顺序失败：{error}', 'error')
+            return
+        self.points_table.selectRow(target)
+        self.set_status('点位顺序已调整；导航前请重新构建拓扑。', 'success')
+
+    def undo_point_change(self):
+        if not self.ensure_points_editable() or not self.point_undo_stack:
+            self.set_status('没有可撤销的点位修改。', 'info')
+            return
+        content = self.point_undo_stack.pop()
+        directory = os.path.dirname(ROBOT_POSITIONS_FILE)
+        os.makedirs(directory, exist_ok=True)
+        try:
+            with open(ROBOT_POSITIONS_FILE, 'w', encoding='utf-8') as handle:
+                handle.write(content)
+        except OSError as error:
+            self.set_status(f'撤销失败：{error}', 'error')
+            return
+        self.refresh_points_table()
+        self.publish_record_markers()
+        self.set_status('已撤销上一次点位修改。', 'success')
+
+    def restore_latest_points_backup(self):
+        if not self.ensure_points_editable():
+            return
+        directory = os.path.dirname(ROBOT_POSITIONS_FILE)
+        backups = sorted(
+            glob.glob(os.path.join(directory, 'robot_positions_[0-9]*.txt')),
+            key=os.path.getmtime,
+            reverse=True,
+        )
+        if not backups:
+            self.set_status('没有找到点位备份文件。', 'warning')
+            return
+        latest = backups[0]
+        answer = QMessageBox.question(
+            self, '恢复点位备份',
+            f'恢复最近备份 {os.path.basename(latest)}？当前点位可撤销。',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self.snapshot_points_for_undo()
+        try:
+            shutil.copy2(latest, ROBOT_POSITIONS_FILE)
+        except OSError as error:
+            self.set_status(f'恢复备份失败：{error}', 'error')
+            return
+        self.refresh_points_table()
+        self.publish_record_markers()
+        self.set_status('已恢复最近点位备份；导航前请重新构建拓扑。', 'success')
+
+    def import_points_file(self):
+        if not self.ensure_points_editable():
+            return
+        source, _filter = QFileDialog.getOpenFileName(
+            self, '导入点位文件', os.path.dirname(ROBOT_POSITIONS_FILE),
+            '文本文件 (*.txt);;所有文件 (*)',
+        )
+        if not source:
+            return
+        try:
+            with open(source, 'r', encoding='utf-8') as handle:
+                lines = handle.readlines()
+            for line_number, line in enumerate(lines, 1):
+                parts = line.split()
+                if not parts:
+                    continue
+                if len(parts) < 6:
+                    raise ValueError(f'第 {line_number} 行字段不足')
+                for value in parts[:6]:
+                    float(value)
+                if len(parts) > 7:
+                    raise ValueError(f'第 {line_number} 行字段过多')
+        except (OSError, ValueError) as error:
+            self.set_status(f'导入文件无效：{error}', 'error')
+            return
+        self.snapshot_points_for_undo()
+        try:
+            shutil.copy2(source, ROBOT_POSITIONS_FILE)
+        except OSError as error:
+            self.set_status(f'导入失败：{error}', 'error')
+            return
+        self.refresh_points_table()
+        self.publish_record_markers()
+        self.set_status('点位已导入；导航前请重新构建拓扑。', 'success')
+
+    def export_points_file(self):
+        if not os.path.isfile(ROBOT_POSITIONS_FILE):
+            self.set_status('当前没有可导出的点位文件。', 'warning')
+            return
+        destination, _filter = QFileDialog.getSaveFileName(
+            self, '导出点位文件',
+            os.path.join(os.path.dirname(ROBOT_POSITIONS_FILE), 'robot_positions_export.txt'),
+            '文本文件 (*.txt);;所有文件 (*)',
+        )
+        if not destination:
+            return
+        try:
+            shutil.copy2(ROBOT_POSITIONS_FILE, destination)
+        except OSError as error:
+            self.set_status(f'导出失败：{error}', 'error')
+            return
+        self.set_status(f'点位已导出到 {destination}。', 'success')
 
     def next_workstation_label(self):
         highest = 0
@@ -948,6 +1470,7 @@ class MyWindow(QWidget):
         if label:
             line += f' {label}'
         try:
+            self.snapshot_points_for_undo()
             with open(ROBOT_POSITIONS_FILE, 'a', encoding='utf-8') as handle:
                 handle.write(line + '\n')
         except OSError as error:
@@ -957,6 +1480,7 @@ class MyWindow(QWidget):
         point_number = len(self.read_record_positions())
         point_name = label or f'导航点 P{point_number - 1}'
         self.pending_record_pose = None
+        self.refresh_points_table()
         self.record_pose_label.setText(
             f'已保存 {point_name}；请在 RViz 选择下一个目标位姿。'
         )
@@ -1034,8 +1558,24 @@ class MyWindow(QWidget):
 
         self.record_marker_pub.publish(marker_array)
 
-    def on_localization_odometry(self, _message):
+    def on_localization_odometry(self, message):
         """LIO 仅在全局定位成功后发布 /Odometry。"""
+        self.last_odom_monotonic = time.monotonic()
+        q = message.pose.pose.orientation
+        yaw = math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+        )
+        linear_speed = math.hypot(
+            message.twist.twist.linear.x, message.twist.twist.linear.y
+        )
+        self.odometry_requested.emit(
+            message.pose.pose.position.x,
+            message.pose.pose.position.y,
+            math.degrees(yaw),
+            linear_speed,
+            message.twist.twist.angular.z,
+        )
         process = self.localizationProcess
         if (
             self.localization_ready
@@ -1053,12 +1593,176 @@ class MyWindow(QWidget):
         self.set_chip(self.localization_chip, '定位 已就绪', True)
         self.set_status('定位成功，已接收到有效位姿数据。', 'success')
 
+    def update_odometry_display(self, x, y, yaw_degrees, linear_speed, angular_speed):
+        self.odometry_label.setText(
+            f'机器人位姿：X {x:.3f} m  ·  Y {y:.3f} m  ·  '
+            f'朝向 {yaw_degrees:.1f}°  ·  线速度 {linear_speed:.3f} m/s  ·  '
+            f'角速度 {angular_speed:.3f} rad/s'
+        )
+
     def set_chip(self, chip, text, active=False):
         if active:
             chip.setStyleSheet('background: #ECFDF3; color: #067647; border-radius: 12px; padding: 5px 10px;')
         else:
             chip.setStyleSheet('background: #EEF2F7; color: #475467; border-radius: 12px; padding: 5px 10px;')
         chip.setText(text)
+
+    def set_health_chip(self, key, text, state='inactive'):
+        chip = self.health_chips.get(key)
+        if chip is None:
+            return
+        colors = {
+            'active': ('#ECFDF3', '#067647'),
+            'warning': ('#FFFAEB', '#B54708'),
+            'error': ('#FEF3F2', '#B42318'),
+            'inactive': ('#EEF2F7', '#475467'),
+        }
+        background, foreground = colors.get(state, colors['inactive'])
+        chip.setStyleSheet(
+            f'background: {background}; color: {foreground}; border-radius: 12px; '
+            'padding: 5px 10px;'
+        )
+        display_name = self.health_display_names.get(key, key)
+        chip.setText(f'{display_name} · {text}')
+
+    def schedule_health_check(self):
+        self.sync_process_states()
+        self.maybe_refresh_points()
+        if self.preview_mode or self.health_check_running:
+            return
+        self.health_check_running = True
+
+        def collect():
+            snapshot = {
+                'ros': False,
+                'nodes': set(),
+                'can_exists': os.path.exists('/sys/class/net/can0'),
+                'can_up': False,
+            }
+            if snapshot['can_exists']:
+                try:
+                    with open(
+                        '/sys/class/net/can0/flags', 'r', encoding='utf-8'
+                    ) as handle:
+                        flags = int(handle.read().strip(), 16)
+                        snapshot['can_up'] = bool(flags & 0x1)
+                except (OSError, ValueError):
+                    pass
+            try:
+                result = subprocess.run(
+                    ['rosnode', 'list'], capture_output=True, text=True, timeout=2
+                )
+                snapshot['ros'] = result.returncode == 0
+                if snapshot['ros']:
+                    snapshot['nodes'] = {
+                        line.strip() for line in result.stdout.splitlines()
+                        if line.strip()
+                    }
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            self.health_snapshot_requested.emit(snapshot)
+
+        thread = threading.Thread(target=collect, daemon=True)
+        thread.start()
+
+    def apply_health_snapshot(self, snapshot):
+        self.health_check_running = False
+        nodes = snapshot.get('nodes', set())
+        ros_ok = bool(snapshot.get('ros'))
+        self.set_chip(
+            self.ros_chip, 'ROS 已连接' if ros_ok else 'ROS 未连接', ros_ok
+        )
+
+        can_exists = snapshot.get('can_exists', False)
+        can_up = snapshot.get('can_up', False)
+        if can_up:
+            self.set_health_chip('can', '已连接', 'active')
+        elif can_exists:
+            self.set_health_chip('can', '未启用', 'warning')
+        else:
+            self.set_health_chip('can', '未检测', 'inactive')
+
+        checks = {
+            'base': ('/ranger_base_node', '运行中'),
+            'arbiter': ('/cmd_vel_arbiter', '运行中'),
+            'move_base': ('/mxb_move_base', '运行中'),
+            'auto_nav': ('/runnav', '运行中'),
+        }
+        for key, (node, active_text) in checks.items():
+            active = node in nodes
+            self.set_health_chip(
+                key, active_text if active else '未运行',
+                'active' if active else 'inactive',
+            )
+
+        tag_nodes = {'/TagCtl_service', '/mm3v_serial_reader'}
+        tag_count = len(tag_nodes.intersection(nodes))
+        if tag_count == len(tag_nodes):
+            self.set_health_chip('tag', '运行中', 'active')
+        elif tag_count:
+            self.set_health_chip('tag', '部分运行', 'warning')
+        else:
+            self.set_health_chip('tag', '未运行', 'inactive')
+
+        odom_age = (
+            time.monotonic() - self.last_odom_monotonic
+            if self.last_odom_monotonic else float('inf')
+        )
+        if odom_age <= 2.0:
+            self.set_health_chip('localization', '数据正常', 'active')
+            self.set_chip(self.localization_chip, '定位 已就绪', True)
+        elif self.localizationProcess and self.localizationProcess.poll() is None:
+            self.set_health_chip('localization', '等待数据', 'warning')
+            self.set_chip(self.localization_chip, '定位 等待数据', False)
+        else:
+            self.set_health_chip('localization', '未运行', 'inactive')
+
+        if '/runnav' in nodes:
+            self.set_chip(self.nav_chip, '导航 运行中', True)
+        elif '/mxb_move_base' in nodes:
+            self.set_chip(self.nav_chip, 'MoveBase 待命', False)
+        elif not self.auto_nav_start_pending:
+            self.set_chip(self.nav_chip, '导航 未启动', False)
+
+    def sync_process_states(self):
+        process_states = (
+            ('mappingProcess', 'mapping_start_button', 'mapping_stop_button'),
+            ('g2dProcess', 'generate_2d_button', 'stop_2d_button'),
+        )
+        for process_name, start_name, stop_name in process_states:
+            process = getattr(self, process_name, None)
+            if process is not None and process.poll() is not None:
+                setattr(self, process_name, None)
+                start_button = getattr(self, start_name, None)
+                stop_button = getattr(self, stop_name, None)
+                if start_button:
+                    start_button.setEnabled(True)
+                if stop_button:
+                    stop_button.setEnabled(False)
+
+        if self.localizationProcess and self.localizationProcess.poll() is not None:
+            self.localizationProcess = None
+            self.localization_ready = False
+            self.g2d_button.setEnabled(True)
+            self.g2d_exit_button.setEnabled(False)
+        if self.runPntsNavProcess and self.runPntsNavProcess.poll() is not None:
+            self.runPntsNavProcess = None
+            self.nav_button.setEnabled(True)
+            self.nav_runstart.setEnabled(False)
+            self.nav_Pause.setEnabled(False)
+            self.nav_resume.setEnabled(False)
+            self.cancel_task_button.setEnabled(False)
+            self.set_nav_shortcuts_visible(False)
+        if self.moveBaseProcess and self.moveBaseProcess.poll() is not None:
+            self.moveBaseProcess = None
+        if self.baseProcess and self.baseProcess.poll() is not None:
+            self.baseProcess = None
+        if self.joyProcess and self.joyProcess.poll() is not None:
+            self.joyProcess = None
+        self.tagProcesses = [
+            process for process in self.tagProcesses
+            if process is not None and process.poll() is None
+        ]
 
     def start_managed_process(self, command):
         """直接启动子进程并创建独立进程组，便于可靠停止 roslaunch 及其子节点。"""
@@ -1156,6 +1860,63 @@ class MyWindow(QWidget):
             self.set_status(f'B-spline 日志标签页启动失败：{error}', 'warning')
             return False
 
+    def build_topology(self):
+        if self.topology_build_running:
+            self.set_status('导航拓扑正在构建。', 'info')
+            return
+        maps_directory = os.path.dirname(ROBOT_POSITIONS_FILE)
+        required = (
+            ROBOT_POSITIONS_FILE,
+            os.path.join(maps_directory, 'map.yaml'),
+        )
+        missing = [path for path in required if not os.path.isfile(path)]
+        if missing:
+            self.set_status(
+                '无法构建拓扑，缺少：'
+                + '、'.join(os.path.basename(path) for path in missing),
+                'error',
+            )
+            return
+        if len(self.read_record_positions()) < 2:
+            self.set_status('至少需要两个有效点位才能构建拓扑。', 'warning')
+            return
+
+        self.topology_build_running = True
+        self.build_topology_button.setEnabled(False)
+        self.set_status('正在根据点位和二维地图构建导航拓扑…', 'info')
+
+        def run_builder():
+            try:
+                result = subprocess.run(
+                    [
+                        sys.executable, TOPOLOGY_BUILDER,
+                        '--maps-dir', maps_directory,
+                    ],
+                    capture_output=True, text=True, timeout=120,
+                )
+                output = (result.stdout or result.stderr).strip()
+                self.topology_finished_requested.emit(
+                    result.returncode == 0, output
+                )
+            except (OSError, subprocess.TimeoutExpired) as error:
+                self.topology_finished_requested.emit(False, str(error))
+
+        threading.Thread(target=run_builder, daemon=True).start()
+
+    def on_topology_finished(self, success, output):
+        self.topology_build_running = False
+        self.build_topology_button.setEnabled(True)
+        summary = output.splitlines()[-1] if output else '无输出'
+        if success:
+            topology_path = os.path.join(
+                os.path.dirname(ROBOT_POSITIONS_FILE), 'topology.yaml'
+            )
+            self.set_status(
+                f'导航拓扑构建完成：{topology_path}（{summary}）', 'success'
+            )
+        else:
+            self.set_status(f'导航拓扑构建失败：{summary}', 'error')
+
     def start_mapping(self):
         if self.mappingProcess and self.mappingProcess.poll() is None:
             self.set_status('地图构建已在运行。', 'info')
@@ -1244,11 +2005,15 @@ class MyWindow(QWidget):
             self.set_status('二维地图生成已停止。', 'info')
 
     def set_nav_shortcuts_visible(self, visible):
-        for button in (
-            self.p1_button, self.p2_button, self.p3_button, self.p4_button, self.p5_button,
-            self.w1_button, self.w2_button, self.w3_button
-        ):
+        self.nav_shortcuts_enabled = visible
+        for button in self.dynamic_nav_buttons:
             button.setEnabled(visible)
+        if hasattr(self, 'navigate_point_button'):
+            self.navigate_point_button.setEnabled(
+                visible and self.points_table.rowCount() > 0
+            )
+        if hasattr(self, 'cancel_task_button'):
+            self.cancel_task_button.setEnabled(visible)
 
     def read_target_input(self, line_edit):
         text = line_edit.text().strip()
@@ -1293,6 +2058,9 @@ class MyWindow(QWidget):
         self.send_target_input()
     
     def slowMove(self, posX, posY, posAngle): #go to work  pose
+        if self.estop_active:
+            self.set_status('紧急停止尚未解除，不能发送精细调整目标。', 'error')
+            return
         service_name = '/set_target_y'
         xx = f"{float(posX):.3f}"
         yy = f"{float(posY):.3f}"
@@ -1357,6 +2125,9 @@ class MyWindow(QWidget):
 
     
     def gotop(self,id):  #go to position id
+        if self.estop_active:
+            self.set_status('紧急停止尚未解除，不能下发导航目标。', 'error')
+            return
         # 定义服务名称
         service_name = '/plan_path_and_go'
         # 构建请求数据，确保 data 和 run 是整数
@@ -1445,21 +2216,32 @@ class MyWindow(QWidget):
         self.set_status('底盘驱动已在新标签页启动。', 'success')
 
     def start_tag(self):
-    # 创建完整的 gnome-terminal 命令字符串
-    # 定义每个标签页的命令
-        tcp_server = shlex.quote(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tcpserver.py'))
-        commands = [
-            ['gnome-terminal', '--tab', '--title=MM3V Tag', '--', 'bash', '-c', 'roslaunch robot_r 6tagReadAndCtl_mm3v.launch; exec bash'],
-            ['gnome-terminal', '--tab', '--title=TCP Server', '--', 'bash', '-c', f'python3 {tcp_server}; exec bash']
+        self.tagProcesses = [
+            process for process in self.tagProcesses
+            if process is not None and process.poll() is None
         ]
+        if self.tagProcesses:
+            self.set_status('标签读取与 TCP 服务已在运行。', 'info')
+            return
+        tcp_server = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), 'tcpserver.py'
+        )
         try:
-            # 分别启动每个标签页
-            for cmd in commands:
-                subprocess.Popen(cmd)
+            self.tagProcesses = []
+            self.tagProcesses.append(self.start_terminal_tab_process(
+                ['roslaunch', 'robot_r', '6tagReadAndCtl_mm3v.launch'],
+                'MM3V Tag',
+            ))
+            self.tagProcesses.append(self.start_terminal_tab_process(
+                [sys.executable, tcp_server], 'TCP Server'
+            ))
             self.set_status('标签读取与 TCP 服务已启动。', 'success')
-        except Exception as e:
-            print(f"Failed to run command: {e}")
-            self.set_status(f'标签服务启动失败：{e}', 'error')
+        except (OSError, RuntimeError) as error:
+            for process in self.tagProcesses:
+                self.stop_managed_process(process, 'tag service')
+            self.tagProcesses = []
+            print(f"Failed to run command: {error}")
+            self.set_status(f'标签服务启动失败：{error}', 'error')
                             
     def start_can(self):
         try:
@@ -1555,7 +2337,90 @@ class MyWindow(QWidget):
         if self.joy_pub is not None:
             self.set_status('已在 RViz 中请求显示点位。', 'success')
 
+    def publish_safety_stop(self):
+        if self.safety_pub is not None:
+            self.safety_pub.publish(Twist())
+
+    def publish_stop_burst(self):
+        self.publish_safety_stop()
+        for delay in (60, 120, 180, 240):
+            QTimer.singleShot(delay, self.publish_safety_stop)
+
+    def activate_emergency_stop(self):
+        if self.estop_active:
+            return
+        self.estop_active = True
+        self.send_joy_message('NavPause')
+        self.publish_safety_stop()
+        self.estop_timer.start(100)
+        self.estop_button.setEnabled(False)
+        self.release_estop_button.setEnabled(True)
+        self.nav_runstart.setEnabled(False)
+        self.nav_resume.setEnabled(False)
+        safety_connections = (
+            self.safety_pub.get_num_connections()
+            if self.safety_pub is not None else 0
+        )
+        if safety_connections:
+            message = '紧急停止已生效：安全通道正在持续发送零速度。'
+        else:
+            message = (
+                '界面已锁定，但未检测到速度仲裁订阅；'
+                '请立即使用物理急停并检查底盘节点。'
+            )
+        self.set_status(message, 'error')
+
+    def release_emergency_stop(self):
+        if not self.estop_active:
+            return
+        answer = QMessageBox.question(
+            self, '解除紧急停止',
+            '请确认机器人周围安全。解除后不会自动恢复导航，是否继续？',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self.publish_stop_burst()
+        self.estop_timer.stop()
+        self.estop_active = False
+        self.estop_button.setEnabled(True)
+        self.release_estop_button.setEnabled(False)
+        auto_nav_running = (
+            self.runPntsNavProcess is not None
+            and self.runPntsNavProcess.poll() is None
+        )
+        self.nav_runstart.setEnabled(auto_nav_running)
+        self.nav_resume.setEnabled(auto_nav_running)
+        self.set_status(
+            '紧急停止已解除；机器人保持暂停，请确认后手动继续任务。', 'warning'
+        )
+
+    def cancel_current_task(self):
+        if self.estop_active:
+            self.set_status('当前处于紧急停止状态，请先确认现场安全。', 'warning')
+            return
+        self.send_joy_message('NavPause')
+        self.publish_stop_burst()
+        self.stop_managed_process(self.runPntsNavProcess, 'auto navigation')
+        self.runPntsNavProcess = None
+        self.nav_button.setEnabled(True)
+        self.nav_runstart.setEnabled(False)
+        self.nav_Pause.setEnabled(False)
+        self.nav_resume.setEnabled(False)
+        self.cancel_task_button.setEnabled(False)
+        self.set_nav_shortcuts_visible(False)
+        if self.is_move_base_ready():
+            self.set_chip(self.nav_chip, 'MoveBase 待命', False)
+        else:
+            self.set_chip(self.nav_chip, '导航 未启动', False)
+        self.set_status(
+            '当前导航任务已取消，MoveBase 保持待命。', 'warning'
+        )
+
     def Nav_start(self):
+        if self.estop_active:
+            self.set_status('紧急停止尚未解除，不能开始任务。', 'error')
+            return
         self.send_joy_message("NavStart")
         if self.joy_pub is not None:
             self.set_status('自动导航任务已开始。', 'success')
@@ -1566,6 +2431,9 @@ class MyWindow(QWidget):
             self.set_status('自动导航任务已暂停。', 'warning')
     
     def Nav_jixu(self):
+        if self.estop_active:
+            self.set_status('紧急停止尚未解除，不能继续任务。', 'error')
+            return
         self.send_joy_message("Navresume")
         if self.joy_pub is not None:
             self.set_status('自动导航任务已继续。', 'success')
@@ -1609,6 +2477,7 @@ class MyWindow(QWidget):
             self.setpointProcess = None
             self.set_status(f'无法准备点位文件：{error}', 'error')
             return
+        self.refresh_points_table()
 
         self.record_session_active = True
         self.pending_record_pose = None
@@ -1646,6 +2515,7 @@ class MyWindow(QWidget):
         self.add_workstation.hide()
         self.location_pnt.hide()
         self.publish_record_markers()
+        self.refresh_points_table()
         if had_session:
             self.set_status(
                 f'已结束点位设置，点位保存在 {ROBOT_POSITIONS_FILE}。',
@@ -1718,6 +2588,9 @@ class MyWindow(QWidget):
 
     # load points and auto run
     def startNAV(self):
+        if self.estop_active:
+            self.set_status('紧急停止尚未解除，不能启动自动导航。', 'error')
+            return
         if self.runPntsNavProcess and self.runPntsNavProcess.poll() is None:
             self.set_status('自动导航已在运行。', 'info')
             return
@@ -1807,12 +2680,12 @@ class MyWindow(QWidget):
             self.set_status('自动导航和 MoveBase 已停止。', 'info')
 
 
-    def quit_navigation(self):
+    def quit_navigation(self, stop_external=True):
         if self.localizationProcess and self.localizationProcess.poll() is None:
             pgid = os.getpgid(self.localizationProcess.pid)
             subprocess.call(['pkill', '-15', '-g', str(pgid)])
             self.localizationProcess = None
-        else:
+        elif stop_external:
             process_name = '3startlocation'
             try:
                 process_id = subprocess.check_output(['pgrep', '-f', process_name]).decode().strip()
@@ -1836,17 +2709,33 @@ class MyWindow(QWidget):
 
  
     def close_app(self):
+        self.close()
+
+    def closeEvent(self, event):
+        if self.shutdown_in_progress:
+            event.accept()
+            return
+        self.shutdown_in_progress = True
+        self.health_timer.stop()
+        self.estop_active = True
+        self.estop_timer.start(100)
+        self.publish_stop_burst()
         self.exitNAV()
-        self.quit_navigation()
+        self.quit_navigation(stop_external=False)
         self.stop_rviz()
         self.stop_setlocation()
         self.stop_2d_map_generation()
         self.stop_mapping()
-        self.close()  # 关闭窗口，这将触发closeEvent事件，从而结束整个应用程序
-
-    def closeEvent(self, event):
-        # 当窗口关闭时，确保清理资源等
-        event.accept()  # 接受关闭事件，默认行为是关闭窗口并退出程序
+        self.stop_managed_process(self.joyProcess, 'joystick')
+        self.joyProcess = None
+        self.stop_managed_process(self.baseProcess, 'robot base')
+        self.baseProcess = None
+        for process in self.tagProcesses:
+            self.stop_managed_process(process, 'tag service')
+        self.tagProcesses = []
+        self.publish_stop_burst()
+        self.estop_timer.stop()
+        event.accept()
         
 
 
