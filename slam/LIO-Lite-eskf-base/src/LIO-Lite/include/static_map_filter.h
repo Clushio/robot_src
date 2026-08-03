@@ -55,6 +55,8 @@ class StaticMapFilter {
 
     CloudPtr BuildStaticMap() const;
     CloudPtr BuildStaticFeatureMap() const;
+    CloudPtr BuildStaticMapFromRaw(const PointCloudType &raw_cloud) const;
+    CloudPtr BuildStaticFeatureMapFromRaw(const PointCloudType &raw_cloud) const;
     Stats GetStats() const;
     void Reset();
 
@@ -94,7 +96,11 @@ class StaticMapFilter {
 
     VoxelKey KeyForPoint(double x, double y, double z) const;
     VoxelKey FindOrCreateState(const PointType &point);
-    bool FindMatchingState(const PointType &point, VoxelKey *key) const;
+    bool FindMatchingState(const PointType &point, VoxelKey *key,
+                           bool confirmed_only = false) const;
+    CloudPtr BuildStaticCloudFromRaw(const PointCloudType &raw_cloud,
+                                     std::size_t max_samples_per_state,
+                                     std::uint32_t random_seed) const;
     void AddGlobalSample(VoxelState *state, const PointType &point);
     void AddFeatureSample(VoxelState *state, const PointType &point);
     void CollectFreeSpace(const PointCloudType &scan_world, const Eigen::Vector3d &sensor_origin,
