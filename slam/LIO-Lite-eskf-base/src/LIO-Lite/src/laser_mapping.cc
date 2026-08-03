@@ -1660,17 +1660,46 @@ void LaserMapping::Finish() {
 
     if (static_map_filter_ && static_map_filter_->enabled()) {
         const StaticMapFilter::Stats stats = static_map_filter_->GetStats();
-        CloudPtr filtered_global = static_map_filter_->BuildStaticMap();
-        CloudPtr filtered_feature = static_map_filter_->BuildStaticFeatureMap();
-        const bool filter_valid =
+        const bool classification_valid =
             stats.processed_keyframes >= 3 &&
-            stats.confirmed_voxels >= dynamic_filter_options_.min_confirmed_voxels &&
-            !filtered_global->empty() && !filtered_feature->empty();
+            stats.confirmed_voxels >= dynamic_filter_options_.min_confirmed_voxels;
+        CloudPtr filtered_global(new PointCloudType());
+        CloudPtr filtered_feature(new PointCloudType());
+        double rebuild_ms = 0.0;
 
         if (dynamic_filter_options_.save_raw) {
             write_cloud("GlobalMap_raw.pcd", *pcl_wait_save_);
             write_cloud("FeatureMap_raw.pcd", *pcl_feature_point_);
         }
+
+        if (classification_valid) {
+            const ros::WallTime rebuild_start = ros::WallTime::now();
+            filtered_global = static_map_filter_->BuildStaticMapFromRaw(*pcl_wait_save_);
+            filtered_feature =
+                static_map_filter_->BuildStaticFeatureMapFromRaw(*pcl_feature_point_);
+            rebuild_ms = (ros::WallTime::now() - rebuild_start).toSec() * 1000.0;
+        }
+
+        const bool filter_valid = classification_valid && !filtered_global->empty() &&
+                                  !filtered_feature->empty();
+        const double global_retention =
+            pcl_wait_save_->empty()
+                ? 0.0
+                : 100.0 * static_cast<double>(filtered_global->size()) /
+                      static_cast<double>(pcl_wait_save_->size());
+        const double feature_retention =
+            pcl_feature_point_->empty()
+                ? 0.0
+                : 100.0 * static_cast<double>(filtered_feature->size()) /
+                      static_cast<double>(pcl_feature_point_->size());
+        LOG(INFO) << "dynamic_filter dense rebuild: raw_points=" << pcl_wait_save_->size()
+                  << ", dense_static_points=" << filtered_global->size()
+                  << ", retention=" << global_retention << "%"
+                  << ", raw_feature_points=" << pcl_feature_point_->size()
+                  << ", dense_static_feature_points=" << filtered_feature->size()
+                  << ", feature_retention=" << feature_retention << "%"
+                  << ", rebuild_ms=" << rebuild_ms
+                  << ", confirmed_voxels=" << stats.confirmed_voxels;
 
         if (filter_valid) {
             global_map_to_save = filtered_global;

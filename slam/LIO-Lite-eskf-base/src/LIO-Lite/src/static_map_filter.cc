@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <random>
 #include <utility>
 
 #include <pcl/common/point_tests.h>
@@ -51,7 +52,8 @@ StaticMapFilter::VoxelKey StaticMapFilter::KeyForPoint(double x, double y, doubl
             static_cast<int>(std::floor(z / options_.voxel_size))};
 }
 
-bool StaticMapFilter::FindMatchingState(const PointType &point, VoxelKey *key) const {
+bool StaticMapFilter::FindMatchingState(const PointType &point, VoxelKey *key,
+                                        bool confirmed_only) const {
     const VoxelKey center = KeyForPoint(point.x, point.y, point.z);
     const int radius_cells =
         std::max(0, static_cast<int>(std::ceil(options_.match_radius / options_.voxel_size)));
@@ -64,7 +66,8 @@ bool StaticMapFilter::FindMatchingState(const PointType &point, VoxelKey *key) c
             for (int dz = -radius_cells; dz <= radius_cells; ++dz) {
                 const VoxelKey candidate{center.x + dx, center.y + dy, center.z + dz};
                 const auto iter = states_.find(candidate);
-                if (iter == states_.end() || iter->second.point_count == 0) {
+                if (iter == states_.end() || iter->second.point_count == 0 ||
+                    (confirmed_only && !iter->second.confirmed)) {
                     continue;
                 }
                 const VoxelState &state = iter->second;
@@ -83,7 +86,7 @@ bool StaticMapFilter::FindMatchingState(const PointType &point, VoxelKey *key) c
 
     if (!found) {
         const auto exact = states_.find(center);
-        if (exact != states_.end()) {
+        if (exact != states_.end() && (!confirmed_only || exact->second.confirmed)) {
             *key = center;
             return true;
         }
@@ -362,6 +365,77 @@ CloudPtr StaticMapFilter::BuildStaticFeatureMap() const {
     }
     FinalizeCloud(cloud.get());
     return cloud;
+}
+
+CloudPtr StaticMapFilter::BuildStaticCloudFromRaw(const PointCloudType &raw_cloud,
+                                                  std::size_t max_samples_per_state,
+                                                  std::uint32_t random_seed) const {
+    struct Reservoir {
+        std::size_t seen = 0;
+        PointVector samples;
+    };
+
+    std::unordered_map<VoxelKey, Reservoir, VoxelKeyHash> reservoirs;
+    reservoirs.reserve(states_.size());
+    std::mt19937 random_generator(random_seed);
+
+    for (const PointType &point : raw_cloud.points) {
+        if (!pcl::isFinite(point)) {
+            continue;
+        }
+
+        VoxelKey key;
+        if (!FindMatchingState(point, &key, true)) {
+            continue;
+        }
+
+        Reservoir &reservoir = reservoirs[key];
+        reservoir.seen++;
+        if (reservoir.samples.size() < max_samples_per_state) {
+            reservoir.samples.push_back(point);
+            continue;
+        }
+
+        std::uniform_int_distribution<std::size_t> replacement_distribution(
+            0, reservoir.seen - 1);
+        const std::size_t replacement_index = replacement_distribution(random_generator);
+        if (replacement_index < max_samples_per_state) {
+            reservoir.samples[replacement_index] = point;
+        }
+    }
+
+    std::vector<VoxelKey> ordered_keys;
+    ordered_keys.reserve(reservoirs.size());
+    for (const auto &entry : reservoirs) {
+        ordered_keys.push_back(entry.first);
+    }
+    std::sort(ordered_keys.begin(), ordered_keys.end(),
+              [](const VoxelKey &lhs, const VoxelKey &rhs) {
+                  if (lhs.x != rhs.x) return lhs.x < rhs.x;
+                  if (lhs.y != rhs.y) return lhs.y < rhs.y;
+                  return lhs.z < rhs.z;
+              });
+
+    CloudPtr cloud(new PointCloudType());
+    for (const VoxelKey &key : ordered_keys) {
+        const Reservoir &reservoir = reservoirs.at(key);
+        cloud->points.insert(cloud->points.end(), reservoir.samples.begin(),
+                             reservoir.samples.end());
+    }
+    FinalizeCloud(cloud.get());
+    return cloud;
+}
+
+CloudPtr StaticMapFilter::BuildStaticMapFromRaw(const PointCloudType &raw_cloud) const {
+    constexpr std::uint32_t kGlobalSamplingSeed = 0x474c4f42U;
+    return BuildStaticCloudFromRaw(raw_cloud, options_.max_global_samples_per_voxel,
+                                   kGlobalSamplingSeed);
+}
+
+CloudPtr StaticMapFilter::BuildStaticFeatureMapFromRaw(const PointCloudType &raw_cloud) const {
+    constexpr std::uint32_t kFeatureSamplingSeed = 0x46454154U;
+    return BuildStaticCloudFromRaw(raw_cloud, options_.max_feature_samples_per_voxel,
+                                   kFeatureSamplingSeed);
 }
 
 StaticMapFilter::Stats StaticMapFilter::GetStats() const {
