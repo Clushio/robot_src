@@ -1,8 +1,9 @@
 # max_obstacle_height: 0.60  #假设机器人顶部还有其他东西，诸如机械臂
 
 # Obstacle Cost Shaping (http://wiki.ros.org/costmap_2d/hydro/inflation)
-#robot_radius: 0.33
-footprint: [[0.36, 0.45], [0.36, -0.45], [-0.36,-0.45], [-0.36, 0.45]]  # if the robot is not circular
+# RANGER MINI 3.0: 720 mm (x, front/back) x 500 mm (y, left/right).
+# The chassis center is the coordinate origin, with +x forward and +y left.
+footprint: [[0.36, 0.25], [0.36, -0.25], [-0.36, -0.25], [-0.36, 0.25]]
 
 obstacle_layer:
   enabled:             true
@@ -62,4 +63,3 @@ inflation_layer:
 static_layer:
    enabled:              true
    track_unknown_space:  true
-
