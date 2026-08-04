@@ -8,6 +8,7 @@ add_compile_options(-std=c++11)
 ## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
 ## is used, also find other catkin packages
 find_package(catkin REQUIRED COMPONENTS
+  actionlib
   controller_manager
   geometry_msgs
   ranger_msgs
@@ -115,7 +116,7 @@ include_directories(${EIGEN3_INCLUDE_DIR})
 catkin_package(
   INCLUDE_DIRS include
 #  LIBRARIES ranger_base
-#  CATKIN_DEPENDS controller_manager geometry_msgs ranger_msgs roscpp roslaunch sensor_msgs topic_tools ugv_sdk
+  CATKIN_DEPENDS actionlib geometry_msgs nav_msgs ranger_msgs roscpp sensor_msgs tf2_ros ugv_sdk
 #  DEPENDS system_lib
 )
 

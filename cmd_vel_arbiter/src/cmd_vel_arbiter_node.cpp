@@ -1,11 +1,15 @@
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include <boost/bind.hpp>
+#include <actionlib/client/simple_action_client.h>
+#include <cmd_vel_arbiter/FinishMotion.h>
 #include <geometry_msgs/Twist.h>
+#include <ranger_msgs/StopAndCenterAction.h>
 #include <ros/ros.h>
 
 namespace {
@@ -36,9 +40,20 @@ class CmdVelArbiter {
     private_nh_.param("output_topic", output_topic_, std::string("/cmd_vel"));
     private_nh_.param("publish_rate", publish_rate_, 50.0);
     private_nh_.param("switch_stop_cycles", switch_stop_cycles_, 1);
+    private_nh_.param("stop_and_center_action", stop_and_center_action_,
+                      std::string("/stop_and_center"));
+    private_nh_.param("stop_and_center_wait_timeout",
+                      stop_and_center_wait_timeout_, 7.0);
+    private_nh_.param("finish_source_suppression",
+                      finish_source_suppression_, 0.5);
+    private_nh_.param("center_on_nav_loss", center_on_nav_loss_, true);
+    private_nh_.param("center_on_tag_loss", center_on_tag_loss_, true);
 
     publish_rate_ = std::max(1.0, publish_rate_);
     switch_stop_cycles_ = std::max(1, switch_stop_cycles_);
+    stop_and_center_wait_timeout_ =
+        std::max(0.5, stop_and_center_wait_timeout_);
+    finish_source_suppression_ = std::max(0.0, finish_source_suppression_);
 
     LoadInput("safety", "/cmd_vel/safety", 100, 0.25,
               0.0, 0.0, 0.0, true);
@@ -50,11 +65,18 @@ class CmdVelArbiter {
               0.30, 0.10, 4.10, false);
 
     output_pub_ = nh_.advertise<geometry_msgs::Twist>(output_topic_, 1, false);
+    stop_center_client_.reset(
+        new StopCenterClient(stop_and_center_action_, true));
+    finish_motion_server_ = private_nh_.advertiseService(
+        "finish_motion", &CmdVelArbiter::FinishMotionCallback, this);
     timer_ = nh_.createWallTimer(
         ros::WallDuration(1.0 / publish_rate_),
         &CmdVelArbiter::TimerCallback, this);
     ROS_INFO("cmd_vel arbiter publishing %s at %.1f Hz",
              output_topic_.c_str(), publish_rate_);
+    ROS_INFO("stop-and-center action=%s, finish service=%s",
+             stop_and_center_action_.c_str(),
+             private_nh_.resolveName("finish_motion").c_str());
   }
 
   ~CmdVelArbiter() {
@@ -65,6 +87,9 @@ class CmdVelArbiter {
   }
 
  private:
+  typedef actionlib::SimpleActionClient<ranger_msgs::StopAndCenterAction>
+      StopCenterClient;
+
   struct Input {
     std::string name;
     std::string topic;
@@ -77,6 +102,7 @@ class CmdVelArbiter {
     bool received = false;
     geometry_msgs::Twist command;
     ros::WallTime received_at;
+    ros::WallTime ignored_until;
     ros::Subscriber subscriber;
   };
 
@@ -114,6 +140,11 @@ class CmdVelArbiter {
 
   void InputCallback(const geometry_msgs::Twist::ConstPtr& msg,
                      const std::shared_ptr<Input>& input) {
+    const ros::WallTime now = ros::WallTime::now();
+    if (!input->ignored_until.isZero() && now < input->ignored_until) {
+      return;
+    }
+
     geometry_msgs::Twist command = *msg;
     if (!IsFinite(command)) {
       ROS_ERROR_THROTTLE(1.0, "Rejected non-finite velocity from %s",
@@ -133,7 +164,7 @@ class CmdVelArbiter {
     }
 
     input->command = command;
-    input->received_at = ros::WallTime::now();
+    input->received_at = now;
     input->received = true;
   }
 
@@ -153,19 +184,152 @@ class CmdVelArbiter {
     return selected;
   }
 
+  std::shared_ptr<Input> FindInput(const std::string& name) const {
+    for (const std::shared_ptr<Input>& input : inputs_) {
+      if (input->name == name) {
+        return input;
+      }
+    }
+    return std::shared_ptr<Input>();
+  }
+
+  bool ShouldCenterOnLoss(const std::string& source) const {
+    return (source == "nav" && center_on_nav_loss_) ||
+           (source == "tag" && center_on_tag_loss_);
+  }
+
+  void StopCenterDone(
+      const actionlib::SimpleClientGoalState& state,
+      const ranger_msgs::StopAndCenterResultConstPtr& result) {
+    const bool success =
+        state == actionlib::SimpleClientGoalState::SUCCEEDED && result &&
+        result->success;
+    last_center_success_.store(success);
+    centering_active_.store(false);
+    if (success) {
+      ROS_INFO("stop-and-center completed: %s", result->message.c_str());
+    } else {
+      ROS_ERROR("stop-and-center failed: state=%s message=%s",
+                state.toString().c_str(),
+                result ? result->message.c_str() : "no result");
+    }
+  }
+
+  bool RequestStopAndCenter(uint8_t reason) {
+    if (centering_active_.load()) {
+      return true;
+    }
+    if (!stop_center_client_ ||
+        !stop_center_client_->waitForServer(ros::Duration(0.2))) {
+      ROS_ERROR_THROTTLE(1.0, "stop-and-center action server %s unavailable",
+                         stop_and_center_action_.c_str());
+      return false;
+    }
+
+    ranger_msgs::StopAndCenterGoal goal;
+    goal.reason = reason;
+    centering_active_.store(true);
+    last_center_success_.store(false);
+    motion_since_center_ = false;
+    stop_center_client_->sendGoal(
+        goal, boost::bind(&CmdVelArbiter::StopCenterDone, this, _1, _2));
+    return true;
+  }
+
+  bool WaitForStopAndCenter() {
+    if (!stop_center_client_) {
+      return false;
+    }
+    if (!stop_center_client_->waitForResult(
+            ros::Duration(stop_and_center_wait_timeout_))) {
+      ROS_ERROR("stop-and-center did not finish within %.1f seconds",
+                stop_and_center_wait_timeout_);
+      return false;
+    }
+    const ranger_msgs::StopAndCenterResultConstPtr result =
+        stop_center_client_->getResult();
+    return result && result->success;
+  }
+
+  bool FinishMotionCallback(cmd_vel_arbiter::FinishMotion::Request& req,
+                            cmd_vel_arbiter::FinishMotion::Response& res) {
+    const std::shared_ptr<Input> input = FindInput(req.source);
+    if (!input) {
+      res.accepted = false;
+      res.centered = false;
+      res.message = "unknown motion source: " + req.source;
+      return true;
+    }
+
+    const std::shared_ptr<Input> selected =
+        SelectInput(ros::WallTime::now());
+    const bool owns_control =
+        active_input_ == req.source ||
+        (selected && selected->name == req.source);
+    res.accepted = true;
+
+    const bool force_safety_stop =
+        req.reason == cmd_vel_arbiter::FinishMotionRequest::SOFTWARE_ESTOP;
+    if (!owns_control && !centering_active_.load() && !force_safety_stop) {
+      res.centered = false;
+      res.message = "source no longer owns motion control; no centering issued";
+      return true;
+    }
+
+    const ros::WallTime now = ros::WallTime::now();
+    if (force_safety_stop) {
+      input->command = geometry_msgs::Twist();
+      input->received = true;
+      input->received_at = now;
+      active_input_ = input->name;
+    } else {
+      input->received = false;
+      input->ignored_until =
+          now + ros::WallDuration(finish_source_suppression_);
+      active_input_.clear();
+    }
+    stop_cycles_remaining_ = switch_stop_cycles_;
+    PublishZero();
+
+    if (!RequestStopAndCenter(req.reason)) {
+      res.centered = false;
+      res.message = "stop-and-center action server unavailable";
+      return true;
+    }
+
+    res.centered = WaitForStopAndCenter();
+    res.message = res.centered
+                      ? "vehicle stopped and steering centered"
+                      : "vehicle stopped, but steering centering failed";
+    return true;
+  }
+
   void TimerCallback(const ros::WallTimerEvent&) {
     const std::shared_ptr<Input> selected = SelectInput(ros::WallTime::now());
     const std::string selected_name = selected ? selected->name : std::string();
 
     if (selected_name != active_input_) {
+      const std::string previous_name = active_input_;
       ROS_INFO("cmd_vel source changed: %s -> %s",
-               active_input_.empty() ? "none" : active_input_.c_str(),
+               previous_name.empty() ? "none" : previous_name.c_str(),
                selected_name.empty() ? "none" : selected_name.c_str());
       active_input_ = selected_name;
       stop_cycles_remaining_ = switch_stop_cycles_;
+
+      if (selected_name == "safety") {
+        RequestStopAndCenter(
+            ranger_msgs::StopAndCenterGoal::SOFTWARE_ESTOP);
+      } else if (selected_name.empty() &&
+                 ShouldCenterOnLoss(previous_name) &&
+                 motion_since_center_) {
+        ROS_WARN("motion source %s disappeared; stop and center",
+                 previous_name.c_str());
+        RequestStopAndCenter(ranger_msgs::StopAndCenterGoal::CMD_TIMEOUT);
+      }
     }
 
-    if (!selected || stop_cycles_remaining_ > 0) {
+    if (centering_active_.load() || !selected ||
+        stop_cycles_remaining_ > 0) {
       PublishZero();
       if (stop_cycles_remaining_ > 0) {
         --stop_cycles_remaining_;
@@ -180,6 +344,9 @@ class CmdVelArbiter {
         Clamp(selected->command.linear.y, selected->max_linear_y);
     output.angular.z =
         Clamp(selected->command.angular.z, selected->max_angular_z);
+    if (!IsZero(output)) {
+      motion_since_center_ = true;
+    }
     output_pub_.publish(output);
   }
 
@@ -192,12 +359,22 @@ class CmdVelArbiter {
   ros::NodeHandle private_nh_;
   ros::Publisher output_pub_;
   ros::WallTimer timer_;
+  ros::ServiceServer finish_motion_server_;
   std::vector<std::shared_ptr<Input> > inputs_;
+  std::unique_ptr<StopCenterClient> stop_center_client_;
   std::string output_topic_;
+  std::string stop_and_center_action_;
   std::string active_input_;
   double publish_rate_ = 50.0;
+  double stop_and_center_wait_timeout_ = 7.0;
+  double finish_source_suppression_ = 0.5;
   int switch_stop_cycles_ = 1;
   int stop_cycles_remaining_ = 0;
+  bool center_on_nav_loss_ = true;
+  bool center_on_tag_loss_ = true;
+  bool motion_since_center_ = false;
+  std::atomic<bool> centering_active_{false};
+  std::atomic<bool> last_center_success_{false};
 };
 
 }  // namespace

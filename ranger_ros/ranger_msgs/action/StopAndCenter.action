@@ -1,0 +1,25 @@
+# Request reason
+uint8 TASK_FINISHED=0
+uint8 TASK_CANCELED=1
+uint8 TASK_FAILED=2
+uint8 CMD_TIMEOUT=3
+uint8 SOFTWARE_ESTOP=4
+uint8 CHASSIS_FAULT=5
+uint8 reason
+---
+# Final result
+bool success
+string message
+---
+# Current execution stage
+uint8 IDLE=0
+uint8 STOPPING=1
+uint8 WAIT_STILL=2
+uint8 SWITCH_MODE=3
+uint8 WAIT_MODE=4
+uint8 CENTERING=5
+uint8 DONE=6
+uint8 FAILED=7
+uint8 state
+float32 max_wheel_speed
+float32 max_steering_error

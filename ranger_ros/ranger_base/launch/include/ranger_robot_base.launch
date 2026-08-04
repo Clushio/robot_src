@@ -8,6 +8,14 @@
     <arg name="odom_topic_name" default="odom" />
     <arg name="publish_odom_tf" default="false" />
     <arg name="cmd_vel_timeout" default="0.25" />
+    <arg name="stop_velocity_threshold" default="0.01" />
+    <arg name="stop_wheel_speed_threshold" default="0.01" />
+    <arg name="steering_center_tolerance" default="0.01" />
+    <arg name="stop_stable_frames" default="3" />
+    <arg name="center_stable_frames" default="3" />
+    <arg name="stop_wait_timeout" default="2.0" />
+    <arg name="mode_switch_timeout" default="2.0" />
+    <arg name="centering_timeout" default="3.0" />
 
     <!-- The arbiter is the only publisher allowed to drive /cmd_vel. -->
     <include file="$(find cmd_vel_arbiter)/launch/cmd_vel_arbiter.launch" />
@@ -21,5 +29,13 @@
         <param name="odom_topic_name" type="string" value="$(arg odom_topic_name)" />  
         <param name="publish_odom_tf" type="bool" value="$(arg publish_odom_tf)" />
         <param name="cmd_vel_timeout" type="double" value="$(arg cmd_vel_timeout)" />
+        <param name="stop_velocity_threshold" type="double" value="$(arg stop_velocity_threshold)" />
+        <param name="stop_wheel_speed_threshold" type="double" value="$(arg stop_wheel_speed_threshold)" />
+        <param name="steering_center_tolerance" type="double" value="$(arg steering_center_tolerance)" />
+        <param name="stop_stable_frames" type="int" value="$(arg stop_stable_frames)" />
+        <param name="center_stable_frames" type="int" value="$(arg center_stable_frames)" />
+        <param name="stop_wait_timeout" type="double" value="$(arg stop_wait_timeout)" />
+        <param name="mode_switch_timeout" type="double" value="$(arg mode_switch_timeout)" />
+        <param name="centering_timeout" type="double" value="$(arg centering_timeout)" />
     </node>
 </launch>

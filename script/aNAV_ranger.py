@@ -65,6 +65,11 @@ def load_workspace_environment():
 
 
 WORKSPACE_ENV_LOADED = load_workspace_environment()
+for python_path in os.environ.get('PYTHONPATH', '').split(os.pathsep):
+    if python_path and python_path not in sys.path:
+        sys.path.insert(0, python_path)
+
+from cmd_vel_arbiter.srv import FinishMotion, FinishMotionRequest
 
 
 
@@ -222,6 +227,7 @@ class MyWindow(QWidget):
         self.ros_available = False if self.preview_mode else check_and_start_roscore()
         self.joy_pub = None
         self.safety_pub = None
+        self.finish_motion_proxy = None
         self.task_status_sub = None
         self.localization_odom_sub = None
         self.record_pose_sub = None
@@ -252,6 +258,9 @@ class MyWindow(QWidget):
                 self.joy_pub = rospy.Publisher('/joy', Joy, queue_size=10)
                 self.safety_pub = rospy.Publisher(
                     '/cmd_vel/safety', Twist, queue_size=1
+                )
+                self.finish_motion_proxy = rospy.ServiceProxy(
+                    '/cmd_vel_arbiter/finish_motion', FinishMotion
                 )
                 self.record_marker_pub = rospy.Publisher(
                     RVIZ_RECORD_MARKER_TOPIC, MarkerArray, queue_size=1, latch=True
@@ -2562,6 +2571,18 @@ class MyWindow(QWidget):
         for delay in (60, 120, 180, 240):
             QTimer.singleShot(delay, self.publish_safety_stop)
 
+    def request_motion_finish(self, source, reason, service_timeout=0.5):
+        if not self.ros_available or self.finish_motion_proxy is None:
+            return False, 'ROS 或回正服务未初始化'
+        try:
+            rospy.wait_for_service(
+                '/cmd_vel_arbiter/finish_motion', timeout=service_timeout
+            )
+            response = self.finish_motion_proxy(source=source, reason=reason)
+            return bool(response.centered), response.message
+        except (rospy.ROSException, rospy.ServiceException) as error:
+            return False, str(error)
+
     def activate_emergency_stop(self):
         if self.estop_active:
             return
@@ -2616,7 +2637,9 @@ class MyWindow(QWidget):
             self.set_status('当前处于紧急停止状态，请先确认现场安全。', 'warning')
             return
         self.send_joy_message('NavPause')
-        self.publish_stop_burst()
+        centered, center_message = self.request_motion_finish(
+            'nav', FinishMotionRequest.TASK_CANCELED
+        )
         self.stop_managed_process(self.runPntsNavProcess, 'auto navigation')
         self.runPntsNavProcess = None
         self.nav_button.setEnabled(True)
@@ -2629,9 +2652,10 @@ class MyWindow(QWidget):
             self.set_chip(self.nav_chip, 'MoveBase 待命', False)
         else:
             self.set_chip(self.nav_chip, '导航 未启动', False)
-        self.set_status(
-            '当前导航任务已取消，MoveBase 保持待命。', 'warning'
-        )
+        message = '当前导航任务已取消，MoveBase 保持待命。'
+        if not centered:
+            message += f' 轮组回正未确认：{center_message}'
+        self.set_status(message, 'warning')
 
     def Nav_start(self):
         if self.estop_active:
@@ -2880,6 +2904,11 @@ class MyWindow(QWidget):
         )
         self.auto_nav_start_pending = False
         self.set_status('正在停止自动导航和 MoveBase…', 'info')
+        if stopped:
+            self.send_joy_message('NavPause')
+            self.request_motion_finish(
+                'nav', FinishMotionRequest.TASK_CANCELED
+            )
         self.stop_managed_process(self.runPntsNavProcess, 'auto navigation')
         self.runPntsNavProcess = None
         self.stop_managed_process(self.bsplineLogProcess, 'B-spline log')
@@ -2938,6 +2967,12 @@ class MyWindow(QWidget):
         self.estop_active = True
         self.estop_timer.start(100)
         self.publish_stop_burst()
+        centered, center_message = self.request_motion_finish(
+            'safety', FinishMotionRequest.SOFTWARE_ESTOP,
+            service_timeout=1.0,
+        )
+        if not centered:
+            print(f'GUI shutdown centering was not confirmed: {center_message}')
         self.exitNAV()
         self.quit_navigation(stop_external=False)
         self.stop_rviz()

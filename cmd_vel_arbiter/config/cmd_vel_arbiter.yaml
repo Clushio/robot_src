@@ -2,6 +2,15 @@ output_topic: /cmd_vel
 publish_rate: 50.0
 switch_stop_cycles: 1
 
+# Stop-and-center is an explicit chassis operation, separate from ordinary
+# zero-velocity commands.
+stop_and_center_action: /stop_and_center
+stop_and_center_wait_timeout: 7.0
+# Ignore queued commands briefly after an explicit task finish/cancel.
+finish_source_suppression: 0.5
+center_on_nav_loss: true
+center_on_tag_loss: true
+
 # Freshness uses wall time, so a frozen /use_sim_time cannot keep a command alive.
 safety_topic: /cmd_vel/safety
 safety_priority: 100
