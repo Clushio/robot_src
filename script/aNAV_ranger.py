@@ -3,7 +3,7 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QPushButton, QLabel, QVBoxLayout, QHBoxLayout,
     QGridLayout, QLineEdit, QGroupBox, QTabWidget, QFrame, QSizePolicy,
     QRadioButton, QTableWidget, QTableWidgetItem, QHeaderView,
-    QAbstractItemView, QMessageBox, QInputDialog, QFileDialog
+    QAbstractItemView, QMessageBox, QFileDialog, QDialog, QFormLayout
 )
 import subprocess
 import time
@@ -102,6 +102,87 @@ class TerminalTabProcess:
     def wait(self, timeout=None):
         return self.launcher.wait(timeout=timeout)
 
+
+class PointEditDialog(QDialog):
+    """Edit a saved point manually or request a replacement pose from RViz."""
+
+    rviz_requested = pyqtSignal()
+    save_requested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('修改选中点位')
+        self.setModal(False)
+        self.setMinimumWidth(480)
+
+        layout = QVBoxLayout(self)
+        note = QLabel(
+            '可以直接修改数值；也可以从 RViz 重新选点，收到位姿后再确认保存。'
+        )
+        note.setWordWrap(True)
+        note.setObjectName('subTitle')
+        layout.addWidget(note)
+
+        form = QFormLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
+        self.name_input = QLineEdit()
+        self.x_input = QLineEdit()
+        self.y_input = QLineEdit()
+        self.yaw_input = QLineEdit()
+        self.x_input.setValidator(QDoubleValidator(-10000.0, 10000.0, 6, self))
+        self.y_input.setValidator(QDoubleValidator(-10000.0, 10000.0, 6, self))
+        self.yaw_input.setValidator(QDoubleValidator(-360.0, 360.0, 3, self))
+        form.addRow('名称', self.name_input)
+        form.addRow('X (m)', self.x_input)
+        form.addRow('Y (m)', self.y_input)
+        form.addRow('角度 (°)', self.yaw_input)
+        layout.addLayout(form)
+
+        self.rviz_note = QLabel('尚未请求 RViz 位姿。')
+        self.rviz_note.setObjectName('subTitle')
+        self.rviz_note.setWordWrap(True)
+        layout.addWidget(self.rviz_note)
+
+        actions = QHBoxLayout()
+        self.rviz_button = QPushButton('从 RViz 重新选点')
+        self.rviz_button.clicked.connect(self.rviz_requested.emit)
+        self.cancel_button = QPushButton('取消')
+        self.cancel_button.clicked.connect(self.reject)
+        self.save_button = QPushButton('确认修改')
+        self.save_button.setProperty('primary', True)
+        self.save_button.clicked.connect(self.save_requested.emit)
+        actions.addWidget(self.rviz_button)
+        actions.addStretch()
+        actions.addWidget(self.cancel_button)
+        actions.addWidget(self.save_button)
+        layout.addLayout(actions)
+
+    def set_point(self, index, pose):
+        self.setWindowTitle(f'修改点位 P{index}')
+        self.name_input.setText(pose.get('label', ''))
+        self.x_input.setText(f"{pose['x']:.6f}")
+        self.y_input.setText(f"{pose['y']:.6f}")
+        self.yaw_input.setText(f"{math.degrees(pose['yaw']):.3f}")
+
+    def set_rviz_pose(self, x, y, yaw):
+        self.x_input.setText(f'{x:.6f}')
+        self.y_input.setText(f'{y:.6f}')
+        self.yaw_input.setText(f'{math.degrees(yaw):.3f}')
+        self.rviz_note.setText(
+            '已收到 RViz 位姿并回填；检查数值后点击“确认修改”。'
+        )
+
+    def values(self):
+        name = self.name_input.text().strip()
+        return (
+            name,
+            float(self.x_input.text().strip()),
+            float(self.y_input.text().strip()),
+            float(self.yaw_input.text().strip()),
+        )
+
+
 def check_and_start_roscore():
     """确保 ROS master 可用，且不让 GUI 在等待窗口标题时无限卡住。"""
     try:
@@ -149,6 +230,11 @@ class MyWindow(QWidget):
         self.localization_ready = False
         self.currentID = 0
         self.pending_record_pose = None
+        self.point_edit_dialog = None
+        self.point_edit_index = None
+        self.point_edit_file_signature = None
+        self.point_edit_waiting_for_rviz = False
+        self.point_edit_preview_pose = None
         self.record_session_active = False
         self.record_file_backup = ''
         self.point_undo_stack = []
@@ -798,8 +884,8 @@ class MyWindow(QWidget):
         self.navigate_point_button = QPushButton('导航到选中点')
         self.navigate_point_button.setProperty('primary', True)
         self.navigate_point_button.clicked.connect(self.navigate_selected_point)
-        self.rename_point_button = QPushButton('修改名称')
-        self.rename_point_button.clicked.connect(self.rename_selected_point)
+        self.rename_point_button = QPushButton('修改选中点')
+        self.rename_point_button.clicked.connect(self.edit_selected_point)
         self.delete_point_button = QPushButton('删除选中点')
         self.delete_point_button.setProperty('danger', True)
         self.delete_point_button.clicked.connect(self.delete_selected_point)
@@ -1009,7 +1095,14 @@ class MyWindow(QWidget):
 
     def on_record_pose(self, message):
         """ROS 回调只解析消息，界面更新交给 Qt 主线程。"""
-        if not self.record_session_active or not self.rviz_record_mode.isChecked():
+        recording_new_point = (
+            self.record_session_active and self.rviz_record_mode.isChecked()
+        )
+        editing_point = (
+            self.point_edit_waiting_for_rviz
+            and self.point_edit_dialog is not None
+        )
+        if not recording_new_point and not editing_point:
             return
         frame_id = message.header.frame_id or 'map'
         if frame_id != 'map':
@@ -1032,10 +1125,24 @@ class MyWindow(QWidget):
         )
 
     def accept_record_pose(self, x, y, yaw, frame_id):
-        if not self.record_session_active or not self.rviz_record_mode.isChecked():
-            return
         if not all(math.isfinite(value) for value in (x, y, yaw)):
             self.set_status('RViz 返回的目标位姿包含无效数值。', 'error')
+            return
+        if (
+            self.point_edit_waiting_for_rviz
+            and self.point_edit_dialog is not None
+        ):
+            self.point_edit_waiting_for_rviz = False
+            self.point_edit_preview_pose = (x, y, yaw)
+            self.point_edit_dialog.set_rviz_pose(x, y, yaw)
+            self.publish_record_markers()
+            self.point_edit_dialog.raise_()
+            self.point_edit_dialog.activateWindow()
+            self.set_status(
+                '已从 RViz 获取新位姿，请检查数值后确认修改。', 'success'
+            )
+            return
+        if not self.record_session_active or not self.rviz_record_mode.isChecked():
             return
         self.pending_record_pose = (x, y, yaw)
         self.record_pose_label.setText(
@@ -1265,24 +1372,87 @@ class MyWindow(QWidget):
         self.refresh_points_table()
         self.publish_record_markers()
 
-    def rename_selected_point(self):
+    def edit_selected_point(self):
         if not self.ensure_points_editable():
             return
         index = self.selected_point_index()
         if index is None:
             return
         poses = self.read_record_positions()
-        current = poses[index].get('label', '')
-        name, accepted = QInputDialog.getText(
-            self, '修改点位名称',
-            '名称（工位请使用 W1、W2…；留空表示普通导航点）：',
-            text=current,
-        )
-        if not accepted:
+        if index >= len(poses):
+            self.refresh_points_table()
+            self.set_status('点位文件已变化，请重新选择要修改的点。', 'warning')
             return
-        name = name.strip()
+
+        if self.point_edit_dialog is not None:
+            self.point_edit_dialog.close()
+        dialog = PointEditDialog(self)
+        dialog.set_point(index, poses[index])
+        dialog.rviz_requested.connect(self.request_rviz_point_for_edit)
+        dialog.save_requested.connect(self.save_edited_point)
+        dialog.finished.connect(self.finish_point_edit)
+        self.point_edit_dialog = dialog
+        self.point_edit_index = index
+        self.point_edit_file_signature = self.positions_file_signature()
+        self.point_edit_waiting_for_rviz = False
+        self.point_edit_preview_pose = None
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        self.set_status(
+            f'正在修改 {self.point_display_name(index, poses[index])}。', 'info'
+        )
+
+    def request_rviz_point_for_edit(self):
+        if self.point_edit_dialog is None or self.point_edit_index is None:
+            return
+        if not self.ros_available:
+            self.set_status('ROS 未连接，无法从 RViz 获取点位。', 'error')
+            return
+        if self.is_move_base_ready():
+            self.set_status(
+                'MoveBase 正在运行；为避免误操作，请先停止导航再修改点位。',
+                'error',
+            )
+            return
+        try:
+            if not self.is_rviz_running():
+                self.start_plain_rviz()
+        except OSError as error:
+            self.set_status(f'RViz 启动失败：{error}', 'error')
+            return
+        self.point_edit_waiting_for_rviz = True
+        self.point_edit_dialog.rviz_note.setText(
+            '等待 RViz 位姿：请选择工具栏“记录点位”（快捷键 R），'
+            '在地图上拖出位置和朝向。'
+        )
+        self.set_status('等待从 RViz 选择新的点位和朝向。', 'info')
+
+    def save_edited_point(self):
+        dialog = self.point_edit_dialog
+        index = self.point_edit_index
+        if dialog is None or index is None:
+            return
+        if self.positions_file_signature() != self.point_edit_file_signature:
+            self.set_status(
+                '点位文件在修改期间发生变化，请关闭窗口后重新选择该点。',
+                'error',
+            )
+            return
+        try:
+            name, x, y, yaw_degrees = dialog.values()
+        except ValueError:
+            self.set_status('X、Y、角度必须填写有效数字。', 'error')
+            return
+        if not all(math.isfinite(value) for value in (x, y, yaw_degrees)):
+            self.set_status('点位数值不能是 NaN 或无穷大。', 'error')
+            return
         if any(character.isspace() for character in name):
             self.set_status('点位名称不能包含空格。', 'error')
+            return
+        poses = self.read_record_positions()
+        if index >= len(poses):
+            self.set_status('选中的点位已经不存在，请重新选择。', 'error')
             return
         if name.startswith('W'):
             if not name[1:].isdigit() or int(name[1:]) <= 0:
@@ -1294,14 +1464,32 @@ class MyWindow(QWidget):
             ):
                 self.set_status(f'工位名称 {name} 已存在。', 'error')
                 return
-        poses[index]['label'] = name
+        pose = poses[index]
+        pose['label'] = name
+        pose['x'] = x
+        pose['y'] = y
+        pose['yaw'] = math.radians(yaw_degrees)
         try:
             self.write_record_positions(poses)
         except OSError as error:
-            self.set_status(f'点位名称保存失败：{error}', 'error')
+            self.set_status(f'点位修改保存失败：{error}', 'error')
             return
         self.points_table.selectRow(index)
-        self.set_status('点位名称已修改；导航前请重新构建拓扑。', 'success')
+        point_name = self.point_display_name(index, pose)
+        dialog.accept()
+        self.set_status(
+            f'已修改 {point_name}：X {x:.3f} m，Y {y:.3f} m，'
+            f'朝向 {yaw_degrees:.1f}°；导航前请重新构建拓扑。',
+            'success',
+        )
+
+    def finish_point_edit(self, _result=0):
+        self.point_edit_waiting_for_rviz = False
+        self.point_edit_preview_pose = None
+        self.point_edit_dialog = None
+        self.point_edit_index = None
+        self.point_edit_file_signature = None
+        self.publish_record_markers()
 
     def delete_selected_point(self):
         if not self.ensure_points_editable():
@@ -1510,6 +1698,15 @@ class MyWindow(QWidget):
                 'label': '待记录',
                 'pending': True,
             })
+        if self.point_edit_preview_pose is not None:
+            x, y, yaw = self.point_edit_preview_pose
+            poses.append({
+                'x': x,
+                'y': y,
+                'yaw': yaw,
+                'label': '待修改',
+                'pending': True,
+            })
 
         stamp = rospy.Time.now()
         for index, pose in enumerate(poses):
@@ -1709,13 +1906,30 @@ class MyWindow(QWidget):
             if self.last_odom_monotonic else float('inf')
         )
         if odom_age <= 2.0:
+            self.localization_ready = True
             self.set_health_chip('localization', '数据正常', 'active')
             self.set_chip(self.localization_chip, '定位 已就绪', True)
-        elif self.localizationProcess and self.localizationProcess.poll() is None:
-            self.set_health_chip('localization', '等待数据', 'warning')
-            self.set_chip(self.localization_chip, '定位 等待数据', False)
         else:
-            self.set_health_chip('localization', '未运行', 'inactive')
+            had_odometry = self.last_odom_monotonic > 0.0
+            self.localization_ready = False
+            localization_running = (
+                self.localizationProcess is not None
+                and self.localizationProcess.poll() is None
+            )
+            if localization_running and had_odometry:
+                self.set_health_chip('localization', '数据中断', 'error')
+                self.set_chip(self.localization_chip, '定位 数据中断', False)
+                self.odometry_label.setText(
+                    f'机器人位姿：定位数据已中断（{odom_age:.1f} 秒未更新）'
+                )
+            elif localization_running:
+                self.set_health_chip('localization', '等待数据', 'warning')
+                self.set_chip(self.localization_chip, '定位 等待数据', False)
+            else:
+                self.set_health_chip('localization', '未运行', 'inactive')
+                self.set_chip(self.localization_chip, '定位 未启动', False)
+                if had_odometry:
+                    self.odometry_label.setText('机器人位姿：定位已停止')
 
         if '/runnav' in nodes:
             self.set_chip(self.nav_chip, '导航 运行中', True)
@@ -1745,6 +1959,8 @@ class MyWindow(QWidget):
             self.localization_ready = False
             self.g2d_button.setEnabled(True)
             self.g2d_exit_button.setEnabled(False)
+            self.set_chip(self.localization_chip, '定位 未启动', False)
+            self.set_health_chip('localization', '未运行', 'inactive')
         if self.runPntsNavProcess and self.runPntsNavProcess.poll() is not None:
             self.runPntsNavProcess = None
             self.nav_button.setEnabled(True)
@@ -2545,6 +2761,7 @@ class MyWindow(QWidget):
                 self.set_status('定位正在运行，等待有效位姿数据。', 'info')
         else:
             self.localization_ready = False
+            self.last_odom_monotonic = 0.0
             command = ['roslaunch', 'robot_r', '3startlocation.launch', 'rviz_enable:=false']
             self.localizationProcess = subprocess.Popen(command, preexec_fn=os.setpgrp)
             self.g2d_button.setEnabled(False)
@@ -2694,6 +2911,7 @@ class MyWindow(QWidget):
             for pid in process_id.split():
                 subprocess.call(['kill', '-15', pid])
         self.localization_ready = False
+        self.last_odom_monotonic = 0.0
         self.g2d_button.setEnabled(True)
         self.g2d_exit_button.setEnabled(False)
         self.set_chip(self.localization_chip, '定位 未启动', False)
