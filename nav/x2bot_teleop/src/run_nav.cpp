@@ -1,5 +1,6 @@
 #include <actionlib/client/simple_action_client.h>
 #include <boost/bind.hpp>
+#include <cmd_vel_arbiter/FinishMotion.h>
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/Quaternion.h>
 #include <geometry_msgs/TransformStamped.h>
@@ -125,8 +126,11 @@ public:
         initializeGlobalAC();
         std::string cmd_vel_topic;
         private_nh.param("cmd_vel_topic", cmd_vel_topic,
-                         std::string("/cmd_vel/safety"));
+                         std::string("/cmd_vel/nav"));
         vel_pub_ = nh_.advertise<geometry_msgs::Twist>(cmd_vel_topic, 1);
+        finish_motion_client_ =
+            nh_.serviceClient<cmd_vel_arbiter::FinishMotion>(
+                "/cmd_vel_arbiter/finish_motion");
         ros::SubscribeOptions joy_options =
             ros::SubscribeOptions::create<sensor_msgs::Joy>(
                 "joy", 10, boost::bind(&mynav::joyCallback, this, _1),
@@ -220,15 +224,26 @@ public:
         if (exec_path)
         {
             const bool ok = runTopologyMission(target_index, path_indices);
+            const bool centered = notifyMotionFinished(
+                ok ? cmd_vel_arbiter::FinishMotionRequest::TASK_FINISHED
+                   : cmd_vel_arbiter::FinishMotionRequest::TASK_FAILED);
             res.success = ok;
             if (ok)
             {
                 res.message = "arrived:" + formatPathMessage("", path_indices);
+                if (!centered)
+                {
+                    res.message += "; steering centering failed";
+                }
                 publishTaskStatus("arrived", req.data, target_name, res.message);
             }
             else
             {
                 res.message = "目标暂时不可达，已停车";
+                if (!centered)
+                {
+                    res.message += "，但轮组回正失败";
+                }
                 publishTaskStatus("failed", req.data, target_name, res.message);
             }
         }
@@ -437,6 +452,7 @@ private:
     int reference_status_path_index_ = -1;
     int reference_status_code_ = 0;
     ros::ServiceServer plan_path_service;
+    ros::ServiceClient finish_motion_client_;
 
     int current_pose_index;
     std::vector<TargetPose> target_poses;
@@ -473,6 +489,24 @@ private:
     bool static_map_negate_;
     double static_map_inflation_radius_;
     std::vector<unsigned char> static_map_occupied_;
+
+    bool notifyMotionFinished(uint8_t reason)
+    {
+        cmd_vel_arbiter::FinishMotion service;
+        service.request.source = "nav";
+        service.request.reason = reason;
+        if (!finish_motion_client_.call(service))
+        {
+            ROS_ERROR("Failed to call /cmd_vel_arbiter/finish_motion for navigation.");
+            return false;
+        }
+        if (!service.response.centered)
+        {
+            ROS_ERROR_STREAM("Navigation stopped, but centering was not confirmed: "
+                             << service.response.message);
+        }
+        return service.response.centered;
+    }
 
     static std::string trim(const std::string &value)
     {
@@ -1972,7 +2006,10 @@ private:
         {
             return;
         }
-        runTopologyMission(path_indices.back(), path_indices);
+        const bool ok = runTopologyMission(path_indices.back(), path_indices);
+        notifyMotionFinished(
+            ok ? cmd_vel_arbiter::FinishMotionRequest::TASK_FINISHED
+               : cmd_vel_arbiter::FinishMotionRequest::TASK_FAILED);
     }
 
     void startRun_()

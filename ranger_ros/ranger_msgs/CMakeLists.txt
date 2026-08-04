@@ -6,8 +6,8 @@ project(ranger_msgs)
 
 ## Find catkin macros and libraries
 find_package(catkin REQUIRED COMPONENTS
+  actionlib_msgs
   message_generation
-  message_runtime
   std_msgs
 )
 
@@ -44,15 +44,15 @@ add_service_files(
 )
 
 ## Generate actions in the 'action' folder
-# add_action_files(
-#   FILES
-#   Action1.action
-#   Action2.action
-# )
+add_action_files(
+  FILES
+  StopAndCenter.action
+)
 
 ## Generate added messages and services with any dependencies listed here
 generate_messages(
   DEPENDENCIES
+  actionlib_msgs
   std_msgs
 )
 
@@ -68,7 +68,7 @@ generate_messages(
 catkin_package(
 # INCLUDE_DIRS include
 # LIBRARIES ranger_msgs
-# CATKIN_DEPENDS message_generation message_runtime std_msgs
+  CATKIN_DEPENDS actionlib_msgs message_runtime std_msgs
 #  DEPENDS system_lib
 )
 

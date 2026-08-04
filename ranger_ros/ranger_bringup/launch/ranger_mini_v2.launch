@@ -8,6 +8,14 @@
     <arg name="update_rate" default="50" />
     <arg name="odom_topic_name" default="odom" />
     <arg name="publish_odom_tf" default="false" />
+    <arg name="stop_velocity_threshold" default="0.01" />
+    <arg name="stop_wheel_speed_threshold" default="0.01" />
+    <arg name="steering_center_tolerance" default="0.01" />
+    <arg name="stop_stable_frames" default="3" />
+    <arg name="center_stable_frames" default="3" />
+    <arg name="stop_wait_timeout" default="2.0" />
+    <arg name="mode_switch_timeout" default="2.0" />
+    <arg name="centering_timeout" default="3.0" />
 
     <include file="$(find ranger_base)/launch/include/ranger_robot_base.launch">
         <arg name="port_name" value="$(arg port_name)"/>
@@ -17,5 +25,13 @@
         <arg name="update_rate" value="$(arg update_rate)" />
         <arg name="odom_topic_name" value="$(arg odom_topic_name)" />
         <arg name="publish_odom_tf" value="$(arg publish_odom_tf)" />
+        <arg name="stop_velocity_threshold" value="$(arg stop_velocity_threshold)" />
+        <arg name="stop_wheel_speed_threshold" value="$(arg stop_wheel_speed_threshold)" />
+        <arg name="steering_center_tolerance" value="$(arg steering_center_tolerance)" />
+        <arg name="stop_stable_frames" value="$(arg stop_stable_frames)" />
+        <arg name="center_stable_frames" value="$(arg center_stable_frames)" />
+        <arg name="stop_wait_timeout" value="$(arg stop_wait_timeout)" />
+        <arg name="mode_switch_timeout" value="$(arg mode_switch_timeout)" />
+        <arg name="centering_timeout" value="$(arg centering_timeout)" />
     </include>
 </launch>

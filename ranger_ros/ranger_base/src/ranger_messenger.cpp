@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include <boost/bind.hpp>
 #include <ros/ros.h>
 
 #include <nav_msgs/Odometry.h>
@@ -38,7 +39,8 @@ double DegreeToRadian(double x) { return x * M_PI / 180.0; }
 
 ///////////////////////////////////////////////////////////////////////////////////
 
-RangerROSMessenger::RangerROSMessenger(ros::NodeHandle* nh) : nh_(nh) {
+RangerROSMessenger::RangerROSMessenger(ros::NodeHandle* nh)
+    : nh_(nh), stop_center_server_(*nh, "/stop_and_center", false) {
   LoadParameters();
 
   // connect to robot and setup ROS subscription
@@ -69,16 +71,15 @@ void RangerROSMessenger::Run() {
   while (ros::ok()) {
     ros::spinOnce();
     CheckCmdVelWatchdog();
-    PublishStateToROS();
+    const auto state = robot_->GetRobotState();
+    const auto actuator_state = robot_->GetActuatorState();
+    CheckChassisFault(state);
+    UpdateStopAndCenter(state, actuator_state);
+    PublishStateToROS(state, actuator_state);
     rate.sleep();
   }
 
-  // Best effort stop on an orderly ROS shutdown. Repetition increases the
-  // chance that at least one CAN command is transmitted before process exit.
-  for (int i = 0; i < 3; ++i) {
-    SendZeroMotionCommand();
-    ros::WallDuration(0.02).sleep();
-  }
+  BestEffortStopAndCenterOnShutdown();
 }
 
 void RangerROSMessenger::LoadParameters() {
@@ -92,16 +93,45 @@ void RangerROSMessenger::LoadParameters() {
                           std::string("odom"));
   nh_->param<bool>("publish_odom_tf", publish_odom_tf_, false);
   nh_->param<double>("cmd_vel_timeout", cmd_vel_timeout_, 0.25);
+  nh_->param<double>("stop_velocity_threshold", stop_velocity_threshold_,
+                     stop_velocity_threshold_);
+  nh_->param<double>("stop_wheel_speed_threshold",
+                     stop_wheel_speed_threshold_,
+                     stop_wheel_speed_threshold_);
+  nh_->param<double>("steering_center_tolerance",
+                     steering_center_tolerance_,
+                     steering_center_tolerance_);
+  nh_->param<double>("stop_wait_timeout", stop_wait_timeout_,
+                     stop_wait_timeout_);
+  nh_->param<double>("mode_switch_timeout", mode_switch_timeout_,
+                     mode_switch_timeout_);
+  nh_->param<double>("centering_timeout", centering_timeout_,
+                     centering_timeout_);
+  nh_->param<int>("stop_stable_frames", stop_stable_frames_,
+                  stop_stable_frames_);
+  nh_->param<int>("center_stable_frames", center_stable_frames_,
+                  center_stable_frames_);
   cmd_vel_timeout_ = std::max(0.02, cmd_vel_timeout_);
+  stop_velocity_threshold_ = std::max(0.0, stop_velocity_threshold_);
+  stop_wheel_speed_threshold_ = std::max(0.0, stop_wheel_speed_threshold_);
+  steering_center_tolerance_ = std::max(0.001, steering_center_tolerance_);
+  stop_wait_timeout_ = std::max(0.1, stop_wait_timeout_);
+  mode_switch_timeout_ = std::max(0.1, mode_switch_timeout_);
+  centering_timeout_ = std::max(0.1, centering_timeout_);
+  stop_stable_frames_ = std::max(1, stop_stable_frames_);
+  center_stable_frames_ = std::max(1, center_stable_frames_);
 
   ROS_INFO(
       "Successfully loaded the following parameters: \n port_name: %s\n "
       "robot_model: %s\n odom_frame: %s\n base_frame: %s\n "
       "update_rate: %d\n odom_topic_name: %s\n "
-      "publish_odom_tf: %d\n cmd_vel_timeout: %.3f s\n",
+      "publish_odom_tf: %d\n cmd_vel_timeout: %.3f s\n"
+      " stop_velocity_threshold: %.3f\n stop_wheel_speed_threshold: %.3f\n"
+      " steering_center_tolerance: %.4f\n",
       port_name_.c_str(), robot_model_.c_str(), odom_frame_.c_str(),
       base_frame_.c_str(), update_rate_, odom_topic_name_.c_str(),
-      publish_odom_tf_, cmd_vel_timeout_);
+      publish_odom_tf_, cmd_vel_timeout_, stop_velocity_threshold_,
+      stop_wheel_speed_threshold_, steering_center_tolerance_);
 
   // load robot parameters
   if (robot_model_ == "ranger_mini_v1") {
@@ -176,9 +206,17 @@ void RangerROSMessenger::SetupSubscription() {
   // service server
   trigger_parking_server = nh_->advertiseService(
       "parking_service", &RangerROSMessenger::TriggerParkingService, this);
+
+  stop_center_server_.registerGoalCallback(
+      boost::bind(&RangerROSMessenger::StopCenterGoalCallback, this));
+  stop_center_server_.registerPreemptCallback(
+      boost::bind(&RangerROSMessenger::StopCenterPreemptCallback, this));
+  stop_center_server_.start();
 }
 
-void RangerROSMessenger::PublishStateToROS() {
+void RangerROSMessenger::PublishStateToROS(
+    const RangerCoreState& state,
+    const RangerActuatorState& actuator_state) {
   current_time_ = ros::Time::now();
 
   static bool init_run = true;
@@ -187,9 +225,6 @@ void RangerROSMessenger::PublishStateToROS() {
     init_run = false;
     return;
   }
-
-  auto state = robot_->GetRobotState();
-  auto actuator_state = robot_->GetActuatorState();
 
   // update odometry
   {
@@ -433,13 +468,18 @@ void RangerROSMessenger::TwistCmdCallback(
                        "Rejected non-finite /cmd_vel; commanding zero speed");
     cmd_vel_received_ = false;
     watchdog_active_ = true;
-    SendZeroMotionCommand();
+    RequestStopAndCenter(ranger_msgs::StopAndCenterGoal::CMD_TIMEOUT, false);
     return;
   }
 
   last_cmd_vel_time_ = ros::WallTime::now();
   cmd_vel_received_ = true;
   watchdog_active_ = false;
+
+  if (StopCenterActive() || fault_motion_lock_) {
+    SendZeroMotionCommand();
+    return;
+  }
 
   // Avoid 0 / 0 in CalculateSteeringAngle() and make a stop command
   // independent of the currently selected Ranger motion mode.
@@ -543,14 +583,254 @@ void RangerROSMessenger::CheckCmdVelWatchdog() {
   if (!watchdog_active_) {
     ROS_WARN("/cmd_vel timeout after %.3f s; commanding zero speed",
              cmd_vel_timeout_);
+    RequestStopAndCenter(ranger_msgs::StopAndCenterGoal::CMD_TIMEOUT, false);
+  } else {
+    SendZeroMotionCommand();
   }
   watchdog_active_ = true;
-  SendZeroMotionCommand();
 }
 
 void RangerROSMessenger::SendZeroMotionCommand() {
   if (robot_) {
     robot_->SetMotionCommand(0.0, 0.0, 0.0);
+  }
+}
+
+void RangerROSMessenger::StopCenterGoalCallback() {
+  const ranger_msgs::StopAndCenterGoalConstPtr goal =
+      stop_center_server_.acceptNewGoal();
+  if (!goal) {
+    return;
+  }
+
+  RequestStopAndCenter(goal->reason, true);
+}
+
+void RangerROSMessenger::StopCenterPreemptCallback() {
+  if (stop_center_server_.isActive()) {
+    ranger_msgs::StopAndCenterResult result;
+    result.success = false;
+    result.message = "stop-and-center action preempted; safe stop continues";
+    stop_center_server_.setPreempted(result, result.message);
+  }
+  report_stop_center_action_result_ = false;
+}
+
+void RangerROSMessenger::RequestStopAndCenter(
+    uint8_t reason, bool report_action_result) {
+  stop_center_reason_ = reason;
+  report_stop_center_action_result_ =
+      report_stop_center_action_result_ || report_action_result;
+  still_feedback_count_ = 0;
+  centered_feedback_count_ = 0;
+  stop_center_state_started_at_ = ros::WallTime::now();
+  stop_center_state_ = StopCenterState::kStopping;
+  SendZeroMotionCommand();
+  ROS_WARN("Stop-and-center requested (reason=%u)",
+           static_cast<unsigned int>(reason));
+}
+
+bool RangerROSMessenger::StopCenterActive() const {
+  return stop_center_state_ != StopCenterState::kIdle;
+}
+
+double RangerROSMessenger::MaxWheelSpeed(
+    const RangerActuatorState& actuator_state) const {
+  return std::max(
+      std::max(std::abs(actuator_state.motor_speeds.speed_1),
+               std::abs(actuator_state.motor_speeds.speed_2)),
+      std::max(std::abs(actuator_state.motor_speeds.speed_3),
+               std::abs(actuator_state.motor_speeds.speed_4)));
+}
+
+double RangerROSMessenger::MaxSteeringError(
+    const RangerActuatorState& actuator_state) const {
+  return std::max(
+      std::max(std::abs(actuator_state.motor_angles.angle_5),
+               std::abs(actuator_state.motor_angles.angle_6)),
+      std::max(std::abs(actuator_state.motor_angles.angle_7),
+               std::abs(actuator_state.motor_angles.angle_8)));
+}
+
+bool RangerROSMessenger::VehicleIsStill(
+    const RangerCoreState& state,
+    const RangerActuatorState& actuator_state) const {
+  return std::abs(state.motion_state.linear_velocity) <=
+             stop_velocity_threshold_ &&
+         std::abs(state.motion_state.lateral_velocity) <=
+             stop_velocity_threshold_ &&
+         std::abs(state.motion_state.angular_velocity) <=
+             stop_velocity_threshold_ &&
+         MaxWheelSpeed(actuator_state) <= stop_wheel_speed_threshold_;
+}
+
+bool RangerROSMessenger::StateTimedOut(double timeout) const {
+  return !stop_center_state_started_at_.isZero() &&
+         (ros::WallTime::now() - stop_center_state_started_at_).toSec() >=
+             timeout;
+}
+
+void RangerROSMessenger::PublishStopCenterFeedback(
+    const RangerActuatorState& actuator_state) {
+  if (!report_stop_center_action_result_ ||
+      !stop_center_server_.isActive()) {
+    return;
+  }
+
+  ranger_msgs::StopAndCenterFeedback feedback;
+  feedback.state = static_cast<uint8_t>(stop_center_state_);
+  feedback.max_wheel_speed = MaxWheelSpeed(actuator_state);
+  feedback.max_steering_error = MaxSteeringError(actuator_state);
+  stop_center_server_.publishFeedback(feedback);
+}
+
+void RangerROSMessenger::CompleteStopAndCenter(
+    bool success, const std::string& message) {
+  if (success &&
+      stop_center_reason_ == ranger_msgs::StopAndCenterGoal::CHASSIS_FAULT &&
+      last_error_code_ == 0) {
+    fault_motion_lock_ = false;
+    fault_recenter_pending_ = false;
+  }
+
+  if (report_stop_center_action_result_ && stop_center_server_.isActive()) {
+    ranger_msgs::StopAndCenterResult result;
+    result.success = success;
+    result.message = message;
+    if (success) {
+      stop_center_server_.setSucceeded(result, message);
+    } else {
+      stop_center_server_.setAborted(result, message);
+    }
+  }
+
+  report_stop_center_action_result_ = false;
+  stop_center_state_ = StopCenterState::kIdle;
+  still_feedback_count_ = 0;
+  centered_feedback_count_ = 0;
+}
+
+void RangerROSMessenger::UpdateStopAndCenter(
+    const RangerCoreState& state,
+    const RangerActuatorState& actuator_state) {
+  if (!StopCenterActive()) {
+    return;
+  }
+
+  PublishStopCenterFeedback(actuator_state);
+
+  switch (stop_center_state_) {
+    case StopCenterState::kIdle:
+      return;
+
+    case StopCenterState::kStopping:
+      SendZeroMotionCommand();
+      still_feedback_count_ = 0;
+      stop_center_state_started_at_ = ros::WallTime::now();
+      stop_center_state_ = StopCenterState::kWaitStill;
+      break;
+
+    case StopCenterState::kWaitStill:
+      SendZeroMotionCommand();
+      if (VehicleIsStill(state, actuator_state)) {
+        ++still_feedback_count_;
+      } else {
+        still_feedback_count_ = 0;
+      }
+
+      if (still_feedback_count_ >= stop_stable_frames_) {
+        stop_center_state_ = StopCenterState::kSwitchMode;
+      } else if (StateTimedOut(stop_wait_timeout_)) {
+        CompleteStopAndCenter(false,
+                              "vehicle did not become stationary in time");
+      }
+      break;
+
+    case StopCenterState::kSwitchMode:
+      SendZeroMotionCommand();
+      robot_->SetMotionMode(MotionState::MOTION_MODE_DUAL_ACKERMAN);
+      stop_center_state_started_at_ = ros::WallTime::now();
+      stop_center_state_ = StopCenterState::kWaitMode;
+      break;
+
+    case StopCenterState::kWaitMode:
+      SendZeroMotionCommand();
+      if (state.motion_mode_state.motion_mode ==
+              MotionState::MOTION_MODE_DUAL_ACKERMAN &&
+          state.motion_mode_state.mode_changing == 0) {
+        robot_->SetMotionCommand(0.0, 0.0, 0.0);
+        centered_feedback_count_ = 0;
+        stop_center_state_started_at_ = ros::WallTime::now();
+        stop_center_state_ = StopCenterState::kCentering;
+      } else if (StateTimedOut(mode_switch_timeout_)) {
+        CompleteStopAndCenter(false, "dual-Ackermann mode switch timed out");
+      }
+      break;
+
+    case StopCenterState::kCentering:
+      robot_->SetMotionCommand(0.0, 0.0, 0.0);
+      if (MaxSteeringError(actuator_state) <=
+          steering_center_tolerance_) {
+        ++centered_feedback_count_;
+      } else {
+        centered_feedback_count_ = 0;
+      }
+
+      if (centered_feedback_count_ >= center_stable_frames_) {
+        stop_center_state_ = StopCenterState::kDone;
+      } else if (StateTimedOut(centering_timeout_)) {
+        CompleteStopAndCenter(false, "steering centering timed out");
+      }
+      break;
+
+    case StopCenterState::kDone:
+      SendZeroMotionCommand();
+      ROS_INFO("Stop-and-center completed");
+      CompleteStopAndCenter(true, "vehicle stopped and steering centered");
+      break;
+
+    case StopCenterState::kFailed:
+      SendZeroMotionCommand();
+      CompleteStopAndCenter(false, "stop-and-center failed");
+      break;
+  }
+}
+
+void RangerROSMessenger::CheckChassisFault(
+    const RangerCoreState& state) {
+  const uint16_t error_code = state.system_state.error_code;
+  const uint16_t previous_error = last_error_code_;
+  last_error_code_ = error_code;
+
+  if (error_code != 0 && previous_error == 0) {
+    fault_motion_lock_ = true;
+    fault_recenter_pending_ = true;
+    ROS_ERROR("Ranger chassis fault detected: error_code=0x%04x", error_code);
+    RequestStopAndCenter(ranger_msgs::StopAndCenterGoal::CHASSIS_FAULT,
+                         false);
+    return;
+  }
+
+  if (error_code == 0 && previous_error != 0 && fault_recenter_pending_) {
+    ROS_WARN("Ranger chassis fault cleared; center steering before unlocking");
+    RequestStopAndCenter(ranger_msgs::StopAndCenterGoal::CHASSIS_FAULT,
+                         false);
+  }
+}
+
+void RangerROSMessenger::BestEffortStopAndCenterOnShutdown() {
+  if (!robot_) {
+    return;
+  }
+
+  for (int i = 0; i < 3; ++i) {
+    SendZeroMotionCommand();
+    ros::WallDuration(0.02).sleep();
+  }
+  robot_->SetMotionMode(MotionState::MOTION_MODE_DUAL_ACKERMAN);
+  for (int i = 0; i < 10; ++i) {
+    robot_->SetMotionCommand(0.0, 0.0, 0.0);
+    ros::WallDuration(0.02).sleep();
   }
 }
 

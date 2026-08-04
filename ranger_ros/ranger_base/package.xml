@@ -23,6 +23,8 @@
 
   <buildtool_depend>catkin</buildtool_depend>
 
+  <depend>actionlib</depend>
+
   <!-- <build_depend>controller_manager</build_depend> -->
   <build_depend>roscpp</build_depend>
   <build_depend>roslaunch</build_depend>

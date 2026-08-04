@@ -1,6 +1,7 @@
 #include <ros/ros.h>
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/Twist.h>
+#include <cmd_vel_arbiter/FinishMotion.h>
 #include <x2bot_teleop/SetTagY.h>
 #include <tf/transform_datatypes.h> // 用于处理四元数
 #include <algorithm>
@@ -67,6 +68,7 @@ public:
         private_nh.param("arrival_threshold", arrival_threshold_y_, arrival_threshold_y_); // 兼容旧参数名
         private_nh.param("arrival_threshold_x", arrival_threshold_x_, 0.005); // x 到达目标阈值
         private_nh.param("data_timeout", data_timeout_, 3.0);              // 数据超时时间（秒）
+        private_nh.param("tag_abort_timeout", tag_abort_timeout_, 10.0);   // 连续无效后结束任务
         private_nh.param("rotation_threshold", rotation_threshold_, 0.015);  // 旋转角度阈值
         private_nh.param("yaw_kp", yaw_kp_, 0.5);             // 角度 PD 的 P
         private_nh.param("yaw_kd", yaw_kd_, 0.00);            // 角度 PD 的 D
@@ -88,6 +90,9 @@ public:
         private_nh.param("cmd_vel_topic", cmd_vel_topic,
                          std::string("/cmd_vel/tag"));
         cmd_vel_publisher_ = nh_.advertise<geometry_msgs::Twist>(cmd_vel_topic, 10);
+        finish_motion_client_ =
+            nh_.serviceClient<cmd_vel_arbiter::FinishMotion>(
+                "/cmd_vel_arbiter/finish_motion");
 
         // 创建服务
         service_ = nh_.advertiseService("set_target_y", &RobotController::handleSetTargetY, this);
@@ -114,6 +119,7 @@ private:
     ros::Subscriber tag_subscriber_;
     ros::Publisher cmd_vel_publisher_;
     ros::ServiceServer service_;
+    ros::ServiceClient finish_motion_client_;
 
     double kp_;                    // 比例增益
     double kp_x_;                  // x 方向比例增益
@@ -139,6 +145,7 @@ private:
     double current_yaw_rad_;       // 当前 yaw，单位 rad
     ros::Time last_update_time_;   // 上次更新时间
     double data_timeout_;          // 数据超时时间（秒）
+    double tag_abort_timeout_;     // 连续无效数据导致任务失败的超时
     double current_valid_;
     bool filter_initialized_;
     bool yaw_pd_initialized_;
@@ -234,6 +241,10 @@ private:
         if (max_angular_accel_ <= 0.0) {
             ROS_WARN("[TAGCTL] Invalid max_angular_accel %.3f, reset to 0.15", max_angular_accel_);
             max_angular_accel_ = 0.15;
+        }
+        if (tag_abort_timeout_ <= 0.0) {
+            ROS_WARN("[TAGCTL] Invalid tag_abort_timeout %.3f, reset to 10.0", tag_abort_timeout_);
+            tag_abort_timeout_ = 10.0;
         }
         if (yaw_stable_required_ <= 0) {
             ROS_WARN("[TAGCTL] Invalid yaw_stable_count %d, reset to 5", yaw_stable_required_);
@@ -337,6 +348,21 @@ private:
         }
     }
 
+    bool notifyMotionFinished(uint8_t reason) {
+        cmd_vel_arbiter::FinishMotion service;
+        service.request.source = "tag";
+        service.request.reason = reason;
+        if (!finish_motion_client_.call(service)) {
+            ROS_ERROR("[TAGCTL] Failed to call /cmd_vel_arbiter/finish_motion.");
+            return false;
+        }
+        if (!service.response.centered) {
+            ROS_ERROR_STREAM("[TAGCTL] Tag motion stopped, but centering was not confirmed: "
+                             << service.response.message);
+        }
+        return service.response.centered;
+    }
+
     // 服务回调函数
     bool handleSetTargetY(x2bot_teleop::SetTagY::Request& req, x2bot_teleop::SetTagY::Response& res) {
         bool expected = false;
@@ -358,6 +384,7 @@ private:
         resetYawStableCounter();
 
         ros::Rate rate(30);  // 30 Hz
+        ros::WallTime invalid_since;
         while (ros::ok()) {
             // The service callback is blocking. Process /tag_position before
             // checking validity so a request that started without a visible
@@ -366,18 +393,34 @@ private:
 
             // 检查数据是否过期
             if (isDataStale() || (current_valid_ <0) ) {
+                if (invalid_since.isZero()) {
+                    invalid_since = ros::WallTime::now();
+                }
                 ROS_WARN_THROTTLE(1.0, "[TAGCTL] Tag position data is stale or invalid. Stopping the robot.");
                 publishStop(rate, 3);
                 for (int i = 0; i < 20 && ros::ok(); ++i) {
+                    cmd_vel_publisher_.publish(geometry_msgs::Twist());
                     ros::spinOnce();
                     if (!isDataStale() && current_valid_ >= 0) {
                         ROS_INFO("[TAGCTL] Tag data became valid; resume the active control request.");
+                        invalid_since = ros::WallTime();
                         break;
+                    }
+                    if ((ros::WallTime::now() - invalid_since).toSec() >=
+                        tag_abort_timeout_) {
+                        ROS_ERROR("[TAGCTL] Tag remained invalid for %.1f seconds; abort the task.",
+                                  tag_abort_timeout_);
+                        publishStop(rate, 3);
+                        notifyMotionFinished(
+                            cmd_vel_arbiter::FinishMotionRequest::TASK_FAILED);
+                        res.success = false;
+                        return true;
                     }
                     rate.sleep();
                 }
                 continue;
             }
+            invalid_since = ros::WallTime();
 
             if (state_ == ROTATING) {
                 // 初始旋转阶段：调整方向直到当前角度接近目标角度
@@ -444,6 +487,8 @@ private:
                         publishStop(rate, 2);
                         ROS_INFO("[TAGCTL] X and Y reached. Stop Y+Yaw without standalone yaw rotation. x=%.3f m, y=%.3f m, yaw_err=%.3f rad",
                                  current_x_m_, current_y_m_, yawError());
+                        notifyMotionFinished(
+                            cmd_vel_arbiter::FinishMotionRequest::TASK_FINISHED);
                         res.success = true;
                         return true;
                     }
@@ -491,6 +536,8 @@ private:
                         publishStop(rate, 2);
                         ROS_INFO("[TAGCTL] Final X reached. Final Y+Yaw recheck disabled. Reached target position! x=%.3f m, y=%.3f m, yaw=%.3f rad, target_yaw=%.3f rad",
                                  current_x_m_, current_y_m_, current_yaw_rad_, target_yaw_rad_);
+                        notifyMotionFinished(
+                            cmd_vel_arbiter::FinishMotionRequest::TASK_FINISHED);
                         res.success = true;
                         return true;
                     }
@@ -499,6 +546,8 @@ private:
                         publishStop(rate, 2);
                         ROS_INFO("[TAGCTL] Final X, Y and yaw reached. Reached target position! x=%.3f m, y=%.3f m, yaw=%.3f rad, target_yaw=%.3f rad",
                                  current_x_m_, current_y_m_, current_yaw_rad_, target_yaw_rad_);
+                        notifyMotionFinished(
+                            cmd_vel_arbiter::FinishMotionRequest::TASK_FINISHED);
                         res.success = true;
                         return true;
                     }
