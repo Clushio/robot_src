@@ -37,6 +37,7 @@
 #ifndef jgl_dwa_local_planner_DWA_PLANNER_ROS_H_
 #define jgl_dwa_local_planner_DWA_PLANNER_ROS_H_
 
+#include <atomic>
 #include <boost/shared_ptr.hpp>
 #include <boost/thread.hpp>
 
@@ -72,6 +73,7 @@
 #include <tf2/convert.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <visualization_msgs/Marker.h>
+#include <std_msgs/Bool.h>
 
 namespace jgl_dwa_local_planner
 {
@@ -239,6 +241,8 @@ namespace jgl_dwa_local_planner
       bool computeReferenceVelocityCommands(geometry_msgs::Twist &cmd_vel,
                                             bool &hard_failure);
       bool referencePathBlocked(const nav_msgs::Path &path);
+      bool fixedRouteBlocked();
+      void fixedRouteModeCallback(const std_msgs::Bool::ConstPtr &mode);
       bool costmapPointBlocked(costmap_2d::Costmap2D *costmap,
                                unsigned int mx, unsigned int my,
                                int radius_cells) const;
@@ -261,6 +265,7 @@ namespace jgl_dwa_local_planner
       // for visualisation, publishers of global and local plan
       ros::Publisher g_plan_pub_, l_plan_pub_, reference_path_pub_,
           reference_path_marker_pub_, reference_status_pub_;
+      ros::Subscriber fixed_route_mode_sub_;
 
       base_local_planner::LocalPlannerUtil planner_util_;
 
@@ -292,6 +297,7 @@ namespace jgl_dwa_local_planner
       double reference_fallback_boundary_distance_;
       double obstacle_wait_time_;
       double path_deviation_replan_threshold_;
+      std::atomic<bool> fixed_route_mode_;
       ros::Time reference_obstacle_start_;
       int current_topology_goal_index_;
       int legacy_line_forced_goal_index_;

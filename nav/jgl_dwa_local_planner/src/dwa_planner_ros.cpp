@@ -39,6 +39,7 @@
 #include <Eigen/Core>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 #include <ros/console.h>
 
@@ -140,6 +141,7 @@ namespace jgl_dwa_local_planner
     reference_fallback_boundary_distance_ = 0.15;
     obstacle_wait_time_ = 10.0;
     path_deviation_replan_threshold_ = 0.60;
+    fixed_route_mode_.store(false);
     reference_obstacle_start_ = ros::Time(0);
     current_topology_goal_index_ = -1;
     legacy_line_forced_goal_index_ = -1;
@@ -864,6 +866,72 @@ namespace jgl_dwa_local_planner
     return false;
   }
 
+  bool DWAPlannerROS::fixedRouteBlocked()
+  {
+    if (!fixed_route_mode_.load())
+    {
+      return false;
+    }
+    if (reference_path_manager_.hasValidPath())
+    {
+      return referencePathBlocked(reference_path_manager_.referencePath());
+    }
+    if (linePath.size() < 2 || costmap_ros_ == NULL ||
+        costmap_ros_->getCostmap() == NULL)
+    {
+      return false;
+    }
+
+    unsigned int nearest_index = 0;
+    double nearest_distance = std::numeric_limits<double>::infinity();
+    for (unsigned int i = 0; i < linePath.size(); ++i)
+    {
+      const double distance = comDistance(current_pose_, linePath[i]);
+      if (distance < nearest_distance)
+      {
+        nearest_distance = distance;
+        nearest_index = i;
+      }
+    }
+
+    costmap_2d::Costmap2D *costmap = costmap_ros_->getCostmap();
+    const double resolution = std::max(0.01, costmap->getResolution());
+    const int radius_cells =
+        static_cast<int>(std::ceil(reference_safe_distance_ / resolution));
+    const double check_distance =
+        std::max(1.0, path_follower_.lookaheadDistance() * 2.0);
+    double walked = 0.0;
+    geometry_msgs::PoseStamped previous = current_pose_;
+    for (unsigned int i = nearest_index; i < linePath.size(); ++i)
+    {
+      walked += comDistance(previous, linePath[i]);
+      if (walked > check_distance)
+      {
+        break;
+      }
+      previous = linePath[i];
+      unsigned int mx = 0;
+      unsigned int my = 0;
+      if (costmap->worldToMap(linePath[i].pose.position.x,
+                              linePath[i].pose.position.y, mx, my) &&
+          costmapPointBlocked(costmap, mx, my, radius_cells))
+      {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void DWAPlannerROS::fixedRouteModeCallback(
+      const std_msgs::Bool::ConstPtr &mode)
+  {
+    fixed_route_mode_.store(mode->data);
+    if (!mode->data)
+    {
+      reference_obstacle_start_ = ros::Time(0);
+    }
+  }
+
   bool DWAPlannerROS::computeReferenceVelocityCommands(geometry_msgs::Twist &cmd_vel,
                                                        bool &hard_failure)
   {
@@ -1064,6 +1132,9 @@ namespace jgl_dwa_local_planner
             node_nh.advertise<visualization_msgs::Marker>("/reference_path_marker", 1, true);
         reference_status_pub_ =
             node_nh.advertise<geometry_msgs::Vector3Stamped>("/bspline_status", 1, false);
+        fixed_route_mode_sub_ = node_nh.subscribe<std_msgs::Bool>(
+            "/anav/fixed_route_mode", 1,
+            &DWAPlannerROS::fixedRouteModeCallback, this);
         trajectory_generator_.initialize(private_nh, node_nh);
         reference_path_manager_.initialize(node_nh, private_nh);
         path_follower_.loadParams(private_nh);
@@ -1117,6 +1188,9 @@ namespace jgl_dwa_local_planner
 }
  bool DWAPlannerROS::setPlan(const std::vector<geometry_msgs::PoseStamped> &orig_global_plan)
 {
+    bool fixed_route_parameter = false;
+    ros::param::param("/anav/fixed_route_mode", fixed_route_parameter, false);
+    fixed_route_mode_.store(fixed_route_parameter);
     if (!isInitialized()) {
         ROS_ERROR("This planner has not been initialized, please call initialize() before using this planner");
         return false;
@@ -1768,6 +1842,14 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseS
       publishGlobalPlan(transformed_plan);
       consumeReferencePathJob();
       maybeStartReferencePathJob();
+      if (fixedRouteBlocked())
+      {
+        stopCmd(cmd_vel);
+        ROS_WARN_THROTTLE(
+            1.0,
+            "Fixed route: obstacle detected on the locked path; wait in place until it clears.");
+        return true;
+      }
       bool reference_hard_failure = false;
       if (computeReferenceVelocityCommands(cmd_vel, reference_hard_failure))
       {

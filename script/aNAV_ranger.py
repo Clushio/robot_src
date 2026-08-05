@@ -861,7 +861,7 @@ class MyWindow(QWidget):
 
         introduction = QLabel(
             '从当前 topology.yaml 中选择两个点。机器人到达一端后会自动前往另一端，'
-            '直到点击“停止循环”。'
+            '直到点击“停止循环”。循环使用锁定路线，运行中不允许重新规划或绕行。'
         )
         introduction.setObjectName('subTitle')
         introduction.setWordWrap(True)
@@ -912,8 +912,8 @@ class MyWindow(QWidget):
         layout.addWidget(control)
 
         safety_note = QLabel(
-            '点击停止后会取消当前 MoveBase 目标并停车；'
-            '导航失败时循环也会自动终止，不会盲目重试。'
+            '遇到障碍物时机器人只会在原路线上停车等待，障碍消失后继续；'
+            '不会选择其他拓扑边。点击停止后会取消当前 MoveBase 目标并停车。'
         )
         safety_note.setObjectName('subTitle')
         safety_note.setWordWrap(True)
@@ -1502,7 +1502,7 @@ class MyWindow(QWidget):
 
     def call_topology_target(self, target_id, current_id):
         request = (
-            f'{{data: {int(target_id)}, currentID: {int(current_id)}, run: 1}}'
+            f'{{data: {int(target_id)}, currentID: {int(current_id)}, run: 2}}'
         )
         try:
             result = subprocess.run(

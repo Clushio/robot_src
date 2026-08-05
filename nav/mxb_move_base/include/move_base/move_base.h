@@ -39,6 +39,7 @@
 
 #include <vector>
 #include <string>
+#include <atomic>
 
 #include <ros/ros.h>
 
@@ -54,6 +55,7 @@
 #include <nav_msgs/GetPlan.h>
 
 #include <pluginlib/class_loader.hpp>
+#include <std_msgs/Bool.h>
 #include <std_srvs/Empty.h>
 
 #include <dynamic_reconfigure/server.h>
@@ -158,6 +160,8 @@ namespace move_base {
 
       void goalCB(const geometry_msgs::PoseStamped::ConstPtr& goal);
 
+      void fixedRouteModeCB(const std_msgs::Bool::ConstPtr& mode);
+
       void planThread();
 
       void executeCb(const move_base_msgs::MoveBaseGoalConstPtr& move_base_goal);
@@ -195,10 +199,11 @@ namespace move_base {
       uint32_t planning_retries_;
       double conservative_reset_dist_, clearing_radius_;
       ros::Publisher current_goal_pub_, vel_pub_, action_goal_pub_;
-      ros::Subscriber goal_sub_;
+      ros::Subscriber goal_sub_, fixed_route_mode_sub_;
       ros::ServiceServer make_plan_srv_, clear_costmaps_srv_;
       bool shutdown_costmaps_, clearing_rotation_allowed_, recovery_behavior_enabled_;
       bool make_plan_clear_costmap_, make_plan_add_unreachable_goal_;
+      std::atomic<bool> fixed_route_mode_;
       double oscillation_timeout_, oscillation_distance_;
 
       MoveBaseState state_;
@@ -236,4 +241,3 @@ namespace move_base {
   };
 };
 #endif
-

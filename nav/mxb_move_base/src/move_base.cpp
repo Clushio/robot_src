@@ -55,7 +55,8 @@ namespace move_base {
     blp_loader_("nav_core", "nav_core::BaseLocalPlanner"), 
     recovery_loader_("nav_core", "nav_core::RecoveryBehavior"),
     planner_plan_(NULL), latest_plan_(NULL), controller_plan_(NULL),
-    runPlanner_(false), setup_(false), p_freq_change_(false), c_freq_change_(false), new_global_plan_(false) {
+    runPlanner_(false), fixed_route_mode_(false), setup_(false),
+    p_freq_change_(false), c_freq_change_(false), new_global_plan_(false) {
 
     as_ = new MoveBaseActionServer(ros::NodeHandle(), "move_base", boost::bind(&MoveBase::executeCb, this, _1), false);
 
@@ -108,6 +109,9 @@ namespace move_base {
     //like nav_view and rviz
     ros::NodeHandle simple_nh("move_base_simple");
     goal_sub_ = simple_nh.subscribe<geometry_msgs::PoseStamped>("goal", 1, boost::bind(&MoveBase::goalCB, this, _1));
+    fixed_route_mode_sub_ = nh.subscribe<std_msgs::Bool>(
+        "/anav/fixed_route_mode", 1,
+        boost::bind(&MoveBase::fixedRouteModeCB, this, _1));
 
     //we'll assume the radius of the robot to be consistent with what's specified for the costmaps
     private_nh.param("local_costmap/inscribed_radius", inscribed_radius_, 0.325);
@@ -290,6 +294,15 @@ namespace move_base {
     action_goal.goal.target_pose = *goal;
 
     action_goal_pub_.publish(action_goal);
+  }
+
+  void MoveBase::fixedRouteModeCB(const std_msgs::Bool::ConstPtr& mode){
+    const bool previous = fixed_route_mode_.exchange(mode->data);
+    if(previous != mode->data){
+      ROS_WARN("Fixed-route mode %s: global replanning and recovery rerouting are %s.",
+               mode->data ? "enabled" : "disabled",
+               mode->data ? "locked" : "restored");
+    }
   }
 
   void MoveBase::clearCostmapWindows(double size_x, double size_y){
@@ -620,7 +633,7 @@ namespace move_base {
         //make sure we only start the controller if we still haven't reached the goal
         if(runPlanner_)
           state_ = CONTROLLING;
-        if(planner_frequency_ <= 0)
+        if(planner_frequency_ <= 0 || fixed_route_mode_.load())
           runPlanner_ = false;
         lock.unlock();
       }
@@ -662,6 +675,9 @@ namespace move_base {
 
   void MoveBase::executeCb(const move_base_msgs::MoveBaseGoalConstPtr& move_base_goal)
   {
+    bool fixed_route_parameter = false;
+    ros::param::param("/anav/fixed_route_mode", fixed_route_parameter, false);
+    fixed_route_mode_.store(fixed_route_parameter);
     if(!isQuaternionValid(move_base_goal->target_pose.pose.orientation)){
       as_->setAborted(move_base_msgs::MoveBaseResult(), "Aborting on goal because it was sent with an invalid quaternion");
       return;
@@ -911,7 +927,7 @@ namespace move_base {
         }
 
         //check for an oscillation condition
-        if(oscillation_timeout_ > 0.0 &&
+        if(!fixed_route_mode_.load() && oscillation_timeout_ > 0.0 &&
             last_oscillation_reset_ + ros::Duration(oscillation_timeout_) < ros::Time::now())
         {
           publishZeroVelocity();
@@ -933,6 +949,13 @@ namespace move_base {
         }
         else {
           ROS_DEBUG_NAMED("move_base", "The local planner could not find a valid plan.");
+          if(fixed_route_mode_.load()){
+            publishZeroVelocity();
+            last_valid_control_ = ros::Time::now();
+            ROS_WARN_THROTTLE(2.0,
+                              "Fixed-route mode: local control is unavailable or blocked; keep stopped on the locked route without replanning.");
+            break;
+          }
           ros::Time attempt_end = last_valid_control_ + ros::Duration(controller_patience_);
 
           //check if we've tried to find a valid control for longer than our time limit

@@ -11,6 +11,7 @@
 #include <ros/callback_queue.h>
 #include <ros/ros.h>
 #include <sensor_msgs/Joy.h>
+#include <std_msgs/Bool.h>
 #include <std_msgs/String.h>
 #include <std_srvs/Trigger.h>
 #include <tf/transform_listener.h>
@@ -130,6 +131,9 @@ public:
         private_nh.param("cmd_vel_topic", cmd_vel_topic,
                          std::string("/cmd_vel/nav"));
         vel_pub_ = nh_.advertise<geometry_msgs::Twist>(cmd_vel_topic, 1);
+        fixed_route_mode_pub_ =
+            nh_.advertise<std_msgs::Bool>("/anav/fixed_route_mode", 1, true);
+        publishFixedRouteMode(false);
         finish_motion_client_ =
             nh_.serviceClient<cmd_vel_arbiter::FinishMotion>(
                 "/cmd_vel_arbiter/finish_motion");
@@ -175,6 +179,7 @@ public:
         const int target_index = resolvePoseIndex(req.data);
         const int requested_current = resolvePoseIndex(req.currentID);
         const bool exec_path = req.run > 0;
+        const bool fixed_route = req.run >= 2;
         const std::string target_name = requestedTargetName(req.data);
 
         if (exec_path && cancel_requested_.exchange(false))
@@ -215,8 +220,9 @@ public:
         }
 
         current_pose_index = start_index;
-        std::vector<int> path_indices = dijkstraShortestPath(start_index, target_index);
-        if (path_indices.empty() && exec_path)
+        std::vector<int> path_indices =
+            dijkstraShortestPath(start_index, target_index, fixed_route);
+        if (path_indices.empty() && exec_path && !fixed_route)
         {
             waitForTemporaryPath(start_index, target_index, path_indices);
         }
@@ -237,7 +243,10 @@ public:
 
         if (exec_path)
         {
-            const bool ok = runTopologyMission(target_index, path_indices);
+            publishFixedRouteMode(fixed_route);
+            const bool ok = runTopologyMission(
+                target_index, path_indices, fixed_route);
+            publishFixedRouteMode(false);
             const bool canceled = cancel_requested_.exchange(false);
             const bool centered = notifyMotionFinished(
                 ok ? cmd_vel_arbiter::FinishMotionRequest::TASK_FINISHED
@@ -464,6 +473,7 @@ private:
     tf2_ros::Buffer tf_buffer_;
     tf2_ros::TransformListener tf_listener_;
     ros::Publisher vel_pub_;
+    ros::Publisher fixed_route_mode_pub_;
     ros::CallbackQueue joy_callback_queue_;
     ros::AsyncSpinner joy_spinner_;
     ros::Subscriber joy_sub_;
@@ -535,6 +545,15 @@ private:
                              << service.response.message);
         }
         return service.response.centered;
+    }
+
+    void publishFixedRouteMode(bool enabled)
+    {
+        ros::param::set("/anav/fixed_route_mode", enabled);
+        std_msgs::Bool mode;
+        mode.data = enabled;
+        fixed_route_mode_pub_.publish(mode);
+        ROS_INFO("Fixed-route navigation mode %s.", enabled ? "enabled" : "disabled");
     }
 
     static std::string trim(const std::string &value)
@@ -1361,7 +1380,8 @@ private:
         return false;
     }
 
-    std::vector<int> dijkstraShortestPath(int start, int goal)
+    std::vector<int> dijkstraShortestPath(int start, int goal,
+                                          bool fixed_route = false)
     {
         if (!validIndex(start) || !validIndex(goal))
         {
@@ -1402,7 +1422,10 @@ private:
             }
             for (const TopoEdge &edge : it->second)
             {
-                if (edgeIsBlocked(edge) || !validIndex(edge.to))
+                const bool blocked = fixed_route
+                    ? edge.configured_blocked
+                    : edgeIsBlocked(edge);
+                if (blocked || !validIndex(edge.to))
                 {
                     continue;
                 }
@@ -1687,7 +1710,8 @@ private:
     }
 
     GoalMonitorResult sendGoalAndMonitor(int target_index, int previous_index,
-                                         bool final_goal, int topology_path_index)
+                                         bool final_goal, int topology_path_index,
+                                         bool fixed_route = false)
     {
         const TargetPose &target_pose = target_poses[target_index];
         move_base_msgs::MoveBaseGoal mb_goal;
@@ -1897,6 +1921,15 @@ private:
             const ros::Time now = ros::Time::now();
             if ((now - last_progress_time).toSec() >= blocked_timeout_)
             {
+                if (fixed_route)
+                {
+                    ROS_WARN_THROTTLE(
+                        2.0,
+                        "Fixed route P%d: no motion for %.1f seconds; keep the same goal and wait without replanning.",
+                        target_index,
+                        (now - last_progress_time).toSec());
+                    continue;
+                }
                 ROS_WARN("No effective motion for %.1f seconds, treat current edge as blocked.",
                          blocked_timeout_);
                 global_ac->cancelGoal();
@@ -1907,6 +1940,15 @@ private:
             }
             if ((now - start_time).toSec() >= goal_timeout_)
             {
+                if (fixed_route)
+                {
+                    ROS_WARN_THROTTLE(
+                        2.0,
+                        "Fixed route P%d: goal remains active after %.1f seconds; wait indefinitely without replanning.",
+                        target_index,
+                        (now - start_time).toSec());
+                    continue;
+                }
                 ROS_WARN("Goal P%d timeout after %.1f seconds.", target_index, goal_timeout_);
                 global_ac->cancelGoal();
                 stopRobot();
@@ -1922,8 +1964,69 @@ private:
         return GOAL_FAILED;
     }
 
-    bool runTopologyMission(int target_index, std::vector<int> path_indices)
+    bool runFixedTopologyMission(int target_index,
+                                 const std::vector<int> &path_indices)
     {
+        if (path_indices.empty())
+        {
+            return false;
+        }
+
+        for (std::size_t i = 0; i < path_indices.size(); ++i)
+        {
+            const int next_index = path_indices[i];
+            if (!validIndex(next_index))
+            {
+                stopRobot();
+                return false;
+            }
+
+            const int previous_index = (i == 0) ? -1 : path_indices[i - 1];
+            const bool final_goal = next_index == target_index;
+            while (ros::ok())
+            {
+                const GoalMonitorResult result = sendGoalAndMonitor(
+                    next_index, previous_index, final_goal,
+                    static_cast<int>(i), true);
+                if (result == GOAL_REACHED ||
+                    result == GOAL_PAUSED_AFTER_PASS)
+                {
+                    break;
+                }
+                if (result == GOAL_PAUSED)
+                {
+                    ROS_INFO("Fixed route: resume the same topology goal P%d without replanning.",
+                             next_index);
+                    continue;
+                }
+
+                stopRobot();
+                active_next_index_ = -1;
+                publishTopologyMarkers();
+                ROS_ERROR("Fixed route stopped at P%d; no alternate path will be planned.",
+                          next_index);
+                return false;
+            }
+            if (!ros::ok())
+            {
+                stopRobot();
+                return false;
+            }
+        }
+
+        current_status = 3;
+        active_next_index_ = -1;
+        publishTopologyMarkers();
+        return true;
+    }
+
+    bool runTopologyMission(int target_index, std::vector<int> path_indices,
+                            bool fixed_route = false)
+    {
+        if (fixed_route)
+        {
+            return runFixedTopologyMission(target_index, path_indices);
+        }
         int start_index = path_indices.empty() ? nearestPoseIndex() : path_indices.front();
         std::size_t execution_start = 0;
         int replan_count = 0;
@@ -1958,7 +2061,7 @@ private:
                 const bool final_goal = next_index == target_index;
                 const GoalMonitorResult goal_result =
                     sendGoalAndMonitor(next_index, previous_index, final_goal,
-                                       static_cast<int>(i));
+                                       static_cast<int>(i), false);
                 if (goal_result == GOAL_REACHED)
                 {
                     if (validIndex(previous_index))
