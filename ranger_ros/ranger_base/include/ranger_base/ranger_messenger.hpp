@@ -138,6 +138,7 @@ class RangerROSMessenger {
   StopCenterState stop_center_state_ = StopCenterState::kIdle;
   uint8_t stop_center_reason_ = ranger_msgs::StopAndCenterGoal::TASK_FINISHED;
   ros::WallTime stop_center_state_started_at_;
+  ros::WallTime last_mode_request_time_;
   int still_feedback_count_ = 0;
   int centered_feedback_count_ = 0;
   bool report_stop_center_action_result_ = false;

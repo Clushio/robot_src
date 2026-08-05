@@ -2905,7 +2905,6 @@ class MyWindow(QWidget):
         self.auto_nav_start_pending = False
         self.set_status('正在停止自动导航和 MoveBase…', 'info')
         if stopped:
-            self.send_joy_message('NavPause')
             self.request_motion_finish(
                 'nav', FinishMotionRequest.TASK_CANCELED
             )
