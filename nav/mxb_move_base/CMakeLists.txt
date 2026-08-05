@@ -19,6 +19,7 @@ find_package(catkin REQUIRED
         roscpp
         rospy
         rotate_recovery
+        std_msgs
         std_srvs
         tf2_geometry_msgs
         tf2_ros
@@ -38,6 +39,7 @@ catkin_package(
         move_base_msgs
         nav_msgs
         roscpp
+        std_msgs
 )
 
 include_directories(
