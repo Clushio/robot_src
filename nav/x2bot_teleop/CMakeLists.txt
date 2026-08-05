@@ -9,6 +9,7 @@ find_package(catkin REQUIRED COMPONENTS
   roscpp
   rospy
   std_msgs
+  std_srvs
   joy
   tf2
   tf2_ros
@@ -122,7 +123,7 @@ generate_messages(
 catkin_package(
 #  INCLUDE_DIRS include
 #  LIBRARIES x2bot_teleop
-   CATKIN_DEPENDS cmd_vel_arbiter roscpp rospy std_msgs joy message_runtime
+   CATKIN_DEPENDS cmd_vel_arbiter roscpp rospy std_msgs std_srvs joy message_runtime
 #  DEPENDS system_lib
 )
 

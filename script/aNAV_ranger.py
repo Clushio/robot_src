@@ -3,7 +3,8 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QPushButton, QLabel, QVBoxLayout, QHBoxLayout,
     QGridLayout, QLineEdit, QGroupBox, QTabWidget, QFrame, QSizePolicy,
     QRadioButton, QTableWidget, QTableWidgetItem, QHeaderView,
-    QAbstractItemView, QMessageBox, QFileDialog, QDialog, QFormLayout
+    QAbstractItemView, QMessageBox, QFileDialog, QDialog, QFormLayout,
+    QComboBox
 )
 import subprocess
 import time
@@ -35,7 +36,12 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 def find_workspace_root():
     """兼容 <workspace>/script 和标准的 <workspace>/src/script 两种目录结构。"""
     parent = os.path.dirname(SCRIPT_DIR)
-    candidates = (parent, os.path.dirname(parent))
+    grandparent = os.path.dirname(parent)
+    candidates = (
+        (grandparent, parent)
+        if os.path.basename(parent) == 'src'
+        else (parent, grandparent)
+    )
     for candidate in candidates:
         if os.path.isfile(os.path.join(candidate, 'devel', 'env.sh')):
             return candidate
@@ -89,6 +95,7 @@ MAP_OUTPUT_PREFIX = os.path.join(os.path.expanduser('~'), 'maps', 'map')
 ROBOT_POSITIONS_FILE = os.path.join(
     os.path.expanduser('~'), 'maps', 'robot_positions.txt'
 )
+TOPOLOGY_FILE = os.path.join(os.path.dirname(ROBOT_POSITIONS_FILE), 'topology.yaml')
 TOPOLOGY_BUILDER = os.path.join(SCRIPT_DIR, 'build_topology.py')
 RVIZ_RECORD_POSE_TOPIC = '/anav/record_pose'
 RVIZ_RECORD_MARKER_TOPIC = '/anav/record_markers'
@@ -216,6 +223,7 @@ class MyWindow(QWidget):
     odometry_requested = pyqtSignal(float, float, float, float, float)
     health_snapshot_requested = pyqtSignal(object)
     topology_finished_requested = pyqtSignal(bool, str)
+    loop_update_requested = pyqtSignal(int, str, str, int, str)
 
     def __init__(self):
         super().__init__()
@@ -252,6 +260,14 @@ class MyWindow(QWidget):
         self.estop_active = False
         self.shutdown_in_progress = False
         self.topology_build_running = False
+        self.loop_running = False
+        self.loop_waiting_for_nav = False
+        self.loop_generation = 0
+        self.loop_completed_legs = 0
+        self.loop_nav_wait_attempts = 0
+        self.loop_pending_targets = None
+        self.loop_stop_event = threading.Event()
+        self.loop_thread = None
         if self.ros_available:
             try:
                 rospy.init_node('upmachine_publisher', anonymous=True, disable_signals=True)
@@ -276,6 +292,7 @@ class MyWindow(QWidget):
         self.odometry_requested.connect(self.update_odometry_display)
         self.health_snapshot_requested.connect(self.apply_health_snapshot)
         self.topology_finished_requested.connect(self.on_topology_finished)
+        self.loop_update_requested.connect(self.on_loop_update)
         if self.ros_available:
             try:
                 self.task_status_sub = rospy.Subscriber(
@@ -720,6 +737,7 @@ class MyWindow(QWidget):
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.build_navigation_page(), '导航作业')
+        self.tabs.addTab(self.build_loop_page(), '循环任务')
         self.tabs.addTab(self.build_points_page(), '点位管理')
         self.tabs.addTab(self.build_mapping_page(), '地图构建')
         self.tabs.addTab(self.build_tools_page(), '设备与工具')
@@ -833,6 +851,75 @@ class MyWindow(QWidget):
         target_layout.addLayout(quick_row)
         layout.addWidget(target)
         layout.addStretch()
+        return page
+
+    def build_loop_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 10, 0, 0)
+        layout.setSpacing(14)
+
+        introduction = QLabel(
+            '从当前 topology.yaml 中选择两个点。机器人到达一端后会自动前往另一端，'
+            '直到点击“停止循环”。'
+        )
+        introduction.setObjectName('subTitle')
+        introduction.setWordWrap(True)
+        layout.addWidget(introduction)
+
+        selection = QGroupBox('1  选择循环点')
+        selection_layout = QGridLayout(selection)
+        selection_layout.setHorizontalSpacing(12)
+        selection_layout.setVerticalSpacing(10)
+        self.loop_point_a_combo = QComboBox()
+        self.loop_point_b_combo = QComboBox()
+        self.loop_point_a_combo.setMinimumWidth(260)
+        self.loop_point_b_combo.setMinimumWidth(260)
+        self.loop_refresh_button = QPushButton('刷新 topo 点位')
+        self.loop_refresh_button.clicked.connect(self.refresh_loop_points)
+        selection_layout.addWidget(QLabel('循环点 A'), 0, 0)
+        selection_layout.addWidget(self.loop_point_a_combo, 0, 1)
+        selection_layout.addWidget(QLabel('循环点 B'), 1, 0)
+        selection_layout.addWidget(self.loop_point_b_combo, 1, 1)
+        selection_layout.addWidget(self.loop_refresh_button, 0, 2, 2, 1)
+        selection_layout.setColumnStretch(1, 1)
+        layout.addWidget(selection)
+
+        control = QGroupBox('2  运行控制')
+        control_layout = QVBoxLayout(control)
+        control_layout.setSpacing(12)
+        action_row = QHBoxLayout()
+        self.loop_start_button = QPushButton('开始循环')
+        self.loop_start_button.setProperty('primary', True)
+        self.loop_start_button.clicked.connect(self.start_loop_navigation)
+        self.loop_stop_button = QPushButton('停止循环')
+        self.loop_stop_button.setProperty('danger', True)
+        self.loop_stop_button.clicked.connect(self.stop_loop_navigation)
+        self.loop_stop_button.setEnabled(False)
+        action_row.addWidget(self.loop_start_button)
+        action_row.addWidget(self.loop_stop_button)
+        action_row.addStretch()
+        control_layout.addLayout(action_row)
+
+        self.loop_state_label = QLabel('循环未启动')
+        self.loop_state_label.setObjectName('dataValue')
+        self.loop_state_label.setMinimumHeight(42)
+        self.loop_state_label.setWordWrap(True)
+        control_layout.addWidget(self.loop_state_label)
+        self.loop_count_label = QLabel('已完成单程：0')
+        self.loop_count_label.setObjectName('subTitle')
+        control_layout.addWidget(self.loop_count_label)
+        layout.addWidget(control)
+
+        safety_note = QLabel(
+            '点击停止后会取消当前 MoveBase 目标并停车；'
+            '导航失败时循环也会自动终止，不会盲目重试。'
+        )
+        safety_note.setObjectName('subTitle')
+        safety_note.setWordWrap(True)
+        layout.addWidget(safety_note)
+        layout.addStretch()
+        self.refresh_loop_points()
         return page
 
     def build_points_page(self):
@@ -1088,6 +1175,8 @@ class MyWindow(QWidget):
             self.status_requested.emit(
                 f'导航失败（{target_name}）：{failure_detail}', 'error'
             )
+        elif state == 'canceled':
+            self.status_requested.emit(f'已取消：{target_name}', 'warning')
 
     def on_record_mode_changed(self, _checked=False):
         if self.rviz_record_mode.isChecked():
@@ -1232,6 +1321,307 @@ class MyWindow(QWidget):
     def point_display_name(self, index, pose):
         return pose.get('label') or f'P{index}'
 
+    def read_topology_node_ids(self):
+        """读取当前 topology.yaml 的节点 ID，避免下拉框选到未进入拓扑的点。"""
+        node_ids = []
+        if not os.path.isfile(TOPOLOGY_FILE):
+            return node_ids
+        in_nodes = False
+        try:
+            with open(TOPOLOGY_FILE, 'r', encoding='utf-8') as handle:
+                for raw_line in handle:
+                    stripped = raw_line.strip()
+                    if stripped == 'nodes:':
+                        in_nodes = True
+                        continue
+                    if stripped == 'edges:':
+                        break
+                    if in_nodes and stripped.startswith('- id:'):
+                        try:
+                            node_ids.append(int(stripped.split(':', 1)[1].strip()))
+                        except ValueError:
+                            continue
+        except OSError as error:
+            print(f'Unable to read {TOPOLOGY_FILE}: {error}')
+        return node_ids
+
+    def refresh_loop_points(self):
+        if not hasattr(self, 'loop_point_a_combo'):
+            return
+        previous_a = self.loop_point_a_combo.currentData()
+        previous_b = self.loop_point_b_combo.currentData()
+        self.loop_point_a_combo.clear()
+        self.loop_point_b_combo.clear()
+
+        poses = self.read_record_positions()
+        node_ids = self.read_topology_node_ids()
+        for index in node_ids:
+            if index < 0 or index >= len(poses):
+                continue
+            pose = poses[index]
+            label = self.point_display_name(index, pose)
+            text = (
+                f'{label}  (P{index}, X {pose["x"]:.2f}, Y {pose["y"]:.2f})'
+            )
+            data = {
+                'pose_index': index,
+                'request_id': self.point_request_id(index, pose),
+                'name': label,
+            }
+            self.loop_point_a_combo.addItem(text, data)
+            self.loop_point_b_combo.addItem(text, dict(data))
+
+        def restore_selection(combo, previous, fallback):
+            selected = -1
+            if isinstance(previous, dict):
+                previous_index = previous.get('pose_index')
+                for item_index in range(combo.count()):
+                    data = combo.itemData(item_index)
+                    if data and data.get('pose_index') == previous_index:
+                        selected = item_index
+                        break
+            if selected < 0 and combo.count():
+                selected = min(fallback, combo.count() - 1)
+            combo.setCurrentIndex(selected)
+
+        restore_selection(self.loop_point_a_combo, previous_a, 0)
+        restore_selection(self.loop_point_b_combo, previous_b, 1)
+        enough_points = self.loop_point_a_combo.count() >= 2
+        if not self.loop_running and not self.loop_waiting_for_nav:
+            self.loop_start_button.setEnabled(enough_points)
+        if not enough_points:
+            self.loop_state_label.setText(
+                '当前拓扑中不足两个有效点，请先在“设备与工具”中构建导航拓扑。'
+            )
+
+    def set_loop_controls_running(self, running):
+        self.loop_start_button.setEnabled(
+            not running and self.loop_point_a_combo.count() >= 2
+        )
+        self.loop_stop_button.setEnabled(running)
+        self.loop_point_a_combo.setEnabled(not running)
+        self.loop_point_b_combo.setEnabled(not running)
+        self.loop_refresh_button.setEnabled(not running)
+
+    def rosservice_is_ready(self, service_name):
+        try:
+            result = subprocess.run(
+                ['rosservice', 'info', service_name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=1,
+            )
+            return result.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+
+    def is_loop_navigation_ready(self):
+        return (
+            self.rosservice_is_ready('/plan_path_and_go')
+            and self.rosservice_is_ready('/anav/cancel_navigation')
+        )
+
+    def start_loop_navigation(self):
+        if self.loop_running or self.loop_waiting_for_nav:
+            self.set_status('循环任务已在运行或启动中。', 'info')
+            return
+        if self.estop_active:
+            self.set_status('紧急停止尚未解除，不能开始循环。', 'error')
+            return
+        if not self.ros_available:
+            self.set_status('ROS 未连接，无法开始循环。', 'error')
+            return
+
+        target_a = self.loop_point_a_combo.currentData()
+        target_b = self.loop_point_b_combo.currentData()
+        if not isinstance(target_a, dict) or not isinstance(target_b, dict):
+            self.set_status('请先刷新并选择两个 topo 点。', 'warning')
+            return
+        if target_a['pose_index'] == target_b['pose_index']:
+            self.set_status('循环点 A 和 B 不能是同一个点。', 'warning')
+            return
+
+        self.loop_pending_targets = (dict(target_a), dict(target_b))
+        self.loop_waiting_for_nav = True
+        self.loop_nav_wait_attempts = 0
+        self.set_loop_controls_running(True)
+        if self.is_loop_navigation_ready():
+            self.begin_loop_navigation()
+            return
+
+        self.loop_state_label.setText('正在启动 MoveBase 和 AutoNAV…')
+        self.set_status('循环任务正在等待导航服务就绪…', 'info')
+        self.startNAV()
+        QTimer.singleShot(500, self.wait_for_loop_navigation_service)
+
+    def wait_for_loop_navigation_service(self):
+        if not self.loop_waiting_for_nav:
+            return
+        if self.is_loop_navigation_ready():
+            self.begin_loop_navigation()
+            return
+        self.loop_nav_wait_attempts += 1
+        if self.loop_nav_wait_attempts >= 80:
+            self.loop_waiting_for_nav = False
+            self.loop_pending_targets = None
+            self.set_loop_controls_running(False)
+            self.loop_state_label.setText('导航服务启动超时，循环未开始。')
+            self.set_status(
+                '40 秒内未检测到导航及取消服务，已取消循环启动。',
+                'error',
+            )
+            return
+        QTimer.singleShot(500, self.wait_for_loop_navigation_service)
+
+    def begin_loop_navigation(self):
+        if not self.loop_waiting_for_nav or not self.loop_pending_targets:
+            return
+        targets = self.loop_pending_targets
+        self.loop_pending_targets = None
+        self.loop_waiting_for_nav = False
+        self.loop_running = True
+        self.loop_completed_legs = 0
+        self.loop_generation += 1
+        generation = self.loop_generation
+        self.loop_stop_event = threading.Event()
+        self.set_loop_controls_running(True)
+        self.loop_count_label.setText('已完成单程：0')
+        self.loop_state_label.setText(
+            f'循环已启动：{targets[0]["name"]} ↔ {targets[1]["name"]}'
+        )
+        self.set_status(
+            f'循环已启动：{targets[0]["name"]} ↔ {targets[1]["name"]}。',
+            'success',
+        )
+        self.loop_thread = threading.Thread(
+            target=self.run_loop_navigation,
+            args=(generation, targets, self.loop_stop_event),
+            daemon=True,
+        )
+        self.loop_thread.start()
+
+    def call_topology_target(self, target_id, current_id):
+        request = (
+            f'{{data: {int(target_id)}, currentID: {int(current_id)}, run: 1}}'
+        )
+        try:
+            result = subprocess.run(
+                ['rosservice', 'call', '/plan_path_and_go', request],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except OSError as error:
+            return False, str(error)
+        output = result.stdout or ''
+        success = False
+        detail = (result.stderr or '').strip()
+        for line in output.splitlines():
+            stripped = line.strip()
+            if stripped.lower().startswith('success:'):
+                success = stripped.split(':', 1)[1].strip().lower() in (
+                    'true', '1'
+                )
+            elif stripped.lower().startswith('message:'):
+                detail = stripped.split(':', 1)[1].strip().strip('"\'')
+        if result.returncode != 0:
+            success = False
+        return success, detail or ('已到达' if success else '导航服务未返回成功')
+
+    def run_loop_navigation(self, generation, targets, stop_event):
+        current_id = self.currentID
+        completed = 0
+        target_offset = 0
+        while not stop_event.is_set():
+            target = targets[target_offset]
+            self.loop_update_requested.emit(
+                generation, 'running', target['name'], completed, ''
+            )
+            success, detail = self.call_topology_target(
+                target['request_id'], current_id
+            )
+            if stop_event.is_set():
+                return
+            if not success:
+                self.loop_update_requested.emit(
+                    generation, 'failed', target['name'], completed, detail
+                )
+                return
+            current_id = target['request_id']
+            self.currentID = current_id
+            completed += 1
+            self.loop_update_requested.emit(
+                generation, 'arrived', target['name'], completed, detail
+            )
+            target_offset = 1 - target_offset
+
+    def on_loop_update(self, generation, state, target_name, completed, detail):
+        if generation != self.loop_generation:
+            return
+        self.loop_completed_legs = completed
+        self.loop_count_label.setText(f'已完成单程：{completed}')
+        if state == 'running':
+            self.loop_state_label.setText(f'正在前往：{target_name}')
+            self.set_status(f'循环任务正在前往：{target_name}', 'info')
+        elif state == 'arrived':
+            self.loop_state_label.setText(
+                f'已到达：{target_name}，准备前往另一端。'
+            )
+        elif state == 'failed':
+            self.loop_running = False
+            self.loop_stop_event.set()
+            self.set_loop_controls_running(False)
+            failure_detail = detail or '未知原因'
+            self.loop_state_label.setText(
+                f'循环已终止：前往 {target_name} 失败。{failure_detail}'
+            )
+            self.set_status(
+                f'循环导航失败（{target_name}）：{failure_detail}', 'error'
+            )
+
+    def stop_loop_navigation(self, notify=True):
+        navigation_active = self.loop_running
+        was_active = navigation_active or self.loop_waiting_for_nav
+        if not was_active:
+            if notify:
+                self.set_status('循环任务尚未启动。', 'info')
+            return
+        self.loop_generation += 1
+        self.loop_stop_event.set()
+        self.loop_running = False
+        self.loop_waiting_for_nav = False
+        self.loop_pending_targets = None
+        self.set_loop_controls_running(False)
+        self.loop_state_label.setText('正在取消当前目标并停止循环…')
+        self.send_joy_message('NavPause')
+
+        def cancel_navigation():
+            try:
+                result = subprocess.run(
+                    ['rosservice', 'call', '/anav/cancel_navigation'],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=3,
+                )
+                if result.returncode == 0:
+                    message = '循环已停止，当前导航目标已取消。'
+                    level = 'warning'
+                else:
+                    detail = (result.stderr or '').strip()
+                    message = f'循环已停止；取消服务返回异常：{detail}'
+                    level = 'warning'
+            except (OSError, subprocess.TimeoutExpired) as error:
+                message = f'循环已停止；已发送暂停，但取消服务未确认：{error}'
+                level = 'warning'
+            self.status_requested.emit(message, level)
+
+        if navigation_active:
+            threading.Thread(target=cancel_navigation, daemon=True).start()
+        if notify:
+            self.set_status('正在停止循环并取消当前目标…', 'info')
+        self.loop_state_label.setText('循环已停止')
+
     def refresh_points_table(self):
         if not hasattr(self, 'points_table'):
             return
@@ -1258,6 +1648,7 @@ class MyWindow(QWidget):
         self.points_table.resizeRowsToContents()
         self.positions_file_stamp = self.positions_file_signature()
         self.refresh_navigation_shortcuts(poses)
+        self.refresh_loop_points()
         has_points = bool(poses)
         for button in (
             self.rename_point_button, self.delete_point_button, self.move_point_up_button,
@@ -2133,6 +2524,7 @@ class MyWindow(QWidget):
         self.build_topology_button.setEnabled(True)
         summary = output.splitlines()[-1] if output else '无输出'
         if success:
+            self.refresh_loop_points()
             topology_path = os.path.join(
                 os.path.dirname(ROBOT_POSITIONS_FILE), 'topology.yaml'
             )
@@ -2586,6 +2978,7 @@ class MyWindow(QWidget):
     def activate_emergency_stop(self):
         if self.estop_active:
             return
+        self.stop_loop_navigation(notify=False)
         self.estop_active = True
         self.send_joy_message('NavPause')
         self.publish_safety_stop()
@@ -2635,6 +3028,9 @@ class MyWindow(QWidget):
     def cancel_current_task(self):
         if self.estop_active:
             self.set_status('当前处于紧急停止状态，请先确认现场安全。', 'warning')
+            return
+        if self.loop_running or self.loop_waiting_for_nav:
+            self.stop_loop_navigation()
             return
         self.send_joy_message('NavPause')
         centered, center_message = self.request_motion_finish(
@@ -2898,6 +3294,8 @@ class MyWindow(QWidget):
         self.set_status('自动导航已启动，可选择快捷目标。', 'success')
 
     def exitNAV(self):
+        if self.loop_running or self.loop_waiting_for_nav:
+            self.stop_loop_navigation(notify=False)
         stopped = (
             self.auto_nav_start_pending or self.runPntsNavProcess is not None
             or self.moveBaseProcess is not None or self.bsplineLogProcess is not None
@@ -2963,6 +3361,7 @@ class MyWindow(QWidget):
             return
         self.shutdown_in_progress = True
         self.health_timer.stop()
+        self.stop_loop_navigation(notify=False)
         self.estop_active = True
         self.estop_timer.start(100)
         self.publish_stop_burst()

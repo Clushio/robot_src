@@ -12,6 +12,7 @@
 #include <ros/ros.h>
 #include <sensor_msgs/Joy.h>
 #include <std_msgs/String.h>
+#include <std_srvs/Trigger.h>
 #include <tf/transform_listener.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
@@ -71,6 +72,7 @@ public:
           stop_and_quit(false),
           pause_robot(false),
           pause_reentry_requested_(false),
+          cancel_requested_(false),
           current_status(0),
           blocked_timeout_(10.0),
           blocked_cooldown_initial_(20.0),
@@ -136,6 +138,9 @@ public:
                 "joy", 10, boost::bind(&mynav::joyCallback, this, _1),
                 ros::VoidPtr(), &joy_callback_queue_);
         joy_sub_ = nh_.subscribe(joy_options);
+        control_nh_.setCallbackQueue(&joy_callback_queue_);
+        cancel_navigation_service_ = control_nh_.advertiseService(
+            "/anav/cancel_navigation", &mynav::cancelNavigationCallback, this);
         joy_spinner_.start();
         marker_pub = nh_.advertise<visualization_msgs::Marker>("visualization_marker", 1);
         marker_array_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("topology_markers", 1, true);
@@ -171,6 +176,15 @@ public:
         const int requested_current = resolvePoseIndex(req.currentID);
         const bool exec_path = req.run > 0;
         const std::string target_name = requestedTargetName(req.data);
+
+        if (exec_path && cancel_requested_.exchange(false))
+        {
+            res.success = false;
+            res.message = "导航任务在启动前已取消";
+            stopRobot();
+            publishTaskStatus("canceled", req.data, target_name, res.message);
+            return true;
+        }
 
         if (!validIndex(target_index))
         {
@@ -224,9 +238,12 @@ public:
         if (exec_path)
         {
             const bool ok = runTopologyMission(target_index, path_indices);
+            const bool canceled = cancel_requested_.exchange(false);
             const bool centered = notifyMotionFinished(
                 ok ? cmd_vel_arbiter::FinishMotionRequest::TASK_FINISHED
-                   : cmd_vel_arbiter::FinishMotionRequest::TASK_FAILED);
+                   : (canceled
+                          ? cmd_vel_arbiter::FinishMotionRequest::TASK_CANCELED
+                          : cmd_vel_arbiter::FinishMotionRequest::TASK_FAILED));
             res.success = ok;
             if (ok)
             {
@@ -236,6 +253,15 @@ public:
                     res.message += "; steering centering failed";
                 }
                 publishTaskStatus("arrived", req.data, target_name, res.message);
+            }
+            else if (canceled)
+            {
+                res.message = "导航任务已取消";
+                if (!centered)
+                {
+                    res.message += "，但轮组回正失败";
+                }
+                publishTaskStatus("canceled", req.data, target_name, res.message);
             }
             else
             {
@@ -434,6 +460,7 @@ private:
     std::unique_ptr<std::thread> runth_;
 
     ros::NodeHandle nh_;
+    ros::NodeHandle control_nh_;
     tf2_ros::Buffer tf_buffer_;
     tf2_ros::TransformListener tf_listener_;
     ros::Publisher vel_pub_;
@@ -452,6 +479,7 @@ private:
     int reference_status_path_index_ = -1;
     int reference_status_code_ = 0;
     ros::ServiceServer plan_path_service;
+    ros::ServiceServer cancel_navigation_service_;
     ros::ServiceClient finish_motion_client_;
 
     int current_pose_index;
@@ -462,6 +490,7 @@ private:
     bool stop_and_quit;
     std::atomic<bool> pause_robot;
     std::atomic<bool> pause_reentry_requested_;
+    std::atomic<bool> cancel_requested_;
     std::map<int, std::vector<TopoEdge>> graph;
     int current_status; // 0 init, 1 load pnts ok, 2 running, 3 finished, 4 quit
 
@@ -1618,7 +1647,8 @@ private:
         GOAL_FAILED,
         GOAL_PATH_DEVIATED,
         GOAL_PAUSED,
-        GOAL_PAUSED_AFTER_PASS
+        GOAL_PAUSED_AFTER_PASS,
+        GOAL_CANCELED
     };
 
     void referenceStatusCallback(const geometry_msgs::Vector3Stamped::ConstPtr &msg)
@@ -1691,6 +1721,12 @@ private:
 
         while (ros::ok())
         {
+            if (cancel_requested_.load())
+            {
+                global_ac->cancelAllGoals();
+                stopRobot();
+                return GOAL_CANCELED;
+            }
             if (stop_and_quit)
             {
                 global_ac->cancelAllGoals();
@@ -1704,6 +1740,12 @@ private:
                 stopRobot();
                 while (pause_robot.load() && ros::ok())
                 {
+                    if (cancel_requested_.load())
+                    {
+                        global_ac->cancelAllGoals();
+                        stopRobot();
+                        return GOAL_CANCELED;
+                    }
                     stopRobot();
                     ros::Duration(0.2).sleep();
                 }
@@ -1933,6 +1975,14 @@ private:
                     continue;
                 }
 
+                if (goal_result == GOAL_CANCELED)
+                {
+                    stopRobot();
+                    active_next_index_ = -1;
+                    publishTopologyMarkers();
+                    return false;
+                }
+
                 const bool path_deviated = goal_result == GOAL_PATH_DEVIATED;
                 const bool paused = goal_result == GOAL_PAUSED ||
                                     goal_result == GOAL_PAUSED_AFTER_PASS;
@@ -2057,6 +2107,20 @@ private:
         global_ac->cancelAllGoals();
         stop_and_quit = true;
         stopRobot();
+    }
+
+    bool cancelNavigationCallback(std_srvs::Trigger::Request &,
+                                  std_srvs::Trigger::Response &res)
+    {
+        cancel_requested_.store(true);
+        pause_robot.store(false);
+        pause_reentry_requested_.store(false);
+        global_ac->cancelAllGoals();
+        stopRobot();
+        res.success = true;
+        res.message = "navigation cancellation requested";
+        ROS_INFO("Navigation cancellation requested by GUI.");
+        return true;
     }
 
     void stopRobot()
