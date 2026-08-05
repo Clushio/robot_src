@@ -256,6 +256,8 @@ class MyWindow(QWidget):
         self.dynamic_nav_buttons = []
         self.nav_shortcuts_enabled = False
         self.last_odom_monotonic = 0.0
+        self.current_odom_x = None
+        self.current_odom_y = None
         self.health_check_running = False
         self.estop_active = False
         self.shutdown_in_progress = False
@@ -1367,6 +1369,8 @@ class MyWindow(QWidget):
                 'pose_index': index,
                 'request_id': self.point_request_id(index, pose),
                 'name': label,
+                'x': pose['x'],
+                'y': pose['y'],
             }
             self.loop_point_a_combo.addItem(text, data)
             self.loop_point_b_combo.addItem(text, dict(data))
@@ -1593,9 +1597,8 @@ class MyWindow(QWidget):
         self.loop_pending_targets = None
         self.set_loop_controls_running(False)
         self.loop_state_label.setText('正在取消当前目标并停止循环…')
-        self.send_joy_message('NavPause')
-
         def cancel_navigation():
+            pause_fallback = False
             try:
                 result = subprocess.run(
                     ['rosservice', 'call', '/anav/cancel_navigation'],
@@ -1611,9 +1614,16 @@ class MyWindow(QWidget):
                     detail = (result.stderr or '').strip()
                     message = f'循环已停止；取消服务返回异常：{detail}'
                     level = 'warning'
+                    pause_fallback = True
             except (OSError, subprocess.TimeoutExpired) as error:
-                message = f'循环已停止；已发送暂停，但取消服务未确认：{error}'
+                message = f'循环已停止；取消服务未确认，已回退发送暂停：{error}'
                 level = 'warning'
+                pause_fallback = True
+            if pause_fallback and self.joy_pub is not None:
+                joy_msg = Joy()
+                joy_msg.axes = [0.0, 0.0, 0.0]
+                joy_msg.buttons = [1, 0, 0, 0, 0, 0]
+                self.joy_pub.publish(joy_msg)
             self.status_requested.emit(message, level)
 
         if navigation_active:
@@ -2191,6 +2201,8 @@ class MyWindow(QWidget):
         self.set_status('定位成功，已接收到有效位姿数据。', 'success')
 
     def update_odometry_display(self, x, y, yaw_degrees, linear_speed, angular_speed):
+        self.current_odom_x = x
+        self.current_odom_y = y
         self.odometry_label.setText(
             f'机器人位姿：X {x:.3f} m  ·  Y {y:.3f} m  ·  '
             f'朝向 {yaw_degrees:.1f}°  ·  线速度 {linear_speed:.3f} m/s  ·  '

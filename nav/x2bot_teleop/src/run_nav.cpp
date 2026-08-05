@@ -83,6 +83,7 @@ public:
           progress_distance_(0.05),
           progress_yaw_(6.0 * M_PI / 180.0),
           waypoint_reached_distance_(0.20),
+          fixed_route_final_xy_tolerance_(0.03),
           validate_pass_through_action_success_distance_(false),
           goal_timeout_(120.0),
           block_bidirectional_(true),
@@ -118,6 +119,9 @@ public:
         private_nh.param("progress_yaw", progress_yaw_, progress_yaw_);
         private_nh.param("waypoint_reached_distance", waypoint_reached_distance_,
                          waypoint_reached_distance_);
+        private_nh.param("fixed_route_final_xy_tolerance",
+                         fixed_route_final_xy_tolerance_,
+                         fixed_route_final_xy_tolerance_);
         private_nh.param("validate_pass_through_action_success_distance",
                          validate_pass_through_action_success_distance_,
                          validate_pass_through_action_success_distance_);
@@ -512,6 +516,7 @@ private:
     double progress_distance_;
     double progress_yaw_;
     double waypoint_reached_distance_;
+    double fixed_route_final_xy_tolerance_;
     bool validate_pass_through_action_success_distance_;
     double goal_timeout_;
     bool block_bidirectional_;
@@ -1807,6 +1812,12 @@ private:
 
             if (global_ac->waitForResult(ros::Duration(0.2)))
             {
+                if (cancel_requested_.load())
+                {
+                    global_ac->cancelAllGoals();
+                    stopRobot();
+                    return GOAL_CANCELED;
+                }
                 // pause() cancels the action from the independent Joy callback
                 // queue. Handle that cancellation as a resumable topology
                 // re-entry instead of a failed/blocked edge.
@@ -1886,6 +1897,24 @@ private:
             if (getCurrentRobotPose(current_pose))
             {
                 const double target_distance = distanceToNode(current_pose, target_index);
+                // Loop demonstrations care about reaching the fixed endpoint,
+                // but must not get stuck trying to trim a tiny final-yaw error.
+                // This check runs only after the goal has actually been sent, so
+                // a nearby first endpoint is still executed before the GUI moves
+                // on to the other station.
+                if (fixed_route && final_goal &&
+                    target_distance <= fixed_route_final_xy_tolerance_)
+                {
+                    global_ac->cancelGoal();
+                    stopRobot();
+                    ROS_INFO("Fixed route final P%d reached by XY distance %.3f m; "
+                             "accept endpoint without final-yaw oscillation.",
+                             target_index, target_distance);
+                    current_pose_index = target_index;
+                    active_next_index_ = -1;
+                    publishTopologyMarkers();
+                    return GOAL_REACHED;
+                }
                 if (!final_goal && target_distance <= waypoint_reached_distance_)
                 {
                     const bool bspline_tracking =
@@ -1998,6 +2027,13 @@ private:
                     ROS_INFO("Fixed route: resume the same topology goal P%d without replanning.",
                              next_index);
                     continue;
+                }
+                if (result == GOAL_CANCELED)
+                {
+                    stopRobot();
+                    active_next_index_ = -1;
+                    publishTopologyMarkers();
+                    return false;
                 }
 
                 stopRobot();
