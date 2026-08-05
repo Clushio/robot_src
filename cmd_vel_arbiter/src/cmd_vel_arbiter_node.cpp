@@ -240,8 +240,24 @@ class CmdVelArbiter {
     if (!stop_center_client_) {
       return false;
     }
-    if (!stop_center_client_->waitForResult(
-            ros::Duration(stop_and_center_wait_timeout_))) {
+
+    // FinishMotionCallback runs on the arbiter's single ROS callback thread.
+    // Keep the zero-speed heartbeat alive while the action client's private
+    // thread receives the stop-and-center result; otherwise Ranger's cmd_vel
+    // watchdog fires after 0.25 s and restarts the same centering operation.
+    const ros::WallTime deadline =
+        ros::WallTime::now() +
+        ros::WallDuration(stop_and_center_wait_timeout_);
+    ros::WallRate zero_rate(publish_rate_);
+    while (ros::ok() &&
+           !stop_center_client_->getState().isDone() &&
+           ros::WallTime::now() < deadline) {
+      PublishZero();
+      zero_rate.sleep();
+    }
+    PublishZero();
+
+    if (!stop_center_client_->getState().isDone()) {
       ROS_ERROR("stop-and-center did not finish within %.1f seconds",
                 stop_and_center_wait_timeout_);
       return false;

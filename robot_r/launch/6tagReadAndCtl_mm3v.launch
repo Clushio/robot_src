@@ -11,8 +11,12 @@
   <arg name="udp_feedback_host" default="192.168.3.17"/>
   <arg name="udp_feedback_port" default="22222"/>
   <arg name="udp_feedback_rate" default="2.0"/>
+  <arg name="tag_abort_timeout" default="10.0"/>
 
-  <node pkg="x2bot_teleop" type="TagCtl" name="TagCtl_service" output="screen"/>
+  <node pkg="x2bot_teleop" type="TagCtl" name="TagCtl_service" output="screen">
+    <!-- A single valid Tag frame clears the timer; only continuous loss aborts. -->
+    <param name="tag_abort_timeout" value="$(arg tag_abort_timeout)"/>
+  </node>
 
   <node pkg="robot_r" type="mm3v_serial_reader.py" name="mm3v_serial_reader" output="screen">
     <param name="port" value="$(arg port)"/>

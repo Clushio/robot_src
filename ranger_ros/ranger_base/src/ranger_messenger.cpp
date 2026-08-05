@@ -580,6 +580,15 @@ void RangerROSMessenger::CheckCmdVelWatchdog() {
     return;
   }
 
+  // A stop-and-center operation intentionally owns the chassis while the
+  // upstream caller waits for its result. Do not reinterpret that interval as
+  // a new cmd_vel timeout and reset the state machine/reason code.
+  if (StopCenterActive()) {
+    SendZeroMotionCommand();
+    watchdog_active_ = true;
+    return;
+  }
+
   if (!watchdog_active_) {
     ROS_WARN("/cmd_vel timeout after %.3f s; commanding zero speed",
              cmd_vel_timeout_);
@@ -750,6 +759,7 @@ void RangerROSMessenger::UpdateStopAndCenter(
       SendZeroMotionCommand();
       robot_->SetMotionMode(MotionState::MOTION_MODE_DUAL_ACKERMAN);
       stop_center_state_started_at_ = ros::WallTime::now();
+      last_mode_request_time_ = stop_center_state_started_at_;
       stop_center_state_ = StopCenterState::kWaitMode;
       break;
 
@@ -762,8 +772,15 @@ void RangerROSMessenger::UpdateStopAndCenter(
         centered_feedback_count_ = 0;
         stop_center_state_started_at_ = ros::WallTime::now();
         stop_center_state_ = StopCenterState::kCentering;
-      } else if (StateTimedOut(mode_switch_timeout_)) {
-        CompleteStopAndCenter(false, "dual-Ackermann mode switch timed out");
+      } else {
+        const ros::WallTime now = ros::WallTime::now();
+        if ((now - last_mode_request_time_).toSec() >= 0.1) {
+          robot_->SetMotionMode(MotionState::MOTION_MODE_DUAL_ACKERMAN);
+          last_mode_request_time_ = now;
+        }
+        if (StateTimedOut(mode_switch_timeout_)) {
+          CompleteStopAndCenter(false, "dual-Ackermann mode switch timed out");
+        }
       }
       break;
 
@@ -893,7 +910,8 @@ double RangerROSMessenger::CalculateSteeringAngle(geometry_msgs::Twist msg,
   l = robot_params_.wheelbase;
   w = robot_params_.track;
   phi_i = atan((l / 2) / (radius - w / 2));
-  ROS_INFO("command linear: %f, steering_angle: %f", linear, k * phi_i);
+  ROS_INFO_THROTTLE(0.5, "command linear: %f, steering_angle: %f", linear,
+                    k * phi_i);
   return k * phi_i;
 }
 

@@ -100,10 +100,12 @@ public:
         ROS_INFO(
             "[TAGCTL] Robot controller node initialized. kp=%.3f kp_x=%.3f min_speed=%.3f max_speed=%.3f "
             "arrival_y=%.3f arrival_x=%.3f yaw_kp=%.3f yaw_kd=%.3f max_ang=%.3f max_ang_acc=%.3f "
-            "yaw_stable_count=%d final_yaw_kp=%.3f final_yaw_cmd_deadband=%.3f enable_final_y_yaw_after_x_check=%d",
+            "yaw_stable_count=%d final_yaw_kp=%.3f final_yaw_cmd_deadband=%.3f "
+            "enable_final_y_yaw_after_x_check=%d data_timeout=%.1f tag_abort_timeout=%.1f",
             kp_, kp_x_, min_speed_, max_speed_, arrival_threshold_y_, arrival_threshold_x_,
             yaw_kp_, yaw_kd_, max_angular_speed_, max_angular_accel_,
-            yaw_stable_required_, final_yaw_kp_, final_yaw_cmd_deadband_, enable_final_y_yaw_after_x_check_);
+            yaw_stable_required_, final_yaw_kp_, final_yaw_cmd_deadband_,
+            enable_final_y_yaw_after_x_check_, data_timeout_, tag_abort_timeout_);
     }
 
     void run() {
