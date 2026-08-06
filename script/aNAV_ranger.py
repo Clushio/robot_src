@@ -238,6 +238,7 @@ class MyWindow(QWidget):
         self.finish_motion_proxy = None
         self.task_status_sub = None
         self.localization_odom_sub = None
+        self.base_odom_sub = None
         self.record_pose_sub = None
         self.record_marker_pub = None
         self.localizationProcess = None
@@ -256,8 +257,13 @@ class MyWindow(QWidget):
         self.dynamic_nav_buttons = []
         self.nav_shortcuts_enabled = False
         self.last_odom_monotonic = 0.0
+        self.last_base_odom_monotonic = 0.0
         self.current_odom_x = None
         self.current_odom_y = None
+        self.current_odom_yaw_degrees = None
+        self.current_linear_speed = 0.0
+        self.current_angular_speed = 0.0
+        self.odometry_lock = threading.Lock()
         self.health_check_running = False
         self.estop_active = False
         self.shutdown_in_progress = False
@@ -302,6 +308,9 @@ class MyWindow(QWidget):
                 )
                 self.localization_odom_sub = rospy.Subscriber(
                     '/Odometry', Odometry, self.on_localization_odometry, queue_size=1
+                )
+                self.base_odom_sub = rospy.Subscriber(
+                    '/odom', Odometry, self.on_base_odometry, queue_size=1
                 )
                 self.record_pose_sub = rospy.Subscriber(
                     RVIZ_RECORD_POSE_TOPIC,
@@ -2166,22 +2175,36 @@ class MyWindow(QWidget):
         self.record_marker_pub.publish(marker_array)
 
     def on_localization_odometry(self, message):
-        """LIO 仅在全局定位成功后发布 /Odometry。"""
-        self.last_odom_monotonic = time.monotonic()
+        """Use LIO /Odometry for the global pose; it does not publish twist."""
+        now = time.monotonic()
+        self.last_odom_monotonic = now
         q = message.pose.pose.orientation
         yaw = math.atan2(
             2.0 * (q.w * q.z + q.x * q.y),
             1.0 - 2.0 * (q.y * q.y + q.z * q.z),
         )
-        linear_speed = math.hypot(
-            message.twist.twist.linear.x, message.twist.twist.linear.y
-        )
+        x = message.pose.pose.position.x
+        y = message.pose.pose.position.y
+        yaw_degrees = math.degrees(yaw)
+        with self.odometry_lock:
+            self.current_odom_x = x
+            self.current_odom_y = y
+            self.current_odom_yaw_degrees = yaw_degrees
+            if (
+                self.last_base_odom_monotonic
+                and now - self.last_base_odom_monotonic <= 1.0
+            ):
+                linear_speed = self.current_linear_speed
+                angular_speed = self.current_angular_speed
+            else:
+                linear_speed = 0.0
+                angular_speed = 0.0
         self.odometry_requested.emit(
-            message.pose.pose.position.x,
-            message.pose.pose.position.y,
-            math.degrees(yaw),
+            x,
+            y,
+            yaw_degrees,
             linear_speed,
-            message.twist.twist.angular.z,
+            angular_speed,
         )
         process = self.localizationProcess
         if (
@@ -2193,6 +2216,30 @@ class MyWindow(QWidget):
         self.localization_ready = True
         self.localization_ready_requested.emit()
 
+    def on_base_odometry(self, message):
+        """Use chassis /odom for measured velocity and keep the LIO global pose."""
+        now = time.monotonic()
+        linear_speed = math.hypot(
+            message.twist.twist.linear.x, message.twist.twist.linear.y
+        )
+        angular_speed = message.twist.twist.angular.z
+        with self.odometry_lock:
+            self.last_base_odom_monotonic = now
+            self.current_linear_speed = linear_speed
+            self.current_angular_speed = angular_speed
+            x = self.current_odom_x
+            y = self.current_odom_y
+            yaw_degrees = self.current_odom_yaw_degrees
+        if (
+            x is None or y is None or yaw_degrees is None
+            or not self.last_odom_monotonic
+            or now - self.last_odom_monotonic > 2.0
+        ):
+            return
+        self.odometry_requested.emit(
+            x, y, yaw_degrees, linear_speed, angular_speed
+        )
+
     def mark_localization_ready(self):
         process = self.localizationProcess
         if process is None or process.poll() is not None:
@@ -2201,8 +2248,6 @@ class MyWindow(QWidget):
         self.set_status('定位成功，已接收到有效位姿数据。', 'success')
 
     def update_odometry_display(self, x, y, yaw_degrees, linear_speed, angular_speed):
-        self.current_odom_x = x
-        self.current_odom_y = y
         self.odometry_label.setText(
             f'机器人位姿：X {x:.3f} m  ·  Y {y:.3f} m  ·  '
             f'朝向 {yaw_degrees:.1f}°  ·  线速度 {linear_speed:.3f} m/s  ·  '
