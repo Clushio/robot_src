@@ -8,6 +8,7 @@
 #include <boost/bind.hpp>
 #include <actionlib/client/simple_action_client.h>
 #include <cmd_vel_arbiter/FinishMotion.h>
+#include <cmd_vel_arbiter/ArbitratedCommand.h>
 #include <geometry_msgs/Twist.h>
 #include <ranger_msgs/StopAndCenterAction.h>
 #include <ros/ros.h>
@@ -37,7 +38,8 @@ bool IsZero(const geometry_msgs::Twist& msg) {
 class CmdVelArbiter {
  public:
   CmdVelArbiter() : private_nh_("~") {
-    private_nh_.param("output_topic", output_topic_, std::string("/cmd_vel"));
+    private_nh_.param("output_topic", output_topic_,
+                      std::string("/cmd_vel/candidate"));
     private_nh_.param("publish_rate", publish_rate_, 50.0);
     private_nh_.param("switch_stop_cycles", switch_stop_cycles_, 1);
     private_nh_.param("stop_and_center_action", stop_and_center_action_,
@@ -64,7 +66,9 @@ class CmdVelArbiter {
     LoadInput("nav", "/cmd_vel/nav", 20, 0.25,
               0.30, 0.10, 4.10, false);
 
-    output_pub_ = nh_.advertise<geometry_msgs::Twist>(output_topic_, 1, false);
+    output_pub_ =
+        nh_.advertise<cmd_vel_arbiter::ArbitratedCommand>(output_topic_, 1,
+                                                          false);
     stop_center_client_.reset(
         new StopCenterClient(stop_and_center_action_, true));
     finish_motion_server_ = private_nh_.advertiseService(
@@ -82,7 +86,7 @@ class CmdVelArbiter {
   ~CmdVelArbiter() {
     geometry_msgs::Twist zero;
     for (int i = 0; i < 3; ++i) {
-      output_pub_.publish(zero);
+      PublishCommand(std::string(), zero);
     }
   }
 
@@ -363,12 +367,22 @@ class CmdVelArbiter {
     if (!IsZero(output)) {
       motion_since_center_ = true;
     }
-    output_pub_.publish(output);
+    PublishCommand(selected->name, output);
   }
 
   void PublishZero() {
     geometry_msgs::Twist zero;
-    output_pub_.publish(zero);
+    PublishCommand(active_input_, zero);
+  }
+
+  void PublishCommand(const std::string& source,
+                      const geometry_msgs::Twist& command) {
+    cmd_vel_arbiter::ArbitratedCommand output;
+    output.header.stamp = ros::Time::now();
+    output.header.frame_id = "base_link";
+    output.source = source;
+    output.command = command;
+    output_pub_.publish(output);
   }
 
   ros::NodeHandle nh_;

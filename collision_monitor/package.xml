@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>collision_monitor</name>
+  <version>0.1.0</version>
+  <description>Final footprint swept-volume safety gate for Ranger velocity commands.</description>
+
+  <maintainer email="jgl20@todo.todo">jgl20</maintainer>
+  <license>BSD</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+  <depend>cmd_vel_arbiter</depend>
+  <depend>costmap_2d</depend>
+  <depend>diagnostic_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>roscpp</depend>
+  <depend>tf2</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>visualization_msgs</depend>
+  <test_depend>rostest</test_depend>
+</package>

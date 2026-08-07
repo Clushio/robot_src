@@ -1,9 +1,8 @@
 # max_obstacle_height: 0.60  #假设机器人顶部还有其他东西，诸如机械臂
 
 # Obstacle Cost Shaping (http://wiki.ros.org/costmap_2d/hydro/inflation)
-# RANGER MINI 3.0: 720 mm (x, front/back) x 500 mm (y, left/right).
-# The chassis center is the coordinate origin, with +x forward and +y left.
-footprint: [[0.36, 0.25], [0.36, -0.25], [-0.36, -0.25], [-0.36, 0.25]]
+# The footprint is loaded from collision_monitor/config/robot_footprint.yaml
+# so costmaps and the final safety gate use one geometry definition.
 
 obstacle_layer:
   enabled:             true

@@ -1,4 +1,4 @@
-output_topic: /cmd_vel
+output_topic: /cmd_vel/candidate
 publish_rate: 50.0
 switch_stop_cycles: 1
 

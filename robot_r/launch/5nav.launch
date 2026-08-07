@@ -4,6 +4,8 @@
    <include file="$(find livx2pcl)/launch/repub_ang.launch" />
 <!-- move base plan and control -->
 	  <node pkg="mxb_move_base" type="mxb_move_base" respawn="false" name="mxb_move_base" output="screen">
+	    <rosparam file="$(find collision_monitor)/config/robot_footprint.yaml"             command="load" ns="global_costmap" />
+	    <rosparam file="$(find collision_monitor)/config/robot_footprint.yaml"             command="load" ns="local_costmap" />
 	    <rosparam file="$(find jgl_dwa_local_planner)/param/costmap_common_params.yaml"       command="load" ns="global_costmap" />
 	    <rosparam file="$(find jgl_dwa_local_planner)/param/costmap_common_params.yaml"       command="load" ns="local_costmap" />
 	    <rosparam file="$(find jgl_dwa_local_planner)/param/dwa_local_planner_params.yaml"    command="load" />

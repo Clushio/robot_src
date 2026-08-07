@@ -17,8 +17,9 @@
     <arg name="mode_switch_timeout" default="2.0" />
     <arg name="centering_timeout" default="3.0" />
 
-    <!-- The arbiter is the only publisher allowed to drive /cmd_vel. -->
+    <!-- The arbiter selects a source; collision_monitor is the only /cmd_vel publisher. -->
     <include file="$(find cmd_vel_arbiter)/launch/cmd_vel_arbiter.launch" />
+    <include file="$(find collision_monitor)/launch/collision_monitor.launch" />
 
     <node name="ranger_base_node" pkg="ranger_base" type="ranger_base_node" output="screen">
         <param name="port_name" type="string" value="$(arg port_name)" />

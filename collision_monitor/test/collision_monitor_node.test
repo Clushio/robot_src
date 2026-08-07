@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<launch>
+  <node name="collision_monitor_test_node" pkg="collision_monitor"
+        type="collision_monitor_node" output="screen" required="true">
+    <param name="candidate_topic" value="/collision_monitor_test/candidate" />
+    <param name="output_topic" value="/collision_monitor_test/output" />
+    <param name="odom_topic" value="/collision_monitor_test/odom" />
+    <param name="static_map_topic" value="/collision_monitor_test/static_map" />
+    <param name="local_map_topic" value="/collision_monitor_test/local_map" />
+    <param name="status_topic" value="/collision_monitor_test/status" />
+    <param name="marker_topic" value="/collision_monitor_test/markers" />
+    <param name="global_frame" value="collision_test_map" />
+    <param name="base_frame" value="collision_test_base" />
+    <param name="monitor_rate" value="50.0" />
+    <param name="candidate_timeout" value="0.25" />
+    <param name="odom_timeout" value="0.20" />
+    <param name="tf_timeout" value="0.30" />
+    <param name="local_map_timeout" value="0.30" />
+    <param name="clear_hold_time" value="0.15" />
+    <rosparam param="footprint">
+      [[0.36, 0.25], [0.36, -0.25], [-0.36, -0.25], [-0.36, 0.25]]
+    </rosparam>
+  </node>
+
+  <test test-name="collision_monitor_node_test" pkg="collision_monitor"
+        type="collision_monitor_node_test.py" time-limit="30.0" />
+</launch>

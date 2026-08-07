@@ -53,6 +53,7 @@
   <depend>pluginlib</depend>
   <depend>roscpp</depend>
   <depend>rviz</depend>
+  <exec_depend>collision_monitor</exec_depend>
 
 
   <!-- The export tag contains other, unspecified, tags -->

@@ -9,6 +9,12 @@ find_package(catkin REQUIRED COMPONENTS
   message_generation
   ranger_msgs
   roscpp
+  std_msgs
+)
+
+add_message_files(
+  FILES
+  ArbitratedCommand.msg
 )
 
 add_service_files(
@@ -16,10 +22,14 @@ add_service_files(
   FinishMotion.srv
 )
 
-generate_messages()
+generate_messages(
+  DEPENDENCIES
+  geometry_msgs
+  std_msgs
+)
 
 catkin_package(
-  CATKIN_DEPENDS actionlib geometry_msgs message_runtime ranger_msgs roscpp
+  CATKIN_DEPENDS actionlib geometry_msgs message_runtime ranger_msgs roscpp std_msgs
 )
 
 include_directories(${catkin_INCLUDE_DIRS})

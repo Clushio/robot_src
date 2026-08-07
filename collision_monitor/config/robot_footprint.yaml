@@ -1,0 +1,2 @@
+# RANGER MINI 3.0: 720 mm long by 500 mm wide, centered on base_link.
+footprint: [[0.36, 0.25], [0.36, -0.25], [-0.36, -0.25], [-0.36, 0.25]]
