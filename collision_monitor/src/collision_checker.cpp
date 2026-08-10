@@ -31,6 +31,31 @@ double Approach(double current, double target, double accel, double decel,
   return current + std::copysign(step, delta);
 }
 
+void ApproachLinearVelocity(double current_x, double current_y,
+                            double target_x, double target_y, double accel,
+                            double decel, double dt, double& next_x,
+                            double& next_y) {
+  const double current_speed = std::hypot(current_x, current_y);
+  const double target_speed = std::hypot(target_x, target_y);
+  const double dot = current_x * target_x + current_y * target_y;
+  const bool slowing_without_reversal =
+      target_speed < current_speed && dot >= 0.0;
+  const double rate = std::max(
+      slowing_without_reversal ? decel : accel, 1e-6);
+  const double delta_x = target_x - current_x;
+  const double delta_y = target_y - current_y;
+  const double delta_speed = std::hypot(delta_x, delta_y);
+  const double step = rate * dt;
+  if (delta_speed <= step || delta_speed <= kEpsilon) {
+    next_x = target_x;
+    next_y = target_y;
+    return;
+  }
+  const double ratio = step / delta_speed;
+  next_x = current_x + ratio * delta_x;
+  next_y = current_y + ratio * delta_y;
+}
+
 double Cross(double ax, double ay, double bx, double by, double cx,
              double cy) {
   return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
@@ -272,8 +297,9 @@ bool CollisionChecker::footprintIntersectsGrid(
 }
 
 CollisionResult CollisionChecker::simulate(
-    const MotionState& initial, double target_linear, double target_angular,
-    double hold_time, const nav_msgs::OccupancyGrid& static_map,
+    const MotionState& initial, double target_linear_x, double target_linear_y,
+    double target_angular_z, double hold_time,
+    const nav_msgs::OccupancyGrid& static_map,
     const GridPolicy& static_policy, const nav_msgs::OccupancyGrid& local_map,
     const GridPolicy& local_policy, const RolloutOptions& options) const {
   CollisionResult result;
@@ -300,14 +326,16 @@ CollisionResult CollisionChecker::simulate(
     return result;
   }
 
-  const double maximum_brake_time =
-      std::max(std::abs(target_linear) / std::max(options.linear_decel, 1e-6),
-               std::abs(target_angular) /
-                   std::max(options.angular_decel, 1e-6));
-  const double maximum_initial_brake_time =
-      std::max(std::abs(initial.linear) / std::max(options.linear_decel, 1e-6),
-               std::abs(initial.angular) /
-                   std::max(options.angular_decel, 1e-6));
+  const double maximum_brake_time = std::max(
+      std::hypot(target_linear_x, target_linear_y) /
+          std::max(options.linear_decel, 1e-6),
+      std::abs(target_angular_z) /
+          std::max(options.angular_decel, 1e-6));
+  const double maximum_initial_brake_time = std::max(
+      std::hypot(initial.linear_x, initial.linear_y) /
+          std::max(options.linear_decel, 1e-6),
+      std::abs(initial.angular_z) /
+          std::max(options.angular_decel, 1e-6));
   const double end_time = std::max(0.0, hold_time) +
                           std::max(maximum_brake_time,
                                    maximum_initial_brake_time) +
@@ -316,46 +344,75 @@ CollisionResult CollisionChecker::simulate(
   double time = 0.0;
   for (int step = 0; step < 20000 && time < end_time; ++step) {
     const bool holding = time < hold_time;
-    const double desired_linear = holding ? target_linear : 0.0;
-    const double desired_angular = holding ? target_angular : 0.0;
-    const double point_speed =
-        std::abs(state.linear) + circumscribed_radius_ * std::abs(state.angular);
+    const double desired_linear_x = holding ? target_linear_x : 0.0;
+    const double desired_linear_y = holding ? target_linear_y : 0.0;
+    const double desired_angular_z = holding ? target_angular_z : 0.0;
     double dt = std::max(0.001, options.max_dt);
-    if (point_speed > 1e-6) {
-      dt = std::min(dt, options.max_corner_step / point_speed);
+    for (int refinement = 0; refinement < 2; ++refinement) {
+      double estimate_linear_x = 0.0;
+      double estimate_linear_y = 0.0;
+      ApproachLinearVelocity(
+          state.linear_x, state.linear_y, desired_linear_x, desired_linear_y,
+          options.linear_accel, options.linear_decel, dt,
+          estimate_linear_x, estimate_linear_y);
+      const double estimate_angular_z =
+          Approach(state.angular_z, desired_angular_z, options.angular_accel,
+                   options.angular_decel, dt);
+      const double point_speed =
+          std::max(std::hypot(state.linear_x, state.linear_y),
+                   std::hypot(estimate_linear_x, estimate_linear_y)) +
+          circumscribed_radius_ *
+              std::max(std::abs(state.angular_z),
+                       std::abs(estimate_angular_z));
+      if (point_speed > 1e-6) {
+        dt = std::min(dt, options.max_corner_step / point_speed);
+      }
+      dt = std::max(0.001, dt);
     }
-    dt = std::max(0.001, dt);
 
-    const double next_linear =
-        Approach(state.linear, desired_linear, options.linear_accel,
-                 options.linear_decel, dt);
-    const double next_angular =
-        Approach(state.angular, desired_angular, options.angular_accel,
+    double next_linear_x = 0.0;
+    double next_linear_y = 0.0;
+    ApproachLinearVelocity(
+        state.linear_x, state.linear_y, desired_linear_x, desired_linear_y,
+        options.linear_accel, options.linear_decel, dt, next_linear_x,
+        next_linear_y);
+    const double next_angular_z =
+        Approach(state.angular_z, desired_angular_z, options.angular_accel,
                  options.angular_decel, dt);
-    const double linear = 0.5 * (state.linear + next_linear);
-    const double angular = 0.5 * (state.angular + next_angular);
+    const double linear_x = 0.5 * (state.linear_x + next_linear_x);
+    const double linear_y = 0.5 * (state.linear_y + next_linear_y);
+    const double angular_z = 0.5 * (state.angular_z + next_angular_z);
 
-    if (std::abs(angular) < 1e-8) {
-      state.pose.x += linear * std::cos(state.pose.yaw) * dt;
-      state.pose.y += linear * std::sin(state.pose.yaw) * dt;
+    const double c = std::cos(state.pose.yaw);
+    const double s = std::sin(state.pose.yaw);
+    if (std::abs(angular_z) < 1e-8) {
+      state.pose.x += (linear_x * c - linear_y * s) * dt;
+      state.pose.y += (linear_x * s + linear_y * c) * dt;
     } else {
-      const double next_yaw = state.pose.yaw + angular * dt;
-      state.pose.x +=
-          linear / angular * (std::sin(next_yaw) - std::sin(state.pose.yaw));
-      state.pose.y +=
-          -linear / angular * (std::cos(next_yaw) - std::cos(state.pose.yaw));
+      const double angle = angular_z * dt;
+      const double sin_angle = std::sin(angle);
+      const double one_minus_cos = 1.0 - std::cos(angle);
+      const double body_x =
+          (sin_angle * linear_x - one_minus_cos * linear_y) / angular_z;
+      const double body_y =
+          (one_minus_cos * linear_x + sin_angle * linear_y) / angular_z;
+      state.pose.x += c * body_x - s * body_y;
+      state.pose.y += s * body_x + c * body_y;
+      const double next_yaw = state.pose.yaw + angle;
       state.pose.yaw = NormalizeAngle(next_yaw);
     }
-    state.linear = next_linear;
-    state.angular = next_angular;
+    state.linear_x = next_linear_x;
+    state.linear_y = next_linear_y;
+    state.angular_z = next_angular_z;
     time += dt;
     result.poses.push_back(state.pose);
 
     if (check_collision(time)) {
       return result;
     }
-    if (!holding && std::abs(state.linear) <= options.stopped_linear &&
-        std::abs(state.angular) <= options.stopped_angular) {
+    if (!holding && std::abs(state.linear_x) <= options.stopped_linear &&
+        std::abs(state.linear_y) <= options.stopped_linear &&
+        std::abs(state.angular_z) <= options.stopped_angular) {
       break;
     }
   }

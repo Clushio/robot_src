@@ -88,10 +88,10 @@ TEST(CollisionCheckerTest, RotationSweepFindsCornerCollision) {
     SetCell(static_map, 0.24, direction * 0.34, 100);
 
     MotionState initial;
-    initial.angular = direction * 0.25;
+    initial.angular_z = direction * 0.25;
     CollisionResult result = checker.simulate(
-        initial, 0.0, initial.angular, 2.0, static_map, StaticPolicy(),
-        local_map, LocalPolicy(), options);
+        initial, 0.0, 0.0, initial.angular_z, 2.0, static_map,
+        StaticPolicy(), local_map, LocalPolicy(), options);
     EXPECT_TRUE(result.collision) << "direction=" << direction;
     EXPECT_TRUE(result.static_collision) << "direction=" << direction;
     EXPECT_GT(result.collision_time, 0.0) << "direction=" << direction;
@@ -118,13 +118,13 @@ TEST(CollisionCheckerTest, StraightAndArcRollouts) {
   MotionState initial;
   RolloutOptions options;
   CollisionResult straight = checker.simulate(
-      initial, 0.2, 0.0, 3.0, static_map, StaticPolicy(), local_map,
+      initial, 0.2, 0.0, 0.0, 3.0, static_map, StaticPolicy(), local_map,
       LocalPolicy(), options);
   EXPECT_TRUE(straight.collision);
   EXPECT_TRUE(straight.local_collision);
 
   CollisionResult arc = checker.simulate(
-      initial, 0.2, 0.4, 2.0, static_map, StaticPolicy(), local_map,
+      initial, 0.2, 0.0, 0.4, 2.0, static_map, StaticPolicy(), local_map,
       LocalPolicy(), options);
   EXPECT_FALSE(arc.collision);
 }
@@ -136,13 +136,79 @@ TEST(CollisionCheckerTest, ZeroTargetStillChecksMeasuredStoppingMotion) {
   SetCell(static_map, 0.43, 0.0, 100);
 
   MotionState initial;
-  initial.linear = 0.2;
+  initial.linear_x = 0.2;
   RolloutOptions options;
   options.linear_decel = 0.5;
   CollisionResult result = checker.simulate(
-      initial, initial.linear, 0.0, 0.30, static_map, StaticPolicy(), local_map,
-      LocalPolicy(), options);
+      initial, initial.linear_x, 0.0, 0.0, 0.30, static_map, StaticPolicy(),
+      local_map, LocalPolicy(), options);
   EXPECT_TRUE(result.collision);
+}
+
+TEST(CollisionCheckerTest, ZeroTargetChecksMeasuredLateralStoppingMotion) {
+  CollisionChecker checker = MakeChecker(0.08);
+  nav_msgs::OccupancyGrid static_map = MakeGrid(600, 600, 0.01);
+  nav_msgs::OccupancyGrid local_map = MakeGrid(600, 600, 0.01);
+  SetCell(static_map, 0.0, 0.34, 100);
+
+  MotionState initial;
+  initial.linear_y = 0.05;
+  RolloutOptions options;
+  options.linear_decel = 0.5;
+  CollisionResult result = checker.simulate(
+      initial, 0.0, initial.linear_y, 0.0, 0.30, static_map,
+      StaticPolicy(), local_map, LocalPolicy(), options);
+  EXPECT_TRUE(result.collision);
+  EXPECT_GT(result.collision_time, 0.0);
+}
+
+TEST(CollisionCheckerTest, TagSupportsReverseAndLateralSweeps) {
+  CollisionChecker checker = MakeChecker(0.08);
+  nav_msgs::OccupancyGrid empty_map = MakeGrid(600, 600, 0.01);
+  RolloutOptions options;
+
+  for (const double direction : {-1.0, 1.0}) {
+    nav_msgs::OccupancyGrid lateral_map = empty_map;
+    SetCell(lateral_map, 0.0, direction * 0.40, 100);
+    MotionState initial;
+    CollisionResult lateral = checker.simulate(
+        initial, 0.0, direction * 0.05, 0.0, 2.0, empty_map,
+        StaticPolicy(), lateral_map, LocalPolicy(), options);
+    EXPECT_TRUE(lateral.collision) << "lateral direction=" << direction;
+
+    nav_msgs::OccupancyGrid reverse_map = empty_map;
+    SetCell(reverse_map, direction * 0.50, 0.0, 100);
+    CollisionResult longitudinal = checker.simulate(
+        initial, direction * 0.05, 0.0, 0.0, 2.0, empty_map,
+        StaticPolicy(), reverse_map, LocalPolicy(), options);
+    EXPECT_TRUE(longitudinal.collision)
+        << "longitudinal direction=" << direction;
+  }
+}
+
+TEST(CollisionCheckerTest, CombinedTagTranslationAndYawUsesAllDofs) {
+  CollisionChecker checker = MakeChecker(0.08);
+  nav_msgs::OccupancyGrid static_map = MakeGrid(600, 600, 0.01);
+  nav_msgs::OccupancyGrid local_map = MakeGrid(600, 600, 0.01);
+  SetCell(local_map, 0.38, 0.38, 100);
+
+  MotionState initial;
+  RolloutOptions options;
+  CollisionResult result = checker.simulate(
+      initial, 0.05, 0.04, 0.15, 2.0, static_map, StaticPolicy(),
+      local_map, LocalPolicy(), options);
+  EXPECT_TRUE(result.collision);
+}
+
+TEST(CollisionCheckerTest, NavigationAndTagUseDifferentPadding) {
+  CollisionChecker navigation_checker = MakeChecker(0.15);
+  CollisionChecker tag_checker = MakeChecker(0.08);
+  nav_msgs::OccupancyGrid grid = MakeGrid(600, 600, 0.01);
+  SetCell(grid, 0.47, 0.0, 100);
+
+  Pose2D pose;
+  EXPECT_TRUE(navigation_checker.poseCollides(pose, grid, StaticPolicy()));
+  EXPECT_FALSE(tag_checker.poseCollides(pose, grid, StaticPolicy()));
 }
 
 TEST(CollisionCheckerTest, StaticUnknownBlocksButLocalUnknownDoesNot) {

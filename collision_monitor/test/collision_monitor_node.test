@@ -17,6 +17,10 @@
     <param name="tf_timeout" value="0.30" />
     <param name="local_map_timeout" value="0.30" />
     <param name="clear_hold_time" value="0.15" />
+    <param name="source_transition_hold_time" value="0.10" />
+    <param name="navigation_footprint_padding" value="0.15" />
+    <param name="tag_footprint_padding" value="0.08" />
+    <param name="teleop_footprint_padding" value="0.15" />
     <rosparam param="footprint">
       [[0.36, 0.25], [0.36, -0.25], [-0.36, -0.25], [-0.36, 0.25]]
     </rosparam>

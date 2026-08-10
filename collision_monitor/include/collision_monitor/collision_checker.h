@@ -17,8 +17,9 @@ struct Pose2D {
 
 struct MotionState {
   Pose2D pose;
-  double linear = 0.0;
-  double angular = 0.0;
+  double linear_x = 0.0;
+  double linear_y = 0.0;
+  double angular_z = 0.0;
 };
 
 struct GridPolicy {
@@ -60,8 +61,9 @@ class CollisionChecker {
                     const GridPolicy& policy) const;
 
   CollisionResult simulate(const MotionState& initial,
-                           double target_linear,
-                           double target_angular,
+                           double target_linear_x,
+                           double target_linear_y,
+                           double target_angular_z,
                            double hold_time,
                            const nav_msgs::OccupancyGrid& static_map,
                            const GridPolicy& static_policy,

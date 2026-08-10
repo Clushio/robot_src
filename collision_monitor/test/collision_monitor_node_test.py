@@ -23,6 +23,9 @@ class CollisionMonitorNodeTest(unittest.TestCase):
         self._publish_local = False
         self._publish_tf = False
         self._candidate = None
+        self._odom_linear_x = 0.0
+        self._odom_linear_y = 0.0
+        self._odom_angular_z = 0.0
         self._local_map = self._make_map()
         self._last_output = None
         self._last_status = None
@@ -105,6 +108,9 @@ class CollisionMonitorNodeTest(unittest.TestCase):
                 publish_local = self._publish_local
                 publish_tf = self._publish_tf
                 local_map = copy.deepcopy(self._local_map)
+                odom_linear_x = self._odom_linear_x
+                odom_linear_y = self._odom_linear_y
+                odom_angular_z = self._odom_angular_z
 
             if candidate is not None:
                 candidate.header.stamp = stamp
@@ -114,6 +120,9 @@ class CollisionMonitorNodeTest(unittest.TestCase):
                 odom.header.stamp = stamp
                 odom.header.frame_id = 'collision_test_map'
                 odom.child_frame_id = 'collision_test_base'
+                odom.twist.twist.linear.x = odom_linear_x
+                odom.twist.twist.linear.y = odom_linear_y
+                odom.twist.twist.angular.z = odom_angular_z
                 self._odom_pub.publish(odom)
             if publish_local:
                 local_map.header.stamp = stamp
@@ -127,13 +136,17 @@ class CollisionMonitorNodeTest(unittest.TestCase):
                 self._tf_broadcaster.sendTransform(transform)
             rate.sleep()
 
-    def _set_command(self, source, linear_x=0.0, angular_z=0.0):
+    def _set_command(self, source, linear_x=0.0, linear_y=0.0,
+                     angular_z=0.0):
         command = ArbitratedCommand()
         command.source = source
         command.command.linear.x = linear_x
+        command.command.linear.y = linear_y
         command.command.angular.z = angular_z
         with self._lock:
             self._candidate = command
+            self._last_output = None
+            self._last_status = None
 
     def _wait_for_state(self, expected, expected_reason=None, timeout=3.0):
         deadline = time.monotonic() + timeout
@@ -150,6 +163,21 @@ class CollisionMonitorNodeTest(unittest.TestCase):
             current = copy.deepcopy(self._last_status)
         self.fail('expected state {} reason {}, got {}'.format(
             expected, expected_reason, current))
+
+    def _wait_for_ok_output(self, linear_x, linear_y, timeout=3.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and not rospy.is_shutdown():
+            with self._lock:
+                status = copy.deepcopy(self._last_status)
+                output = copy.deepcopy(self._last_output)
+            if (status is not None and status.get('state') == 'OK' and
+                    output is not None and
+                    abs(output.linear.x - linear_x) < 0.001 and
+                    abs(output.linear.y - linear_y) < 0.001):
+                return status, output
+            time.sleep(0.02)
+        self.fail('expected OK output ({}, {}), got status={} output={}'.format(
+            linear_x, linear_y, status, output))
 
     def test_readiness_bypass_limits_speed_levels_and_timeout(self):
         self._set_command('nav', linear_x=0.10)
@@ -181,7 +209,7 @@ class CollisionMonitorNodeTest(unittest.TestCase):
         self._wait_for_state('OK', timeout=3.0)
 
         obstacle_map = self._make_map()
-        self._set_cell(obstacle_map, 0.69, 0.0, 100)
+        self._set_cell(obstacle_map, 0.76, 0.0, 100)
         with self._lock:
             self._local_map = obstacle_map
         status, output = self._wait_for_state('SLOWDOWN')
@@ -193,6 +221,44 @@ class CollisionMonitorNodeTest(unittest.TestCase):
         status, output = self._wait_for_state('OK', timeout=3.0)
         self.assertAlmostEqual(1.0, float(status['scale']), places=2)
         self.assertAlmostEqual(0.20, output.linear.x, places=2)
+
+        with self._lock:
+            self._odom_linear_x = 0.03
+        self._set_command('tag', linear_y=0.05)
+        status, output = self._wait_for_state(
+            'PROFILE_TRANSITION', 'WAITING_FOR_ROBOT_TO_STOP')
+        self.assertAlmostEqual(0.0, output.linear.y)
+        self.assertEqual('transition', status['profile'])
+        self.assertAlmostEqual(0.15, float(status['footprint_padding']),
+                               places=2)
+        with self._lock:
+            self._odom_linear_x = 0.0
+        status, output = self._wait_for_state('OK', timeout=3.0)
+        self.assertEqual('tag', status['profile'])
+        self.assertAlmostEqual(0.08, float(status['footprint_padding']),
+                               places=2)
+        self.assertAlmostEqual(0.05, output.linear.y, places=3)
+
+        self._set_command('tag', linear_x=-0.05)
+        status, output = self._wait_for_ok_output(-0.05, 0.0)
+        self.assertAlmostEqual(-0.05, output.linear.x, places=3)
+        self.assertAlmostEqual(0.0, output.linear.y, places=3)
+
+        self._set_command('nav', linear_y=0.01)
+        status, output = self._wait_for_state(
+            'UNSUPPORTED_MOTION', 'UNSUPPORTED_COMMAND_DOF')
+        self.assertAlmostEqual(0.0, output.linear.y)
+
+        # A small residual lateral odom value must not deadlock the return
+        # from tag to navigation after the stationary transition threshold.
+        with self._lock:
+            self._odom_linear_y = 0.005
+        self._set_command('nav', linear_x=0.10)
+        status, output = self._wait_for_state('PROFILE_TRANSITION')
+        self.assertAlmostEqual(0.0, output.linear.x)
+        status, output = self._wait_for_ok_output(0.10, 0.0)
+        with self._lock:
+            self._odom_linear_y = 0.0
 
         with self._lock:
             self._candidate = None
@@ -225,6 +291,7 @@ class CollisionMonitorNodeTest(unittest.TestCase):
         static_map.header.stamp = rospy.Time.now()
         self._static_pub.publish(static_map)
 
+        self._set_command('tag', linear_y=0.03)
         with self._lock:
             self._publish_local = False
         status, output = self._wait_for_state(

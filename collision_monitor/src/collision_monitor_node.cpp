@@ -64,6 +64,17 @@ std::string ToString(double value) {
   return buffer;
 }
 
+struct MotionProfile {
+  std::string name;
+  double footprint_padding = 0.15;
+  double max_linear_x = 0.0;
+  double max_linear_y = 0.0;
+  double max_angular_z = 0.0;
+  bool allow_reverse = false;
+  bool allow_lateral = false;
+  CollisionChecker checker;
+};
+
 }  // namespace
 
 class CollisionMonitorNode {
@@ -93,9 +104,12 @@ class CollisionMonitorNode {
                                  &CollisionMonitorNode::TimerCallback, this);
 
     ROS_INFO(
-        "collision_monitor: %s -> %s at %.1f Hz, frames=%s/%s, padding=%.3f",
+        "collision_monitor: %s -> %s at %.1f Hz, frames=%s/%s, "
+        "padding(nav/tag/teleop)=%.3f/%.3f/%.3f",
         candidate_topic_.c_str(), output_topic_.c_str(), monitor_rate_,
-        global_frame_.c_str(), base_frame_.c_str(), footprint_padding_);
+        global_frame_.c_str(), base_frame_.c_str(),
+        navigation_profile_.footprint_padding,
+        tag_profile_.footprint_padding, teleop_profile_.footprint_padding);
   }
 
   ~CollisionMonitorNode() {
@@ -107,6 +121,16 @@ class CollisionMonitorNode {
 
  private:
   void LoadParameters() {
+    navigation_profile_.name = "nav";
+    navigation_profile_.allow_reverse = false;
+    navigation_profile_.allow_lateral = false;
+    tag_profile_.name = "tag";
+    tag_profile_.allow_reverse = true;
+    tag_profile_.allow_lateral = true;
+    teleop_profile_.name = "teleop";
+    teleop_profile_.allow_reverse = false;
+    teleop_profile_.allow_lateral = false;
+
     private_nh_.param("candidate_topic", candidate_topic_,
                       std::string("/cmd_vel/candidate"));
     private_nh_.param("output_topic", output_topic_, std::string("/cmd_vel"));
@@ -123,23 +147,50 @@ class CollisionMonitorNode {
     private_nh_.param("base_frame", base_frame_, std::string("base_link"));
     private_nh_.param("teleop_source", teleop_source_,
                       std::string("teleop"));
+    private_nh_.param("tag_source", tag_source_, std::string("tag"));
+    private_nh_.param("navigation_source", navigation_source_,
+                      std::string("nav"));
 
     private_nh_.param("monitor_rate", monitor_rate_, 50.0);
     private_nh_.param("candidate_timeout", candidate_timeout_, 0.25);
     private_nh_.param("odom_timeout", odom_timeout_, 0.20);
     private_nh_.param("tf_timeout", tf_timeout_, 0.30);
     private_nh_.param("local_map_timeout", local_map_timeout_, 0.30);
-    private_nh_.param("footprint_padding", footprint_padding_, 0.15);
-    private_nh_.param("max_navigation_linear_x", max_navigation_linear_x_,
-                      0.20);
-    private_nh_.param("max_navigation_angular_z", max_navigation_angular_z_,
-                      0.50);
-    private_nh_.param("max_teleop_linear_x", max_teleop_linear_x_, 0.35);
-    private_nh_.param("max_teleop_angular_z", max_teleop_angular_z_, 1.10);
+    double legacy_padding = 0.15;
+    private_nh_.param("footprint_padding", legacy_padding, 0.15);
+    navigation_profile_.footprint_padding = legacy_padding;
+    teleop_profile_.footprint_padding = legacy_padding;
+    tag_profile_.footprint_padding = 0.08;
+    private_nh_.param("navigation_footprint_padding",
+                      navigation_profile_.footprint_padding, legacy_padding);
+    private_nh_.param("tag_footprint_padding",
+                      tag_profile_.footprint_padding, 0.08);
+    private_nh_.param("teleop_footprint_padding",
+                      teleop_profile_.footprint_padding, legacy_padding);
+
+    private_nh_.param("max_navigation_linear_x",
+                      navigation_profile_.max_linear_x, 0.20);
+    navigation_profile_.max_linear_y = 0.0;
+    private_nh_.param("max_navigation_angular_z",
+                      navigation_profile_.max_angular_z, 0.50);
+    private_nh_.param("max_tag_linear_x", tag_profile_.max_linear_x, 0.05);
+    private_nh_.param("max_tag_linear_y", tag_profile_.max_linear_y, 0.05);
+    private_nh_.param("max_tag_angular_z", tag_profile_.max_angular_z, 0.15);
+    private_nh_.param("max_teleop_linear_x", teleop_profile_.max_linear_x,
+                      0.35);
+    teleop_profile_.max_linear_y = 0.0;
+    private_nh_.param("max_teleop_angular_z", teleop_profile_.max_angular_z,
+                      1.10);
     private_nh_.param("zero_epsilon", zero_epsilon_, 1e-4);
     private_nh_.param("reaction_time", reaction_time_, 0.30);
     private_nh_.param("preview_time", preview_time_, 2.0);
     private_nh_.param("clear_hold_time", clear_hold_time_, 0.50);
+    private_nh_.param("source_transition_hold_time",
+                      source_transition_hold_time_, 0.20);
+    private_nh_.param("transition_stopped_linear",
+                      transition_stopped_linear_, 0.01);
+    private_nh_.param("transition_stopped_angular",
+                      transition_stopped_angular_, 0.02);
     private_nh_.param("max_pose_jump_distance", max_pose_jump_distance_,
                       0.50);
     private_nh_.param("max_pose_jump_yaw", max_pose_jump_yaw_, 0.80);
@@ -174,15 +225,23 @@ class CollisionMonitorNode {
         !finite_positive(candidate_timeout_) ||
         !finite_positive(odom_timeout_) || !finite_positive(tf_timeout_) ||
         !finite_positive(local_map_timeout_) ||
-        !finite_nonnegative(footprint_padding_) ||
-        !finite_nonnegative(max_navigation_linear_x_) ||
-        !finite_nonnegative(max_navigation_angular_z_) ||
-        !finite_nonnegative(max_teleop_linear_x_) ||
-        !finite_nonnegative(max_teleop_angular_z_) ||
+        !finite_nonnegative(navigation_profile_.footprint_padding) ||
+        !finite_nonnegative(tag_profile_.footprint_padding) ||
+        !finite_nonnegative(teleop_profile_.footprint_padding) ||
+        !finite_nonnegative(navigation_profile_.max_linear_x) ||
+        !finite_nonnegative(navigation_profile_.max_angular_z) ||
+        !finite_nonnegative(tag_profile_.max_linear_x) ||
+        !finite_nonnegative(tag_profile_.max_linear_y) ||
+        !finite_nonnegative(tag_profile_.max_angular_z) ||
+        !finite_nonnegative(teleop_profile_.max_linear_x) ||
+        !finite_nonnegative(teleop_profile_.max_angular_z) ||
         !finite_positive(zero_epsilon_) ||
         !finite_nonnegative(reaction_time_) ||
         !finite_nonnegative(preview_time_) ||
         !finite_nonnegative(clear_hold_time_) ||
+        !finite_nonnegative(source_transition_hold_time_) ||
+        !finite_positive(transition_stopped_linear_) ||
+        !finite_positive(transition_stopped_angular_) ||
         !finite_positive(max_pose_jump_distance_) ||
         !finite_positive(max_pose_jump_yaw_) ||
         !finite_nonnegative(pose_jump_hold_time_) ||
@@ -204,10 +263,6 @@ class CollisionMonitorNode {
     reaction_time_ = std::max(0.0, reaction_time_);
     preview_time_ = std::max(0.0, preview_time_);
     clear_hold_time_ = std::max(0.0, clear_hold_time_);
-    max_navigation_linear_x_ = std::max(0.0, max_navigation_linear_x_);
-    max_navigation_angular_z_ = std::max(0.0, max_navigation_angular_z_);
-    max_teleop_linear_x_ = std::max(0.0, max_teleop_linear_x_);
-    max_teleop_angular_z_ = std::max(0.0, max_teleop_angular_z_);
     static_policy_.occupied_threshold =
         std::max(0, std::min(100, static_policy_.occupied_threshold));
     local_policy_.occupied_threshold =
@@ -229,10 +284,42 @@ class CollisionMonitorNode {
       throw;
     }
     std::string error;
-    if (!checker_.setFootprint(footprint, footprint_padding_, &error)) {
-      ROS_FATAL("collision_monitor: invalid footprint: %s", error.c_str());
-      throw std::runtime_error(error);
+    MotionProfile* profiles[] = {
+        &navigation_profile_, &tag_profile_, &teleop_profile_};
+    for (MotionProfile* profile : profiles) {
+      if (!profile->checker.setFootprint(
+              footprint, profile->footprint_padding, &error)) {
+        ROS_FATAL("collision_monitor: invalid %s footprint: %s",
+                  profile->name.c_str(), error.c_str());
+        throw std::runtime_error(error);
+      }
     }
+  }
+
+  MotionProfile* ProfileForSource(const std::string& source) {
+    if (source == navigation_source_) {
+      return &navigation_profile_;
+    }
+    if (source == tag_source_) {
+      return &tag_profile_;
+    }
+    if (source == teleop_source_) {
+      return &teleop_profile_;
+    }
+    return nullptr;
+  }
+
+  const MotionProfile* ProfileForSource(const std::string& source) const {
+    if (source == navigation_source_) {
+      return &navigation_profile_;
+    }
+    if (source == tag_source_) {
+      return &tag_profile_;
+    }
+    if (source == teleop_source_) {
+      return &teleop_profile_;
+    }
+    return nullptr;
   }
 
   void CandidateCallback(
@@ -359,43 +446,102 @@ class CollisionMonitorNode {
     return GetRobotPose(pose, reason);
   }
 
-  bool footprintReady() const { return checker_.footprint().size() >= 3; }
+  bool footprintReady() const {
+    return navigation_profile_.checker.footprint().size() >= 3 &&
+           tag_profile_.checker.footprint().size() >= 3 &&
+           teleop_profile_.checker.footprint().size() >= 3;
+  }
 
-  bool SupportedMotion(const std::string& source,
-                       const geometry_msgs::Twist& command,
-                       const geometry_msgs::Twist& measured,
-                       std::string& reason) const {
-    if (!IsFinite(command) || !IsFinite(measured)) {
-      reason = "NON_FINITE_MOTION";
+  bool SupportedCommand(const MotionProfile& profile,
+                        const geometry_msgs::Twist& command,
+                        std::string& reason) const {
+    if (!IsFinite(command)) {
+      reason = "NON_FINITE_COMMAND";
       return false;
     }
-    if (command.linear.x < -zero_epsilon_ ||
-        std::abs(command.linear.y) > zero_epsilon_ ||
-        std::abs(command.linear.z) > zero_epsilon_ ||
+    if (std::abs(command.linear.z) > zero_epsilon_ ||
         std::abs(command.angular.x) > zero_epsilon_ ||
         std::abs(command.angular.y) > zero_epsilon_) {
       reason = "UNSUPPORTED_COMMAND_DOF";
       return false;
     }
-    const bool is_teleop = source == teleop_source_;
-    const double max_linear = is_teleop ? max_teleop_linear_x_
-                                        : max_navigation_linear_x_;
-    const double max_angular = is_teleop ? max_teleop_angular_z_
-                                         : max_navigation_angular_z_;
-    if (command.linear.x > max_linear + zero_epsilon_ ||
-        std::abs(command.angular.z) > max_angular + zero_epsilon_) {
+    if ((!profile.allow_reverse && command.linear.x < -zero_epsilon_) ||
+        (!profile.allow_lateral &&
+         std::abs(command.linear.y) > zero_epsilon_)) {
+      reason = "UNSUPPORTED_COMMAND_DOF";
+      return false;
+    }
+    if (std::abs(command.linear.x) >
+            profile.max_linear_x + zero_epsilon_ ||
+        std::abs(command.linear.y) >
+            profile.max_linear_y + zero_epsilon_ ||
+        std::abs(command.angular.z) >
+            profile.max_angular_z + zero_epsilon_) {
       reason = "COMMAND_LIMIT_EXCEEDED";
       return false;
     }
-    if (measured.linear.x < -zero_epsilon_ ||
-        std::abs(measured.linear.y) > zero_epsilon_ ||
-        std::abs(measured.linear.z) > zero_epsilon_ ||
-        std::abs(measured.angular.x) > zero_epsilon_ ||
-        std::abs(measured.angular.y) > zero_epsilon_) {
+    return true;
+  }
+
+  bool SupportedMeasuredMotion(const MotionProfile& profile,
+                               const geometry_msgs::Twist& measured,
+                               std::string& reason) const {
+    if (!IsFinite(measured)) {
+      reason = "NON_FINITE_MEASURED_MOTION";
+      return false;
+    }
+    if (std::abs(measured.linear.z) > transition_stopped_linear_ ||
+        std::abs(measured.angular.x) > transition_stopped_angular_ ||
+        std::abs(measured.angular.y) > transition_stopped_angular_) {
+      reason = "UNSUPPORTED_MEASURED_DOF";
+      return false;
+    }
+    if ((!profile.allow_reverse &&
+         measured.linear.x < -transition_stopped_linear_) ||
+        (!profile.allow_lateral &&
+         std::abs(measured.linear.y) > transition_stopped_linear_)) {
       reason = "UNSUPPORTED_MEASURED_DOF";
       return false;
     }
     return true;
+  }
+
+  bool MeasuredStopped(const geometry_msgs::Twist& measured) const {
+    return std::hypot(measured.linear.x, measured.linear.y) <=
+               transition_stopped_linear_ &&
+           std::abs(measured.linear.z) <= transition_stopped_linear_ &&
+           std::abs(measured.angular.x) <= transition_stopped_angular_ &&
+           std::abs(measured.angular.y) <= transition_stopped_angular_ &&
+           std::abs(measured.angular.z) <= transition_stopped_angular_;
+  }
+
+  bool SourceTransitionBlocks(const std::string& source,
+                              const ros::WallTime& now) {
+    if (source == active_source_ && pending_source_.empty()) {
+      return false;
+    }
+    if (pending_source_ != source) {
+      pending_source_ = source;
+      transition_stopped_since_ = ros::WallTime();
+      ForceStoppedScale();
+    }
+    if (!MeasuredStopped(odom_.twist.twist)) {
+      transition_stopped_since_ = ros::WallTime();
+      return true;
+    }
+    if (transition_stopped_since_.isZero()) {
+      transition_stopped_since_ = now;
+      return true;
+    }
+    if ((now - transition_stopped_since_).toSec() <
+        source_transition_hold_time_) {
+      return true;
+    }
+    active_source_ = source;
+    pending_source_.clear();
+    transition_stopped_since_ = ros::WallTime();
+    ForceStoppedScale();
+    return false;
   }
 
   double ApplyScaleHysteresis(double desired, const ros::WallTime& now) {
@@ -473,6 +619,9 @@ class CollisionMonitorNode {
         output = command;
         state = "MANUAL_BYPASS";
         scale = 1.0;
+        active_source_ = teleop_source_;
+        pending_source_.clear();
+        transition_stopped_since_ = ros::WallTime();
         applied_scale_ = 1.0;
         scale_increase_since_ = ros::WallTime();
         ROS_WARN_THROTTLE(1.0,
@@ -487,9 +636,18 @@ class CollisionMonitorNode {
       return;
     }
 
+    MotionProfile* profile = ProfileForSource(candidate_.source);
+    if (profile == nullptr) {
+      ForceStoppedScale();
+      state = "UNSUPPORTED_MOTION";
+      reason = "UNKNOWN_COMMAND_SOURCE";
+      Publish(output, state, reason, scale, collision_time, visualization,
+              candidate_.source);
+      return;
+    }
+
     std::string unsupported_reason;
-    if (!SupportedMotion(candidate_.source, command, odom_.twist.twist,
-                         unsupported_reason)) {
+    if (!SupportedCommand(*profile, command, unsupported_reason)) {
       ForceStoppedScale();
       state = "UNSUPPORTED_MOTION";
       reason = unsupported_reason;
@@ -500,12 +658,48 @@ class CollisionMonitorNode {
 
     MotionState initial;
     initial.pose = current_pose;
-    initial.linear = odom_.twist.twist.linear.x;
-    initial.angular = odom_.twist.twist.angular.z;
+    initial.linear_x = odom_.twist.twist.linear.x;
+    initial.linear_y = odom_.twist.twist.linear.y;
+    initial.angular_z = odom_.twist.twist.angular.z;
 
-    const CollisionResult emergency = checker_.simulate(
-        initial, initial.linear, initial.angular, reaction_time_, static_map_,
-        static_policy_, local_map_, local_policy_, rollout_options_);
+    if (SourceTransitionBlocks(candidate_.source, now)) {
+      const CollisionResult transition_stop =
+          navigation_profile_.checker.simulate(
+              initial, initial.linear_x, initial.linear_y, initial.angular_z,
+              reaction_time_, static_map_, static_policy_, local_map_,
+              local_policy_, rollout_options_);
+      visualization = transition_stop;
+      if (transition_stop.collision) {
+        state = "EMERGENCY_STOP";
+        reason = transition_stop.static_collision
+                     ? "STATIC_COLLISION_DURING_PROFILE_TRANSITION"
+                     : "LOCAL_COLLISION_DURING_PROFILE_TRANSITION";
+        collision_time = transition_stop.collision_time;
+      } else {
+        state = "PROFILE_TRANSITION";
+        reason = MeasuredStopped(odom_.twist.twist)
+                     ? "WAITING_FOR_STATIONARY_HOLD"
+                     : "WAITING_FOR_ROBOT_TO_STOP";
+      }
+      Publish(output, state, reason, scale, collision_time, visualization,
+              candidate_.source, &navigation_profile_);
+      return;
+    }
+
+    if (!SupportedMeasuredMotion(*profile, odom_.twist.twist,
+                                 unsupported_reason)) {
+      ForceStoppedScale();
+      state = "UNSUPPORTED_MOTION";
+      reason = unsupported_reason;
+      Publish(output, state, reason, scale, collision_time, visualization,
+              candidate_.source);
+      return;
+    }
+
+    const CollisionResult emergency = profile->checker.simulate(
+        initial, initial.linear_x, initial.linear_y, initial.angular_z,
+        reaction_time_, static_map_, static_policy_, local_map_, local_policy_,
+        rollout_options_);
     if (emergency.collision) {
       ForceStoppedScale();
       state = "EMERGENCY_STOP";
@@ -523,8 +717,9 @@ class CollisionMonitorNode {
     CollisionResult full_rollout;
     CollisionResult selected_rollout;
     for (double candidate_scale : kScales) {
-      CollisionResult rollout = checker_.simulate(
+      CollisionResult rollout = profile->checker.simulate(
           initial, candidate_scale * command.linear.x,
+          candidate_scale * command.linear.y,
           candidate_scale * command.angular.z, preview_time_, static_map_,
           static_policy_, local_map_, local_policy_, rollout_options_);
       if (candidate_scale == 1.0) {
@@ -551,6 +746,7 @@ class CollisionMonitorNode {
 
     scale = ApplyScaleHysteresis(desired_scale, now);
     output.linear.x = scale * command.linear.x;
+    output.linear.y = scale * command.linear.y;
     output.angular.z = scale * command.angular.z;
     visualization = selected_rollout;
     if (scale <= 0.0) {
@@ -572,13 +768,16 @@ class CollisionMonitorNode {
   void Publish(const geometry_msgs::Twist& output, const std::string& state,
                const std::string& reason, double scale,
                double collision_time, const CollisionResult& rollout,
-               const std::string& source) {
+               const std::string& source,
+               const MotionProfile* profile_override = nullptr) {
     output_pub_.publish(output);
-    PublishStatus(state, reason, scale, collision_time, source, output);
-    PublishMarkers(state, rollout);
+    PublishStatus(state, reason, scale, collision_time, source, output,
+                  profile_override);
+    PublishMarkers(state, rollout, source, profile_override);
 
     if (state == "EMERGENCY_STOP" || state == "COLLISION_STOP" ||
-        state == "DATA_NOT_READY" || state == "UNSUPPORTED_MOTION") {
+        state == "DATA_NOT_READY" || state == "UNSUPPORTED_MOTION" ||
+        state == "PROFILE_TRANSITION") {
       ROS_WARN_THROTTLE(1.0,
                         "collision_monitor: state=%s source=%s reason=%s "
                         "scale=%.2f ttc=%.3f",
@@ -590,7 +789,8 @@ class CollisionMonitorNode {
   void PublishStatus(const std::string& state, const std::string& reason,
                      double scale, double collision_time,
                      const std::string& source,
-                     const geometry_msgs::Twist& output) {
+                     const geometry_msgs::Twist& output,
+                     const MotionProfile* profile_override) {
     diagnostic_msgs::DiagnosticArray array;
     array.header.stamp = ros::Time::now();
     diagnostic_msgs::DiagnosticStatus status;
@@ -599,7 +799,8 @@ class CollisionMonitorNode {
     status.message = state + ": " + reason;
     if (state == "OK" || state == "STOP_COMMAND") {
       status.level = diagnostic_msgs::DiagnosticStatus::OK;
-    } else if (state == "SLOWDOWN" || state == "MANUAL_BYPASS") {
+    } else if (state == "SLOWDOWN" || state == "MANUAL_BYPASS" ||
+               state == "PROFILE_TRANSITION") {
       status.level = diagnostic_msgs::DiagnosticStatus::WARN;
     } else {
       status.level = diagnostic_msgs::DiagnosticStatus::ERROR;
@@ -607,22 +808,49 @@ class CollisionMonitorNode {
     AddDiagnosticValue(status, "state", state);
     AddDiagnosticValue(status, "reason", reason);
     AddDiagnosticValue(status, "source", source);
+    const MotionProfile* profile = profile_override != nullptr
+                                       ? profile_override
+                                       : ProfileForSource(source);
+    AddDiagnosticValue(
+        status, "profile",
+        state == "PROFILE_TRANSITION"
+            ? std::string("transition")
+            : (profile == nullptr ? std::string("none") : profile->name));
+    AddDiagnosticValue(status, "footprint_padding",
+                       profile == nullptr
+                           ? std::string("-1")
+                           : ToString(profile->footprint_padding));
     AddDiagnosticValue(status, "scale", ToString(scale));
     AddDiagnosticValue(status, "collision_time", ToString(collision_time));
     AddDiagnosticValue(status, "output_linear_x", ToString(output.linear.x));
+    AddDiagnosticValue(status, "output_linear_y", ToString(output.linear.y));
     AddDiagnosticValue(status, "output_angular_z", ToString(output.angular.z));
+    AddDiagnosticValue(status, "measured_linear_x",
+                       have_odom_ ? ToString(odom_.twist.twist.linear.x)
+                                  : std::string("-1"));
+    AddDiagnosticValue(status, "measured_linear_y",
+                       have_odom_ ? ToString(odom_.twist.twist.linear.y)
+                                  : std::string("-1"));
+    AddDiagnosticValue(status, "measured_angular_z",
+                       have_odom_ ? ToString(odom_.twist.twist.angular.z)
+                                  : std::string("-1"));
     array.status.push_back(status);
     status_pub_.publish(array);
   }
 
   void PublishMarkers(const std::string& state,
-                      const CollisionResult& rollout) {
+                      const CollisionResult& rollout,
+                      const std::string& source,
+                      const MotionProfile* profile_override) {
     visualization_msgs::MarkerArray array;
     visualization_msgs::Marker clear;
     clear.action = visualization_msgs::Marker::DELETEALL;
     array.markers.push_back(clear);
 
-    if (rollout.poses.empty()) {
+    const MotionProfile* profile = profile_override != nullptr
+                                       ? profile_override
+                                       : ProfileForSource(source);
+    if (rollout.poses.empty() || profile == nullptr) {
       marker_pub_.publish(array);
       return;
     }
@@ -663,7 +891,7 @@ class CollisionMonitorNode {
       std::vector<geometry_msgs::Point> transformed;
       const Pose2D& pose = rollout.poses[i];
       costmap_2d::transformFootprint(pose.x, pose.y, pose.yaw,
-                                     checker_.footprint(), transformed);
+                                     profile->checker.footprint(), transformed);
       for (std::size_t j = 0; j < transformed.size(); ++j) {
         geometry_msgs::Point a = transformed[j];
         geometry_msgs::Point b = transformed[(j + 1) % transformed.size()];
@@ -700,7 +928,9 @@ class CollisionMonitorNode {
   ros::NodeHandle private_nh_;
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
-  CollisionChecker checker_;
+  MotionProfile navigation_profile_;
+  MotionProfile tag_profile_;
+  MotionProfile teleop_profile_;
   GridPolicy static_policy_;
   GridPolicy local_policy_;
   RolloutOptions rollout_options_;
@@ -732,6 +962,9 @@ class CollisionMonitorNode {
   bool have_last_pose_ = false;
   double applied_scale_ = 0.0;
   ros::WallTime scale_increase_since_;
+  std::string active_source_;
+  std::string pending_source_;
+  ros::WallTime transition_stopped_since_;
 
   std::string candidate_topic_;
   std::string output_topic_;
@@ -743,20 +976,20 @@ class CollisionMonitorNode {
   std::string global_frame_;
   std::string base_frame_;
   std::string teleop_source_;
+  std::string tag_source_;
+  std::string navigation_source_;
   double monitor_rate_ = 50.0;
   double candidate_timeout_ = 0.25;
   double odom_timeout_ = 0.20;
   double tf_timeout_ = 0.30;
   double local_map_timeout_ = 0.30;
-  double footprint_padding_ = 0.05;
-  double max_navigation_linear_x_ = 0.20;
-  double max_navigation_angular_z_ = 0.50;
-  double max_teleop_linear_x_ = 0.35;
-  double max_teleop_angular_z_ = 1.10;
   double zero_epsilon_ = 1e-4;
   double reaction_time_ = 0.30;
   double preview_time_ = 2.0;
   double clear_hold_time_ = 0.50;
+  double source_transition_hold_time_ = 0.20;
+  double transition_stopped_linear_ = 0.01;
+  double transition_stopped_angular_ = 0.02;
   double max_pose_jump_distance_ = 0.50;
   double max_pose_jump_yaw_ = 0.80;
   double pose_jump_hold_time_ = 0.50;
