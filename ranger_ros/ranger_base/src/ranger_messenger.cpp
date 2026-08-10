@@ -90,7 +90,7 @@ void RangerROSMessenger::LoadParameters() {
   nh_->param<std::string>("base_frame", base_frame_, std::string("base_link"));
   nh_->param<int>("update_rate", update_rate_, 50);
   nh_->param<std::string>("odom_topic_name", odom_topic_name_,
-                          std::string("odom"));
+                          std::string("/odom"));
   nh_->param<bool>("publish_odom_tf", publish_odom_tf_, false);
   nh_->param<double>("cmd_vel_timeout", cmd_vel_timeout_, 0.25);
   nh_->param<double>("stop_velocity_threshold", stop_velocity_threshold_,

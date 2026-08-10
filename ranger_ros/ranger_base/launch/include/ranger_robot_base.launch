@@ -5,7 +5,7 @@
     <arg name="odom_frame" default="odom"/>
     <arg name="base_frame" default="base_link" />
     <arg name="update_rate" default="50" />
-    <arg name="odom_topic_name" default="odom" />
+    <arg name="odom_topic_name" default="/odom" />
     <arg name="publish_odom_tf" default="false" />
     <arg name="cmd_vel_timeout" default="0.25" />
     <arg name="stop_velocity_threshold" default="0.01" />

@@ -89,7 +89,7 @@ $ catkin_make
 * base_frame (string): **base_link**
 * odom_frame (string): **odom**
 * publish_odom_tf (bool): **true**
-* odom_topic_name (string): **odom**
+* odom_topic_name (string): **/odom**
 
 ### Published topics
 
