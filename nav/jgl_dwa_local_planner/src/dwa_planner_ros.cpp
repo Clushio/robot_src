@@ -1223,7 +1223,24 @@ namespace jgl_dwa_local_planner
       }
       linePath.clear();
       for (int j = 0; j < orig_global_plan.size(); j++) {
-          linePath.push_back(orig_global_plan[j]);
+          geometry_msgs::PoseStamped pose = orig_global_plan[j];
+          // In fixed-route mode obstacle stopping is decided continuously by
+          // fixedRouteBlocked().  A z==2 marker is only a snapshot written by
+          // the global planner when this plan was created.  Keeping that
+          // marker in a frozen MoveBase plan would command zero velocity
+          // forever even after the obstacle has cleared.
+          if (fixed_route_mode_.load() && pose.pose.position.z == 2)
+          {
+            pose.pose.position.z = 1;
+          }
+          linePath.push_back(pose);
+      }
+      if (fixed_route_mode_.load() && useLine == 2)
+      {
+        useLine = 1;
+        lastz = 1;
+        ROS_WARN("Fixed route: discarded a stale global-planner WAIT marker; "
+                 "live costmap obstacle checking remains active on the locked path.");
       }
       current_topology_goal_index_ = reference_path_manager_.goalIndex(linePath.back());
       reference_obstacle_start_ = ros::Time(0);
