@@ -838,6 +838,27 @@ class CollisionMonitorNode {
     status_pub_.publish(array);
   }
 
+  bool GetCurrentMarkerPose(const CollisionResult& rollout,
+                            Pose2D& pose) {
+    if (!rollout.poses.empty()) {
+      pose = rollout.poses.front();
+      return true;
+    }
+
+    try {
+      const geometry_msgs::TransformStamped transform =
+          tf_buffer_.lookupTransform(global_frame_, base_frame_, ros::Time(0),
+                                     ros::Duration(0.0));
+      pose.x = transform.transform.translation.x;
+      pose.y = transform.transform.translation.y;
+      pose.yaw = tf2::getYaw(transform.transform.rotation);
+    } catch (const tf2::TransformException&) {
+      return false;
+    }
+    return std::isfinite(pose.x) && std::isfinite(pose.y) &&
+           std::isfinite(pose.yaw);
+  }
+
   void PublishMarkers(const std::string& state,
                       const CollisionResult& rollout,
                       const std::string& source,
@@ -847,15 +868,54 @@ class CollisionMonitorNode {
     clear.action = visualization_msgs::Marker::DELETEALL;
     array.markers.push_back(clear);
 
-    const MotionProfile* profile = profile_override != nullptr
-                                       ? profile_override
-                                       : ProfileForSource(source);
-    if (rollout.poses.empty() || profile == nullptr) {
+    const MotionProfile* profile = profile_override;
+    if (profile == nullptr) {
+      profile = ProfileForSource(source);
+    }
+    if (profile == nullptr) {
+      profile = ProfileForSource(active_source_);
+    }
+    if (profile == nullptr) {
+      // Before the first command source is known, display the conservative
+      // navigation footprint instead of leaving RViz empty.
+      profile = &navigation_profile_;
+    }
+
+    const ros::Time stamp = ros::Time::now();
+    Pose2D current_pose;
+    if (GetCurrentMarkerPose(rollout, current_pose)) {
+      std::vector<geometry_msgs::Point> transformed;
+      costmap_2d::transformFootprint(
+          current_pose.x, current_pose.y, current_pose.yaw,
+          profile->checker.footprint(), transformed);
+
+      visualization_msgs::Marker current;
+      current.header.frame_id = global_frame_;
+      current.header.stamp = stamp;
+      current.ns = "current_padded_footprint";
+      current.id = 0;
+      current.type = visualization_msgs::Marker::LINE_STRIP;
+      current.action = visualization_msgs::Marker::ADD;
+      current.pose.orientation.w = 1.0;
+      current.scale.x = 0.025;
+      current.color.r = 1.0;
+      current.color.g = 0.8;
+      current.color.a = 0.95;
+      for (geometry_msgs::Point point : transformed) {
+        point.z = 0.06;
+        current.points.push_back(point);
+      }
+      if (!current.points.empty()) {
+        current.points.push_back(current.points.front());
+      }
+      array.markers.push_back(current);
+    }
+
+    if (rollout.poses.empty()) {
       marker_pub_.publish(array);
       return;
     }
 
-    const ros::Time stamp = ros::Time::now();
     visualization_msgs::Marker path;
     path.header.frame_id = global_frame_;
     path.header.stamp = stamp;

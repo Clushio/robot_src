@@ -12,6 +12,7 @@ from cmd_vel_arbiter.msg import ArbitratedCommand
 from diagnostic_msgs.msg import DiagnosticArray
 from geometry_msgs.msg import TransformStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry
+from visualization_msgs.msg import Marker, MarkerArray
 
 
 class CollisionMonitorNodeTest(unittest.TestCase):
@@ -29,6 +30,7 @@ class CollisionMonitorNodeTest(unittest.TestCase):
         self._local_map = self._make_map()
         self._last_output = None
         self._last_status = None
+        self._last_markers = {}
 
         self._candidate_pub = rospy.Publisher(
             '/collision_monitor_test/candidate', ArbitratedCommand,
@@ -46,6 +48,9 @@ class CollisionMonitorNodeTest(unittest.TestCase):
         self._status_sub = rospy.Subscriber(
             '/collision_monitor_test/status', DiagnosticArray,
             self._status_callback, queue_size=1)
+        self._marker_sub = rospy.Subscriber(
+            '/collision_monitor_test/markers', MarkerArray,
+            self._marker_callback, queue_size=1)
         self._tf_broadcaster = tf2_ros.TransformBroadcaster()
 
         self._thread = threading.Thread(target=self._publish_loop)
@@ -98,6 +103,14 @@ class CollisionMonitorNodeTest(unittest.TestCase):
         with self._lock:
             self._last_status = values
 
+    def _marker_callback(self, message):
+        markers = {
+            marker.ns: marker for marker in message.markers
+            if marker.action == Marker.ADD
+        }
+        with self._lock:
+            self._last_markers = markers
+
     def _publish_loop(self):
         rate = rospy.Rate(30)
         while not rospy.is_shutdown() and not self._stop.is_set():
@@ -149,12 +162,24 @@ class CollisionMonitorNodeTest(unittest.TestCase):
             self._last_status = None
 
     def _wait_for_state(self, expected, expected_reason=None, timeout=3.0):
+        zero_output_states = {
+            'STOPPED', 'STOP_COMMAND', 'DATA_NOT_READY',
+            'UNSUPPORTED_MOTION', 'PROFILE_TRANSITION',
+            'EMERGENCY_STOP', 'COLLISION_STOP'
+        }
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline and not rospy.is_shutdown():
             with self._lock:
                 status = copy.deepcopy(self._last_status)
                 output = copy.deepcopy(self._last_output)
+            output_matches = output is not None
+            if output_matches and expected in zero_output_states:
+                output_matches = (
+                    abs(output.linear.x) < 0.001 and
+                    abs(output.linear.y) < 0.001 and
+                    abs(output.angular.z) < 0.001)
             if (status is not None and status.get('state') == expected and
+                    output_matches and
                     (expected_reason is None or
                      status.get('reason') == expected_reason)):
                 return status, output
@@ -178,6 +203,17 @@ class CollisionMonitorNodeTest(unittest.TestCase):
             time.sleep(0.02)
         self.fail('expected OK output ({}, {}), got status={} output={}'.format(
             linear_x, linear_y, status, output))
+
+    def _wait_for_marker(self, namespace, timeout=3.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and not rospy.is_shutdown():
+            with self._lock:
+                marker = copy.deepcopy(self._last_markers.get(namespace))
+            if marker is not None:
+                return marker
+            time.sleep(0.02)
+        self.fail('expected marker namespace {}, got {}'.format(
+            namespace, sorted(self._last_markers.keys())))
 
     def test_readiness_bypass_limits_speed_levels_and_timeout(self):
         self._set_command('nav', linear_x=0.10)
@@ -206,7 +242,7 @@ class CollisionMonitorNodeTest(unittest.TestCase):
         self.assertAlmostEqual(0.0, output.linear.x)
 
         self._set_command('nav', linear_x=0.20)
-        self._wait_for_state('OK', timeout=3.0)
+        self._wait_for_ok_output(0.20, 0.0, timeout=3.0)
 
         obstacle_map = self._make_map()
         self._set_cell(obstacle_map, 0.76, 0.0, 100)
@@ -218,7 +254,7 @@ class CollisionMonitorNodeTest(unittest.TestCase):
 
         with self._lock:
             self._local_map = self._make_map()
-        status, output = self._wait_for_state('OK', timeout=3.0)
+        status, output = self._wait_for_ok_output(0.20, 0.0, timeout=3.0)
         self.assertAlmostEqual(1.0, float(status['scale']), places=2)
         self.assertAlmostEqual(0.20, output.linear.x, places=2)
 
@@ -233,7 +269,7 @@ class CollisionMonitorNodeTest(unittest.TestCase):
                                places=2)
         with self._lock:
             self._odom_linear_x = 0.0
-        status, output = self._wait_for_state('OK', timeout=3.0)
+        status, output = self._wait_for_ok_output(0.0, 0.05, timeout=3.0)
         self.assertEqual('tag', status['profile'])
         self.assertAlmostEqual(0.08, float(status['footprint_padding']),
                                places=2)
@@ -303,6 +339,18 @@ class CollisionMonitorNodeTest(unittest.TestCase):
         status, output = self._wait_for_state('STOP_COMMAND')
         self.assertEqual('ZERO_COMMAND_PASSED', status['reason'])
         self.assertAlmostEqual(0.0, output.linear.x)
+
+        current = self._wait_for_marker('current_padded_footprint')
+        self.assertEqual(Marker.LINE_STRIP, current.type)
+        self.assertEqual(5, len(current.points))
+        self.assertAlmostEqual(-0.51, min(p.x for p in current.points),
+                               places=3)
+        self.assertAlmostEqual(0.51, max(p.x for p in current.points),
+                               places=3)
+        self.assertAlmostEqual(-0.40, min(p.y for p in current.points),
+                               places=3)
+        self.assertAlmostEqual(0.40, max(p.y for p in current.points),
+                               places=3)
 
 
 if __name__ == '__main__':
