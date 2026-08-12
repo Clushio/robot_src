@@ -696,14 +696,15 @@ namespace jgl_dwa_local_planner
 
   void DWAPlannerROS::forceLegacyLineRotate(const char *reason)
   {
-    // The legacy controller does not use PathFollower.  Drop the retained
-    // steering state so a later return to reference tracking cannot replay an
-    // old curvature after the chassis has already centred its wheels.
-    path_follower_.reset();
     if (legacy_line_forced_goal_index_ == current_topology_goal_index_)
     {
       return;
     }
+    // Reset only on the transition into legacy control. This function is
+    // called every control cycle for the same fallback goal; resetting before
+    // the guard above would prevent status 0 steering from ever ramping beyond
+    // its first limited step.
+    path_follower_.reset();
     if (status != 1)
     {
       ROS_WARN("JGL reference path: fallback to legacy rotate-line controller, reset line status to rotate. reason=%s",
@@ -1830,9 +1831,19 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseS
   //cmd_vel.angular.z = w;
   if(status==0)
   {
-    cmd_vel.angular.z = mergew; //mix pid by jgl
+    // The legacy controller produces angular velocity directly. Convert it to
+    // curvature so the same Ackermann-safe limiter used by reference tracking
+    // can smooth steering without changing the commanded forward speed.
+    const double speed_for_curvature = std::max(0.01, std::fabs(state.v));
+    const double target_curvature = mergew / speed_for_curvature;
+    const double smoothed_curvature =
+        path_follower_.smoothCurvatureCommand(target_curvature);
+    cmd_vel.angular.z = state.v * smoothed_curvature;
   }
   else{
+    // Status 1/2 are intentional in-place rotations and must keep their direct
+    // response. Reset only the forward-tracking filter while they are active.
+    path_follower_.reset();
     cmd_vel.angular.z = w;   
   }
   

@@ -113,7 +113,7 @@ bool PathFollower::computeCommand(const nav_msgs::Path &path,
   {
     target_curvature = target_curvature > 0.0 ? max_curvature : -max_curvature;
   }
-  curvature = smoothCurvature(target_curvature);
+  curvature = smoothCurvatureCommand(target_curvature);
 
   cmd_vel.linear.x = std::max(0.0, velocity);
   cmd_vel.linear.y = 0.0;
@@ -272,8 +272,14 @@ double PathFollower::effectiveMaxCurvature() const
   return limit;
 }
 
-double PathFollower::smoothCurvature(double target_curvature)
+double PathFollower::smoothCurvatureCommand(double target_curvature)
 {
+  const double max_curvature = effectiveMaxCurvature();
+  if (max_curvature > 0.0)
+  {
+    target_curvature = clamp(target_curvature, -max_curvature, max_curvature);
+  }
+
   if (std::fabs(target_curvature - filtered_curvature_) < curvature_deadband_)
   {
     target_curvature = filtered_curvature_;

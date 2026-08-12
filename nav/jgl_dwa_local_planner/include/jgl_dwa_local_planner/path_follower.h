@@ -24,6 +24,9 @@ public:
                       unsigned int &new_index,
                       double &curvature);
 
+  // Shared by the reference-path follower and the legacy forward-tracking
+  // state. Input and output are path curvature in 1/m.
+  double smoothCurvatureCommand(double target_curvature);
   double lookaheadDistance() const { return lookahead_distance_; }
 
 private:
@@ -42,7 +45,6 @@ private:
   double clamp(double value, double min_value, double max_value) const;
   double normalizeAngle(double angle) const;
   double effectiveMaxCurvature() const;
-  double smoothCurvature(double target_curvature);
 
   double lookahead_distance_;
   double v_min_;

@@ -24,8 +24,9 @@ DWAPlannerROS:
   max_deviation_from_topo: 0.50
   max_curvature: 2.10
   min_turn_radius: 0.476
-  # Tracking stays below the Ranger Mini V2 dual-Ackermann/spinning boundary.
-  # This is intentionally separate from max_curvature used by path generation.
+  # B-spline and legacy forward tracking stay below the Ranger Mini V2
+  # dual-Ackermann/spinning boundary. This is intentionally separate from
+  # max_curvature used by path generation.
   tracking_max_curvature: 1.90
   reference_fallback_boundary_distance: 0.15
   lookahead_distance: 0.50

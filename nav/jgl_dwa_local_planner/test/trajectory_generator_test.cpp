@@ -297,6 +297,24 @@ TEST(PathFollowerAntiShake, ResetRampsAgainAfterStop)
   EXPECT_NEAR(cmd_vel.linear.x * curvature, cmd_vel.angular.z, 1e-9);
 }
 
+TEST(PathFollowerAntiShake, ExternalLegacyCurvatureUsesSameLimits)
+{
+  ros::Time::init();
+  jgl_dwa_local_planner::PathFollower follower;
+  follower.setSmoothingForTesting(0.0, 1.5, 0.0, 0.1);
+
+  // Legacy status 0 can request a much tighter turn than the chassis can
+  // follow. It must still ramp at 0.15 1/m per cycle and stay below 1.90 1/m.
+  double curvature = 0.0;
+  for (int i = 0; i < 20; ++i)
+  {
+    const double previous = curvature;
+    curvature = follower.smoothCurvatureCommand(10.0);
+    EXPECT_LE(curvature - previous, 0.15 + 1e-9);
+    EXPECT_LE(curvature, 1.90 + 1e-9);
+  }
+}
+
 int main(int argc, char **argv)
 {
   testing::InitGoogleTest(&argc, argv);
