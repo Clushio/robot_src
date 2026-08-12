@@ -76,6 +76,7 @@ for python_path in os.environ.get('PYTHONPATH', '').split(os.pathsep):
         sys.path.insert(0, python_path)
 
 from cmd_vel_arbiter.srv import FinishMotion, FinishMotionRequest
+from ranger_msgs.msg import MotionState as RangerMotionState
 
 
 
@@ -220,7 +221,7 @@ class MyWindow(QWidget):
     status_requested = pyqtSignal(str, str)
     localization_ready_requested = pyqtSignal()
     record_pose_requested = pyqtSignal(float, float, float, str)
-    odometry_requested = pyqtSignal(float, float, float, float, float)
+    odometry_requested = pyqtSignal(float, float, float, float, float, str)
     health_snapshot_requested = pyqtSignal(object)
     topology_finished_requested = pyqtSignal(bool, str)
     loop_update_requested = pyqtSignal(int, str, str, int, str)
@@ -239,6 +240,7 @@ class MyWindow(QWidget):
         self.task_status_sub = None
         self.localization_odom_sub = None
         self.base_odom_sub = None
+        self.motion_state_sub = None
         self.record_pose_sub = None
         self.record_marker_pub = None
         self.localizationProcess = None
@@ -263,6 +265,7 @@ class MyWindow(QWidget):
         self.current_odom_yaw_degrees = None
         self.current_linear_speed = 0.0
         self.current_angular_speed = 0.0
+        self.current_motion_mode = None
         self.odometry_lock = threading.Lock()
         self.health_check_running = False
         self.estop_active = False
@@ -311,6 +314,10 @@ class MyWindow(QWidget):
                 )
                 self.base_odom_sub = rospy.Subscriber(
                     '/odom', Odometry, self.on_base_odometry, queue_size=1
+                )
+                self.motion_state_sub = rospy.Subscriber(
+                    '/motion_state', RangerMotionState,
+                    self.on_motion_state, queue_size=1
                 )
                 self.record_pose_sub = rospy.Subscriber(
                     RVIZ_RECORD_POSE_TOPIC,
@@ -1126,7 +1133,8 @@ class MyWindow(QWidget):
         live_data_layout.setSpacing(8)
         self.odometry_label = QLabel('机器人位姿：暂无有效定位数据')
         self.odometry_label.setObjectName('dataValue')
-        self.odometry_label.setMinimumHeight(36)
+        self.odometry_label.setMinimumHeight(58)
+        self.odometry_label.setWordWrap(True)
         self.odometry_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.position_label.setObjectName('dataValue')
         self.position_label.setMinimumHeight(36)
@@ -2196,15 +2204,20 @@ class MyWindow(QWidget):
             ):
                 linear_speed = self.current_linear_speed
                 angular_speed = self.current_angular_speed
+                motion_mode_name = self.motion_mode_name(
+                    self.current_motion_mode
+                )
             else:
                 linear_speed = 0.0
                 angular_speed = 0.0
+                motion_mode_name = '未检测'
         self.odometry_requested.emit(
             x,
             y,
             yaw_degrees,
             linear_speed,
             angular_speed,
+            motion_mode_name,
         )
         process = self.localizationProcess
         if (
@@ -2216,14 +2229,53 @@ class MyWindow(QWidget):
         self.localization_ready = True
         self.localization_ready_requested.emit()
 
+    def on_motion_state(self, message):
+        """Track the wheel-group posture reported by the Ranger controller."""
+        with self.odometry_lock:
+            self.current_motion_mode = int(message.motion_mode)
+
+    @staticmethod
+    def motion_mode_name(mode):
+        names = {
+            RangerMotionState.MOTION_MODE_DUAL_ACKERMAN: '双阿克曼',
+            RangerMotionState.MOTION_MODE_PARALLEL: '蟹形（平行转向）',
+            RangerMotionState.MOTION_MODE_SPINNING: '原地旋转',
+            RangerMotionState.MOTION_MODE_PARKING: '驻车',
+            RangerMotionState.MOTION_MODE_SIDE_SLIP: '蟹形（横向侧移）',
+        }
+        return names.get(mode, '未知')
+
+    @staticmethod
+    def signed_linear_speed(vx, vy, motion_mode):
+        """Return signed chassis speed while retaining crab-motion magnitude."""
+        magnitude = math.hypot(vx, vy)
+        if magnitude < 0.0005:
+            return 0.0
+        if motion_mode in (
+            RangerMotionState.MOTION_MODE_SPINNING,
+            RangerMotionState.MOTION_MODE_PARKING,
+        ):
+            return 0.0
+        if motion_mode == RangerMotionState.MOTION_MODE_SIDE_SLIP:
+            sign_source = vy
+        elif abs(vx) >= 0.0005:
+            # Ackermann and normal parallel steering keep |steering| < 90 deg,
+            # so X preserves the controller's forward/reverse sign.
+            sign_source = vx
+        else:
+            sign_source = vy
+        return math.copysign(magnitude, sign_source)
+
     def on_base_odometry(self, message):
-        """Use chassis /odom for measured velocity and keep the LIO global pose."""
+        """Use measured chassis speed/mode and keep the LIO global pose."""
         now = time.monotonic()
-        linear_speed = math.hypot(
-            message.twist.twist.linear.x, message.twist.twist.linear.y
-        )
+        vx = message.twist.twist.linear.x
+        vy = message.twist.twist.linear.y
         angular_speed = message.twist.twist.angular.z
         with self.odometry_lock:
+            motion_mode = self.current_motion_mode
+            linear_speed = self.signed_linear_speed(vx, vy, motion_mode)
+            motion_mode_name = self.motion_mode_name(motion_mode)
             self.last_base_odom_monotonic = now
             self.current_linear_speed = linear_speed
             self.current_angular_speed = angular_speed
@@ -2237,7 +2289,7 @@ class MyWindow(QWidget):
         ):
             return
         self.odometry_requested.emit(
-            x, y, yaw_degrees, linear_speed, angular_speed
+            x, y, yaw_degrees, linear_speed, angular_speed, motion_mode_name
         )
 
     def mark_localization_ready(self):
@@ -2247,11 +2299,18 @@ class MyWindow(QWidget):
         self.set_chip(self.localization_chip, '定位 已就绪', True)
         self.set_status('定位成功，已接收到有效位姿数据。', 'success')
 
-    def update_odometry_display(self, x, y, yaw_degrees, linear_speed, angular_speed):
+    def update_odometry_display(
+        self, x, y, yaw_degrees, linear_speed, angular_speed, motion_mode_name
+    ):
+        # Avoid showing confusing -0.000 values caused by measurement noise.
+        linear_display = 0.0 if abs(linear_speed) < 0.0005 else linear_speed
+        angular_display = 0.0 if abs(angular_speed) < 0.0005 else angular_speed
         self.odometry_label.setText(
             f'机器人位姿：X {x:.3f} m  ·  Y {y:.3f} m  ·  '
-            f'朝向 {yaw_degrees:.1f}°  ·  线速度 {linear_speed:.3f} m/s  ·  '
-            f'角速度 {angular_speed:.3f} rad/s'
+            f'朝向 {yaw_degrees:.1f}°\n'
+            f'底盘状态：轮组姿态 {motion_mode_name}  ·  '
+            f'线速度 {linear_display:+.3f} m/s  ·  '
+            f'角速度 {angular_display:+.3f} rad/s'
         )
 
     def set_chip(self, chip, text, active=False):
