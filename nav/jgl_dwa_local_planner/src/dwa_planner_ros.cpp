@@ -437,6 +437,7 @@ namespace jgl_dwa_local_planner
     reference_fallback_segments_ = fallback_segments;
     legacy_line_forced_goal_index_ = -1;
     reference_path_manager_.setReferencePath(reference_path);
+    path_follower_.reset();
     double nearest_distance = 0.0;
     unsigned int nearest_index = 0;
     syncReferencePathIndex(&nearest_distance, &nearest_index);
@@ -695,6 +696,10 @@ namespace jgl_dwa_local_planner
 
   void DWAPlannerROS::forceLegacyLineRotate(const char *reason)
   {
+    // The legacy controller does not use PathFollower.  Drop the retained
+    // steering state so a later return to reference tracking cannot replay an
+    // old curvature after the chassis has already centred its wheels.
+    path_follower_.reset();
     if (legacy_line_forced_goal_index_ == current_topology_goal_index_)
     {
       return;
@@ -1029,6 +1034,10 @@ namespace jgl_dwa_local_planner
 
     if (referencePathBlocked(reference_path))
     {
+      // A zero Twist centres Ranger's wheels.  Keep the software filter in the
+      // same state so clearing the obstacle ramps steering from zero instead
+      // of immediately replaying the pre-stop curvature.
+      path_follower_.reset();
       if (reference_obstacle_start_.isZero())
       {
         reference_obstacle_start_ = ros::Time::now();
@@ -1861,6 +1870,7 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseS
       maybeStartReferencePathJob();
       if (fixedRouteBlocked())
       {
+        path_follower_.reset();
         stopCmd(cmd_vel);
         ROS_WARN_THROTTLE(
             1.0,

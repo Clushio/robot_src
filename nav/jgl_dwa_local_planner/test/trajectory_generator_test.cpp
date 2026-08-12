@@ -222,7 +222,78 @@ TEST(PathFollowerAckermannOnly, CommandNeverUsesCrabOrReverse)
 
   EXPECT_GE(cmd_vel.linear.x, 0.0);
   EXPECT_EQ(0.0, cmd_vel.linear.y);
-  EXPECT_LE(std::fabs(curvature), 2.1 + 1e-9);
+  EXPECT_LE(std::fabs(curvature), 1.9 + 1e-9);
+  EXPECT_NEAR(cmd_vel.linear.x * curvature, cmd_vel.angular.z, 1e-9);
+}
+
+TEST(PathFollowerAntiShake, LookaheadTargetIsInterpolatedAlongPath)
+{
+  ros::Time::init();
+  jgl_dwa_local_planner::PathFollower follower;
+  follower.setSmoothingForTesting(0.0, 0.0, 0.0, 0.1);
+
+  nav_msgs::Path path;
+  path.header.frame_id = "map";
+  path.poses.push_back(makePose(0.0, 0.0));
+  path.poses.push_back(makePose(1.0, 0.2));
+
+  geometry_msgs::Twist cmd_vel;
+  unsigned int new_index = 0;
+  double curvature = 0.0;
+  ASSERT_TRUE(follower.computeCommand(path, makePose(0.0, 0.0), 0,
+                                      cmd_vel, new_index, curvature));
+
+  const double path_angle = std::atan2(0.2, 1.0);
+  const double expected = 2.0 * std::sin(path_angle) / 0.5;
+  EXPECT_NEAR(expected, curvature, 1e-9);
+}
+
+TEST(PathFollowerAntiShake, CurvatureChangeIsRateLimited)
+{
+  ros::Time::init();
+  jgl_dwa_local_planner::PathFollower follower;
+  follower.setSmoothingForTesting(0.0, 1.5, 0.0, 0.1);
+
+  nav_msgs::Path path;
+  path.header.frame_id = "map";
+  path.poses.push_back(makePose(0.0, 0.0));
+  path.poses.push_back(makePose(0.2, 0.5));
+
+  geometry_msgs::Twist cmd_vel;
+  unsigned int new_index = 0;
+  double curvature = 0.0;
+  ASSERT_TRUE(follower.computeCommand(path, makePose(0.0, 0.0), 0,
+                                      cmd_vel, new_index, curvature));
+
+  EXPECT_NEAR(0.15, curvature, 1e-9);
+  EXPECT_NEAR(cmd_vel.linear.x * curvature, cmd_vel.angular.z, 1e-9);
+}
+
+TEST(PathFollowerAntiShake, ResetRampsAgainAfterStop)
+{
+  ros::Time::init();
+  jgl_dwa_local_planner::PathFollower follower;
+  follower.setSmoothingForTesting(0.0, 1.5, 0.0, 0.1);
+
+  nav_msgs::Path path;
+  path.header.frame_id = "map";
+  path.poses.push_back(makePose(0.0, 0.0));
+  path.poses.push_back(makePose(0.2, 0.5));
+
+  geometry_msgs::Twist cmd_vel;
+  unsigned int new_index = 0;
+  double curvature = 0.0;
+  for (int i = 0; i < 5; ++i)
+  {
+    ASSERT_TRUE(follower.computeCommand(path, makePose(0.0, 0.0), 0,
+                                        cmd_vel, new_index, curvature));
+  }
+  EXPECT_GT(curvature, 0.15);
+
+  follower.reset();
+  ASSERT_TRUE(follower.computeCommand(path, makePose(0.0, 0.0), 0,
+                                      cmd_vel, new_index, curvature));
+  EXPECT_NEAR(0.15, curvature, 1e-9);
   EXPECT_NEAR(cmd_vel.linear.x * curvature, cmd_vel.angular.z, 1e-9);
 }
 

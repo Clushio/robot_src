@@ -15,17 +15,22 @@ public:
   PathFollower();
 
   void loadParams(ros::NodeHandle &private_nh);
+  void reset();
 
   bool computeCommand(const nav_msgs::Path &path,
                       const geometry_msgs::PoseStamped &current_pose,
                       unsigned int current_index,
                       geometry_msgs::Twist &cmd_vel,
                       unsigned int &new_index,
-                      double &curvature) const;
+                      double &curvature);
 
   double lookaheadDistance() const { return lookahead_distance_; }
 
 private:
+  geometry_msgs::PoseStamped interpolatedLookaheadTarget(
+      const nav_msgs::Path &path,
+      const geometry_msgs::PoseStamped &current_pose,
+      unsigned int current_index) const;
   unsigned int advanceIndex(const nav_msgs::Path &path,
                             const geometry_msgs::PoseStamped &current_pose,
                             unsigned int current_index) const;
@@ -37,6 +42,7 @@ private:
   double clamp(double value, double min_value, double max_value) const;
   double normalizeAngle(double angle) const;
   double effectiveMaxCurvature() const;
+  double smoothCurvature(double target_curvature);
 
   double lookahead_distance_;
   double v_min_;
@@ -45,6 +51,26 @@ private:
   double k_curve_;
   double max_curvature_;
   double min_turn_radius_;
+  double curvature_filter_tau_;
+  double max_curvature_rate_;
+  double curvature_deadband_;
+  double control_period_;
+  double filtered_curvature_;
+
+#ifdef JGL_DWA_LOCAL_PLANNER_ENABLE_TEST_ACCESS
+public:
+  void setSmoothingForTesting(double filter_tau,
+                              double max_rate,
+                              double deadband,
+                              double control_period)
+  {
+    curvature_filter_tau_ = filter_tau;
+    max_curvature_rate_ = max_rate;
+    curvature_deadband_ = deadband;
+    control_period_ = control_period;
+    reset();
+  }
+#endif
 };
 
 }  // namespace jgl_dwa_local_planner

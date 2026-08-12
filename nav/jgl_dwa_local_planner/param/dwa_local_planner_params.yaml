@@ -24,6 +24,9 @@ DWAPlannerROS:
   max_deviation_from_topo: 0.50
   max_curvature: 2.10
   min_turn_radius: 0.476
+  # Tracking stays below the Ranger Mini V2 dual-Ackermann/spinning boundary.
+  # This is intentionally separate from max_curvature used by path generation.
+  tracking_max_curvature: 1.90
   reference_fallback_boundary_distance: 0.15
   lookahead_distance: 0.50
   v_min: 0.04
@@ -33,6 +36,10 @@ DWAPlannerROS:
   path_deviation_replan_threshold: 0.60
   path_regenerate_cooldown: 1.0
   k_curve: 1.0
+  curvature_filter_tau: 0.25
+  max_curvature_rate: 1.5
+  curvature_deadband: 0.02
+  control_period: 0.10
 
 
 # Robot Configuration Parameters - Kobuki
