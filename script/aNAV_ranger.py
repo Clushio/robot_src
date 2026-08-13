@@ -4,7 +4,7 @@ from PyQt5.QtWidgets import (
     QGridLayout, QLineEdit, QGroupBox, QTabWidget, QFrame, QSizePolicy,
     QRadioButton, QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QMessageBox, QFileDialog, QDialog, QFormLayout,
-    QComboBox
+    QComboBox, QDoubleSpinBox, QCheckBox
 )
 import subprocess
 import time
@@ -12,6 +12,7 @@ import shlex
 import shutil
 import math
 import glob
+import tempfile
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QDoubleValidator
@@ -77,6 +78,7 @@ for python_path in os.environ.get('PYTHONPATH', '').split(os.pathsep):
 
 from cmd_vel_arbiter.srv import FinishMotion, FinishMotionRequest
 from ranger_msgs.msg import MotionState as RangerMotionState
+from x2bot_teleop.srv import NavConfig, NavConfigRequest
 
 
 
@@ -98,6 +100,22 @@ ROBOT_POSITIONS_FILE = os.path.join(
 )
 TOPOLOGY_FILE = os.path.join(os.path.dirname(ROBOT_POSITIONS_FILE), 'topology.yaml')
 TOPOLOGY_BUILDER = os.path.join(SCRIPT_DIR, 'build_topology.py')
+AUTONAV_CONFIG_FILE = os.path.join(
+    os.path.dirname(ROBOT_POSITIONS_FILE), 'autonav_params.yaml'
+)
+AUTONAV_DEFAULTS = {
+    'default_navigation_mode': 1,
+    'loop_navigation_mode': 2,
+    'blocked_timeout': 10.0,
+    'blocked_cooldown_initial': 20.0,
+    'blocked_cooldown_max': 120.0,
+    'blocked_backoff_factor': 2.0,
+    'blocked_wait_timeout': 180.0,
+    'goal_timeout': 120.0,
+    'block_bidirectional': True,
+    'waypoint_reached_distance': 0.20,
+    'fixed_route_final_xy_tolerance': 0.03,
+}
 RVIZ_RECORD_POSE_TOPIC = '/anav/record_pose'
 RVIZ_RECORD_MARKER_TOPIC = '/anav/record_markers'
 
@@ -225,6 +243,7 @@ class MyWindow(QWidget):
     health_snapshot_requested = pyqtSignal(object)
     topology_finished_requested = pyqtSignal(bool, str)
     loop_update_requested = pyqtSignal(int, str, str, int, str)
+    nav_config_received = pyqtSignal(object, str, bool)
 
     def __init__(self):
         super().__init__()
@@ -233,6 +252,7 @@ class MyWindow(QWidget):
         self.resize(960, 820)
 
         self.preview_mode = os.environ.get('ANAV_GUI_PREVIEW') == '1'
+        self.autonav_settings = self.load_autonav_settings()
         self.ros_available = False if self.preview_mode else check_and_start_roscore()
         self.joy_pub = None
         self.safety_pub = None
@@ -277,6 +297,9 @@ class MyWindow(QWidget):
         self.loop_completed_legs = 0
         self.loop_nav_wait_attempts = 0
         self.loop_pending_targets = None
+        self.loop_pending_run_mode = int(
+            self.autonav_settings['loop_navigation_mode']
+        )
         self.loop_stop_event = threading.Event()
         self.loop_thread = None
         if self.ros_available:
@@ -304,6 +327,7 @@ class MyWindow(QWidget):
         self.health_snapshot_requested.connect(self.apply_health_snapshot)
         self.topology_finished_requested.connect(self.on_topology_finished)
         self.loop_update_requested.connect(self.on_loop_update)
+        self.nav_config_received.connect(self.on_nav_config_received)
         if self.ros_available:
             try:
                 self.task_status_sub = rospy.Subscriber(
@@ -756,6 +780,7 @@ class MyWindow(QWidget):
         self.tabs = QTabWidget()
         self.tabs.addTab(self.build_navigation_page(), '导航作业')
         self.tabs.addTab(self.build_loop_page(), '循环任务')
+        self.tabs.addTab(self.build_autonav_parameters_page(), '导航参数')
         self.tabs.addTab(self.build_points_page(), '点位管理')
         self.tabs.addTab(self.build_mapping_page(), '地图构建')
         self.tabs.addTab(self.build_tools_page(), '设备与工具')
@@ -778,6 +803,206 @@ class MyWindow(QWidget):
         chip.setObjectName('chip')
         chip.setAlignment(Qt.AlignCenter)
         return chip
+
+    def load_autonav_settings(self):
+        settings = dict(AUTONAV_DEFAULTS)
+        try:
+            with open(AUTONAV_CONFIG_FILE, 'r', encoding='utf-8') as handle:
+                for raw_line in handle:
+                    line = raw_line.split('#', 1)[0].strip()
+                    if ':' not in line:
+                        continue
+                    key, value = (part.strip() for part in line.split(':', 1))
+                    if key not in settings:
+                        continue
+                    if isinstance(settings[key], bool):
+                        if value.lower() in ('true', '1', 'yes', 'on'):
+                            settings[key] = True
+                        elif value.lower() in ('false', '0', 'no', 'off'):
+                            settings[key] = False
+                    elif key in ('default_navigation_mode',
+                                 'loop_navigation_mode'):
+                        parsed = int(value)
+                        if parsed in (1, 2):
+                            settings[key] = parsed
+                    else:
+                        parsed = float(value)
+                        if math.isfinite(parsed):
+                            settings[key] = parsed
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as error:
+            print(f'Unable to load AutoNAV settings: {error}')
+        return settings
+
+    def collect_nav_settings(self):
+        settings = {
+            key: float(editor.value())
+            for key, editor in self.nav_parameter_widgets.items()
+        }
+        settings['block_bidirectional'] = (
+            self.block_bidirectional_checkbox.isChecked()
+        )
+        settings['default_navigation_mode'] = int(
+            self.navigation_route_mode_combo.currentData()
+        )
+        settings['loop_navigation_mode'] = int(
+            self.loop_route_mode_combo.currentData()
+        )
+        if (settings['blocked_cooldown_max'] <
+                settings['blocked_cooldown_initial']):
+            raise ValueError('阻塞边最大禁用时间不能小于首次禁用时间')
+        return settings
+
+    def set_nav_parameter_widgets(self, settings):
+        for key, editor in self.nav_parameter_widgets.items():
+            if key in settings:
+                editor.setValue(float(settings[key]))
+        if 'block_bidirectional' in settings:
+            self.block_bidirectional_checkbox.setChecked(
+                bool(settings['block_bidirectional'])
+            )
+
+    def set_nav_config_buttons_enabled(self, enabled):
+        self.nav_config_refresh_button.setEnabled(enabled)
+        self.nav_config_apply_button.setEnabled(enabled)
+        self.nav_config_save_button.setEnabled(enabled)
+
+    def request_nav_config(self, apply):
+        if not self.ros_available:
+            self.set_status('ROS 未连接，无法访问 AutoNAV 参数服务。', 'error')
+            return
+        if apply:
+            try:
+                settings = self.collect_nav_settings()
+            except ValueError as error:
+                self.set_status(str(error), 'warning')
+                return
+        else:
+            settings = dict(AUTONAV_DEFAULTS)
+        self.set_nav_config_buttons_enabled(False)
+        action_text = '应用' if apply else '读取'
+        self.nav_config_state_label.setText(
+            f'正在{action_text} AutoNAV 参数…'
+        )
+
+        def call_service():
+            try:
+                rospy.wait_for_service('/anav/nav_config', timeout=2.0)
+                proxy = rospy.ServiceProxy('/anav/nav_config', NavConfig)
+                request = NavConfigRequest()
+                request.apply = apply
+                request.blocked_timeout = settings['blocked_timeout']
+                request.blocked_cooldown_initial = (
+                    settings['blocked_cooldown_initial']
+                )
+                request.blocked_cooldown_max = settings['blocked_cooldown_max']
+                request.blocked_backoff_factor = (
+                    settings['blocked_backoff_factor']
+                )
+                request.blocked_wait_timeout = settings['blocked_wait_timeout']
+                request.goal_timeout = settings['goal_timeout']
+                request.block_bidirectional = settings['block_bidirectional']
+                request.waypoint_reached_distance = (
+                    settings['waypoint_reached_distance']
+                )
+                request.fixed_route_final_xy_tolerance = (
+                    settings['fixed_route_final_xy_tolerance']
+                )
+                response = proxy(request)
+                current = {
+                    'blocked_timeout': response.blocked_timeout,
+                    'blocked_cooldown_initial':
+                        response.blocked_cooldown_initial,
+                    'blocked_cooldown_max': response.blocked_cooldown_max,
+                    'blocked_backoff_factor':
+                        response.blocked_backoff_factor,
+                    'blocked_wait_timeout': response.blocked_wait_timeout,
+                    'goal_timeout': response.goal_timeout,
+                    'block_bidirectional': response.block_bidirectional,
+                    'waypoint_reached_distance':
+                        response.waypoint_reached_distance,
+                    'fixed_route_final_xy_tolerance':
+                        response.fixed_route_final_xy_tolerance,
+                    '_navigation_active': response.navigation_active,
+                    '_update_widgets': not apply or response.success,
+                }
+                self.nav_config_received.emit(
+                    current, response.message, response.success
+                )
+            except (rospy.ROSException, rospy.ServiceException) as error:
+                self.nav_config_received.emit(
+                    {'_update_widgets': False},
+                    f'AutoNAV 参数服务不可用：{error}', False
+                )
+
+        threading.Thread(target=call_service, daemon=True).start()
+
+    def refresh_nav_config(self):
+        self.request_nav_config(False)
+
+    def apply_nav_config(self):
+        self.request_nav_config(True)
+
+    def on_nav_config_received(self, settings, message, success):
+        self.set_nav_config_buttons_enabled(True)
+        if settings.get('_update_widgets'):
+            self.set_nav_parameter_widgets(settings)
+        active_text = (
+            '；当前有任务运行' if settings.get('_navigation_active') else ''
+        )
+        self.nav_config_state_label.setText(message + active_text)
+        self.set_status(message, 'success' if success else 'error')
+
+    def save_nav_config(self):
+        try:
+            settings = self.collect_nav_settings()
+            directory = os.path.dirname(AUTONAV_CONFIG_FILE)
+            os.makedirs(directory, exist_ok=True)
+            file_descriptor, temporary_path = tempfile.mkstemp(
+                prefix='.autonav_params.', suffix='.tmp', dir=directory,
+                text=True
+            )
+            try:
+                with os.fdopen(file_descriptor, 'w', encoding='utf-8') as handle:
+                    handle.write('# AutoNAV GUI and run_nav startup defaults\n')
+                    handle.write(
+                        f'default_navigation_mode: '
+                        f'{settings["default_navigation_mode"]}\n'
+                    )
+                    handle.write(
+                        f'loop_navigation_mode: '
+                        f'{settings["loop_navigation_mode"]}\n'
+                    )
+                    for key in (
+                        'blocked_timeout', 'blocked_cooldown_initial',
+                        'blocked_cooldown_max', 'blocked_backoff_factor',
+                        'blocked_wait_timeout', 'goal_timeout',
+                        'waypoint_reached_distance',
+                        'fixed_route_final_xy_tolerance',
+                    ):
+                        handle.write(f'{key}: {settings[key]:.6g}\n')
+                    handle.write(
+                        'block_bidirectional: '
+                        f'{str(settings["block_bidirectional"]).lower()}\n'
+                    )
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary_path, AUTONAV_CONFIG_FILE)
+            except Exception:
+                try:
+                    os.unlink(temporary_path)
+                except OSError:
+                    pass
+                raise
+            self.autonav_settings = settings
+            message = f'已保存启动默认值：{AUTONAV_CONFIG_FILE}'
+            self.nav_config_state_label.setText(
+                message + '；重启 AutoNAV 后自动加载'
+            )
+            self.set_status(message, 'success')
+        except (OSError, ValueError) as error:
+            self.set_status(f'保存 AutoNAV 参数失败：{error}', 'error')
 
     def build_navigation_page(self):
         page = QWidget()
@@ -879,7 +1104,7 @@ class MyWindow(QWidget):
 
         introduction = QLabel(
             '从当前 topology.yaml 中选择两个点。机器人到达一端后会自动前往另一端，'
-            '直到点击“停止循环”。循环使用锁定路线，运行中不允许重新规划或绕行。'
+            '直到点击“停止循环”。路线策略可在下方选择。'
         )
         introduction.setObjectName('subTitle')
         introduction.setWordWrap(True)
@@ -900,6 +1125,14 @@ class MyWindow(QWidget):
         selection_layout.addWidget(QLabel('循环点 B'), 1, 0)
         selection_layout.addWidget(self.loop_point_b_combo, 1, 1)
         selection_layout.addWidget(self.loop_refresh_button, 0, 2, 2, 1)
+        self.loop_route_mode_combo = QComboBox()
+        self.loop_route_mode_combo.addItem('固定路线：停车等待，不绕路', 2)
+        self.loop_route_mode_combo.addItem('自动绕路：堵塞后重新规划', 1)
+        loop_mode = int(self.autonav_settings['loop_navigation_mode'])
+        loop_mode_index = self.loop_route_mode_combo.findData(loop_mode)
+        self.loop_route_mode_combo.setCurrentIndex(max(0, loop_mode_index))
+        selection_layout.addWidget(QLabel('路线策略'), 2, 0)
+        selection_layout.addWidget(self.loop_route_mode_combo, 2, 1, 1, 2)
         selection_layout.setColumnStretch(1, 1)
         layout.addWidget(selection)
 
@@ -930,14 +1163,114 @@ class MyWindow(QWidget):
         layout.addWidget(control)
 
         safety_note = QLabel(
-            '遇到障碍物时机器人只会在原路线上停车等待，障碍消失后继续；'
-            '不会选择其他拓扑边。点击停止后会取消当前 MoveBase 目标并停车。'
+            '固定路线遇到障碍物时在原路线上停车等待；自动绕路会在堵塞超时后'
+            '尝试其他拓扑边。两种模式都受 Collision Monitor 最终安全保护。'
         )
         safety_note.setObjectName('subTitle')
         safety_note.setWordWrap(True)
         layout.addWidget(safety_note)
         layout.addStretch()
         self.refresh_loop_points()
+        return page
+
+    def build_autonav_parameters_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 10, 0, 0)
+        layout.setSpacing(14)
+
+        strategy = QGroupBox('1  默认任务策略')
+        strategy_layout = QFormLayout(strategy)
+        self.navigation_route_mode_combo = QComboBox()
+        self.navigation_route_mode_combo.addItem(
+            '自动绕路：堵塞后重新规划（run=1）', 1
+        )
+        self.navigation_route_mode_combo.addItem(
+            '固定路线：停车等待，不绕路（run=2）', 2
+        )
+        navigation_mode = int(
+            self.autonav_settings['default_navigation_mode']
+        )
+        navigation_index = self.navigation_route_mode_combo.findData(
+            navigation_mode
+        )
+        self.navigation_route_mode_combo.setCurrentIndex(
+            max(0, navigation_index)
+        )
+        strategy_layout.addRow('普通导航', self.navigation_route_mode_combo)
+        strategy_note = QLabel(
+            '策略选择立即用于下一次目标下发；不会改变正在执行的任务。'
+        )
+        strategy_note.setObjectName('subTitle')
+        strategy_note.setWordWrap(True)
+        strategy_layout.addRow('', strategy_note)
+        layout.addWidget(strategy)
+
+        parameters = QGroupBox('2  堵塞、重规划与到达判定')
+        parameter_layout = QFormLayout(parameters)
+        self.nav_parameter_widgets = {}
+
+        def add_number(key, label, minimum, maximum, decimals, step, suffix):
+            editor = QDoubleSpinBox()
+            editor.setRange(minimum, maximum)
+            editor.setDecimals(decimals)
+            editor.setSingleStep(step)
+            editor.setSuffix(suffix)
+            editor.setValue(float(self.autonav_settings[key]))
+            self.nav_parameter_widgets[key] = editor
+            parameter_layout.addRow(label, editor)
+
+        add_number('blocked_timeout', '无有效运动判堵时间',
+                   0.1, 3600.0, 1, 1.0, ' s')
+        add_number('blocked_cooldown_initial', '阻塞边首次禁用时间',
+                   0.1, 3600.0, 1, 1.0, ' s')
+        add_number('blocked_cooldown_max', '阻塞边最大禁用时间',
+                   0.1, 86400.0, 1, 5.0, ' s')
+        add_number('blocked_backoff_factor', '重复堵塞退避倍数',
+                   1.0, 10.0, 2, 0.1, ' ×')
+        add_number('blocked_wait_timeout', '无替代路线最长等待',
+                   0.0, 86400.0, 1, 5.0, ' s')
+        add_number('goal_timeout', '单个导航目标超时',
+                   0.1, 86400.0, 1, 5.0, ' s')
+        add_number('waypoint_reached_distance', '中间拓扑点到达距离',
+                   0.01, 2.0, 3, 0.01, ' m')
+        add_number('fixed_route_final_xy_tolerance', '固定路线终点 XY 容差',
+                   0.005, 1.0, 3, 0.005, ' m')
+        self.block_bidirectional_checkbox = QCheckBox(
+            '同时临时禁用反向拓扑边'
+        )
+        self.block_bidirectional_checkbox.setChecked(
+            bool(self.autonav_settings['block_bidirectional'])
+        )
+        parameter_layout.addRow('双向边堵塞处理',
+                                self.block_bidirectional_checkbox)
+        layout.addWidget(parameters)
+
+        actions = QGroupBox('3  应用与保存')
+        action_layout = QVBoxLayout(actions)
+        button_row = QHBoxLayout()
+        self.nav_config_refresh_button = QPushButton('读取当前节点')
+        self.nav_config_apply_button = QPushButton('应用到当前节点')
+        self.nav_config_apply_button.setProperty('primary', True)
+        self.nav_config_save_button = QPushButton('保存为启动默认值')
+        self.nav_config_refresh_button.clicked.connect(
+            self.refresh_nav_config
+        )
+        self.nav_config_apply_button.clicked.connect(self.apply_nav_config)
+        self.nav_config_save_button.clicked.connect(self.save_nav_config)
+        button_row.addWidget(self.nav_config_refresh_button)
+        button_row.addWidget(self.nav_config_apply_button)
+        button_row.addWidget(self.nav_config_save_button)
+        button_row.addStretch()
+        action_layout.addLayout(button_row)
+        self.nav_config_state_label = QLabel(
+            f'启动默认值文件：{AUTONAV_CONFIG_FILE}'
+        )
+        self.nav_config_state_label.setObjectName('subTitle')
+        self.nav_config_state_label.setWordWrap(True)
+        action_layout.addWidget(self.nav_config_state_label)
+        layout.addWidget(actions)
+        layout.addStretch()
         return page
 
     def build_points_page(self):
@@ -1423,6 +1756,7 @@ class MyWindow(QWidget):
         self.loop_point_a_combo.setEnabled(not running)
         self.loop_point_b_combo.setEnabled(not running)
         self.loop_refresh_button.setEnabled(not running)
+        self.loop_route_mode_combo.setEnabled(not running)
 
     def rosservice_is_ready(self, service_name):
         try:
@@ -1463,6 +1797,9 @@ class MyWindow(QWidget):
             return
 
         self.loop_pending_targets = (dict(target_a), dict(target_b))
+        self.loop_pending_run_mode = int(
+            self.loop_route_mode_combo.currentData()
+        )
         self.loop_waiting_for_nav = True
         self.loop_nav_wait_attempts = 0
         self.set_loop_controls_running(True)
@@ -1508,7 +1845,8 @@ class MyWindow(QWidget):
         self.set_loop_controls_running(True)
         self.loop_count_label.setText('已完成单程：0')
         self.loop_state_label.setText(
-            f'循环已启动：{targets[0]["name"]} ↔ {targets[1]["name"]}'
+            f'循环已启动：{targets[0]["name"]} ↔ {targets[1]["name"]}；'
+            f'{"固定路线" if self.loop_pending_run_mode == 2 else "允许绕路"}'
         )
         self.set_status(
             f'循环已启动：{targets[0]["name"]} ↔ {targets[1]["name"]}。',
@@ -1516,14 +1854,16 @@ class MyWindow(QWidget):
         )
         self.loop_thread = threading.Thread(
             target=self.run_loop_navigation,
-            args=(generation, targets, self.loop_stop_event),
+            args=(generation, targets, self.loop_stop_event,
+                  self.loop_pending_run_mode),
             daemon=True,
         )
         self.loop_thread.start()
 
-    def call_topology_target(self, target_id, current_id):
+    def call_topology_target(self, target_id, current_id, run_mode):
         request = (
-            f'{{data: {int(target_id)}, currentID: {int(current_id)}, run: 2}}'
+            f'{{data: {int(target_id)}, currentID: {int(current_id)}, '
+            f'run: {int(run_mode)}}}'
         )
         try:
             result = subprocess.run(
@@ -1549,7 +1889,7 @@ class MyWindow(QWidget):
             success = False
         return success, detail or ('已到达' if success else '导航服务未返回成功')
 
-    def run_loop_navigation(self, generation, targets, stop_event):
+    def run_loop_navigation(self, generation, targets, stop_event, run_mode):
         current_id = self.currentID
         completed = 0
         target_offset = 0
@@ -1559,7 +1899,7 @@ class MyWindow(QWidget):
                 generation, 'running', target['name'], completed, ''
             )
             success, detail = self.call_topology_target(
-                target['request_id'], current_id
+                target['request_id'], current_id, run_mode
             )
             if stop_event.is_set():
                 return
@@ -2824,7 +3164,7 @@ class MyWindow(QWidget):
         # 构建请求数据
         data = str(id)  # 第一个参数
         curid = str(self.currentID)
-        run = '1'       # 第二个参数
+        run = str(int(self.navigation_route_mode_combo.currentData()))
 
         # 构建完整的 ROS 命令
         ros_command = f'rosservice call {service_name} {data} {curid} {run}'
@@ -2867,7 +3207,7 @@ class MyWindow(QWidget):
         # 构建请求数据（位置参数）
         data = str(id)  # 第一个参数
         curid = str(self.currentID)
-        run = '1'       # 第二个参数
+        run = str(int(self.navigation_route_mode_combo.currentData()))
 
         # 构建完整的 ROS 命令
         request = f"{{data: {data}, currentID: {curid}, run: {run}}}"

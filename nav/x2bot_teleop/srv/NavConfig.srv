@@ -1,0 +1,23 @@
+bool apply
+float64 blocked_timeout
+float64 blocked_cooldown_initial
+float64 blocked_cooldown_max
+float64 blocked_backoff_factor
+float64 blocked_wait_timeout
+float64 goal_timeout
+bool block_bidirectional
+float64 waypoint_reached_distance
+float64 fixed_route_final_xy_tolerance
+---
+bool success
+string message
+bool navigation_active
+float64 blocked_timeout
+float64 blocked_cooldown_initial
+float64 blocked_cooldown_max
+float64 blocked_backoff_factor
+float64 blocked_wait_timeout
+float64 goal_timeout
+bool block_bidirectional
+float64 waypoint_reached_distance
+float64 fixed_route_final_xy_tolerance

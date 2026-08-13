@@ -19,6 +19,7 @@
 #include <tf2_ros/transform_listener.h>
 #include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
+#include <x2bot_teleop/NavConfig.h>
 #include <x2bot_teleop/SetInt.h>
 
 #include <algorithm>
@@ -54,6 +55,18 @@ struct TopoEdge {
     ros::WallTime blocked_until;
     int failure_count;
     std::string source;
+};
+
+struct NavConfigValues {
+    double blocked_timeout;
+    double blocked_cooldown_initial;
+    double blocked_cooldown_max;
+    double blocked_backoff_factor;
+    double blocked_wait_timeout;
+    double goal_timeout;
+    bool block_bidirectional;
+    double waypoint_reached_distance;
+    double fixed_route_final_xy_tolerance;
 };
 
 typedef actionlib::SimpleActionClient<move_base_msgs::MoveBaseAction> MVClient;
@@ -102,6 +115,7 @@ public:
         private_nh.param("maps_dir", maps_dir_, maps_dir_);
         normalizeMapsDir();
         ROS_INFO_STREAM("Topology navigation maps_dir: " << maps_dir_);
+        loadSavedNavConfig(joinPath(maps_dir_, "autonav_params.yaml"));
         private_nh.param("blocked_timeout", blocked_timeout_, blocked_timeout_);
         private_nh.param("blocked_cooldown_initial", blocked_cooldown_initial_,
                          blocked_cooldown_initial_);
@@ -149,6 +163,8 @@ public:
         control_nh_.setCallbackQueue(&joy_callback_queue_);
         cancel_navigation_service_ = control_nh_.advertiseService(
             "/anav/cancel_navigation", &mynav::cancelNavigationCallback, this);
+        nav_config_service_ = control_nh_.advertiseService(
+            "/anav/nav_config", &mynav::navConfigCallback, this);
         joy_spinner_.start();
         marker_pub = nh_.advertise<visualization_msgs::Marker>("visualization_marker", 1);
         marker_array_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("topology_markers", 1, true);
@@ -248,8 +264,16 @@ public:
         if (exec_path)
         {
             publishFixedRouteMode(fixed_route);
+            {
+                std::lock_guard<std::mutex> lock(nav_config_mutex_);
+                navigation_active_.store(true);
+            }
             const bool ok = runTopologyMission(
                 target_index, path_indices, fixed_route);
+            {
+                std::lock_guard<std::mutex> lock(nav_config_mutex_);
+                navigation_active_.store(false);
+            }
             publishFixedRouteMode(false);
             const bool canceled = cancel_requested_.exchange(false);
             const bool centered = notifyMotionFinished(
@@ -494,6 +518,7 @@ private:
     int reference_status_code_ = 0;
     ros::ServiceServer plan_path_service;
     ros::ServiceServer cancel_navigation_service_;
+    ros::ServiceServer nav_config_service_;
     ros::ServiceClient finish_motion_client_;
 
     int current_pose_index;
@@ -520,6 +545,8 @@ private:
     bool validate_pass_through_action_success_distance_;
     double goal_timeout_;
     bool block_bidirectional_;
+    std::atomic<bool> navigation_active_{false};
+    std::mutex nav_config_mutex_;
     std::vector<int> active_path_;
     int active_next_index_ = -1;
     std::string maps_dir_;
@@ -631,6 +658,235 @@ private:
         {
             maps_dir_.erase(maps_dir_.size() - 1);
         }
+    }
+
+    NavConfigValues currentNavConfig() const
+    {
+        NavConfigValues config;
+        config.blocked_timeout = blocked_timeout_;
+        config.blocked_cooldown_initial = blocked_cooldown_initial_;
+        config.blocked_cooldown_max = blocked_cooldown_max_;
+        config.blocked_backoff_factor = blocked_backoff_factor_;
+        config.blocked_wait_timeout = blocked_wait_timeout_;
+        config.goal_timeout = goal_timeout_;
+        config.block_bidirectional = block_bidirectional_;
+        config.waypoint_reached_distance = waypoint_reached_distance_;
+        config.fixed_route_final_xy_tolerance = fixed_route_final_xy_tolerance_;
+        return config;
+    }
+
+    static bool validateNavConfig(const NavConfigValues &config,
+                                  std::string &reason)
+    {
+        const double values[] = {
+            config.blocked_timeout,
+            config.blocked_cooldown_initial,
+            config.blocked_cooldown_max,
+            config.blocked_backoff_factor,
+            config.blocked_wait_timeout,
+            config.goal_timeout,
+            config.waypoint_reached_distance,
+            config.fixed_route_final_xy_tolerance};
+        for (double value : values)
+        {
+            if (!std::isfinite(value))
+            {
+                reason = "参数必须是有限数值";
+                return false;
+            }
+        }
+        if (config.blocked_timeout < 0.1 || config.blocked_timeout > 3600.0)
+        {
+            reason = "无有效运动超时必须在 0.1 到 3600 秒之间";
+            return false;
+        }
+        if (config.blocked_cooldown_initial < 0.1 ||
+            config.blocked_cooldown_initial > 3600.0)
+        {
+            reason = "首次阻塞禁用时间必须在 0.1 到 3600 秒之间";
+            return false;
+        }
+        if (config.blocked_cooldown_max < config.blocked_cooldown_initial ||
+            config.blocked_cooldown_max > 86400.0)
+        {
+            reason = "最大阻塞禁用时间不得小于首次禁用时间，且不得超过 86400 秒";
+            return false;
+        }
+        if (config.blocked_backoff_factor < 1.0 ||
+            config.blocked_backoff_factor > 10.0)
+        {
+            reason = "阻塞退避倍数必须在 1.0 到 10.0 之间";
+            return false;
+        }
+        if (config.blocked_wait_timeout < 0.0 ||
+            config.blocked_wait_timeout > 86400.0)
+        {
+            reason = "无替代路线等待时间必须在 0 到 86400 秒之间";
+            return false;
+        }
+        if (config.goal_timeout < 0.1 || config.goal_timeout > 86400.0)
+        {
+            reason = "单目标超时必须在 0.1 到 86400 秒之间";
+            return false;
+        }
+        if (config.waypoint_reached_distance < 0.01 ||
+            config.waypoint_reached_distance > 2.0)
+        {
+            reason = "中间点到达距离必须在 0.01 到 2.0 米之间";
+            return false;
+        }
+        if (config.fixed_route_final_xy_tolerance < 0.005 ||
+            config.fixed_route_final_xy_tolerance > 1.0)
+        {
+            reason = "固定路线终点容差必须在 0.005 到 1.0 米之间";
+            return false;
+        }
+        reason.clear();
+        return true;
+    }
+
+    void applyNavConfig(const NavConfigValues &config)
+    {
+        blocked_timeout_ = config.blocked_timeout;
+        blocked_cooldown_initial_ = config.blocked_cooldown_initial;
+        blocked_cooldown_max_ = config.blocked_cooldown_max;
+        blocked_backoff_factor_ = config.blocked_backoff_factor;
+        blocked_wait_timeout_ = config.blocked_wait_timeout;
+        goal_timeout_ = config.goal_timeout;
+        block_bidirectional_ = config.block_bidirectional;
+        waypoint_reached_distance_ = config.waypoint_reached_distance;
+        fixed_route_final_xy_tolerance_ =
+            config.fixed_route_final_xy_tolerance;
+    }
+
+    void fillNavConfigResponse(x2bot_teleop::NavConfig::Response &response)
+    {
+        const NavConfigValues config = currentNavConfig();
+        response.navigation_active = navigation_active_.load();
+        response.blocked_timeout = config.blocked_timeout;
+        response.blocked_cooldown_initial = config.blocked_cooldown_initial;
+        response.blocked_cooldown_max = config.blocked_cooldown_max;
+        response.blocked_backoff_factor = config.blocked_backoff_factor;
+        response.blocked_wait_timeout = config.blocked_wait_timeout;
+        response.goal_timeout = config.goal_timeout;
+        response.block_bidirectional = config.block_bidirectional;
+        response.waypoint_reached_distance = config.waypoint_reached_distance;
+        response.fixed_route_final_xy_tolerance =
+            config.fixed_route_final_xy_tolerance;
+    }
+
+    bool navConfigCallback(x2bot_teleop::NavConfig::Request &request,
+                           x2bot_teleop::NavConfig::Response &response)
+    {
+        std::lock_guard<std::mutex> lock(nav_config_mutex_);
+        if (!request.apply)
+        {
+            response.success = true;
+            response.message = "已读取 AutoNAV 当前参数";
+            fillNavConfigResponse(response);
+            return true;
+        }
+        if (navigation_active_.load())
+        {
+            response.success = false;
+            response.message = "导航任务正在执行，请停止任务后再应用参数";
+            fillNavConfigResponse(response);
+            return true;
+        }
+
+        NavConfigValues config;
+        config.blocked_timeout = request.blocked_timeout;
+        config.blocked_cooldown_initial = request.blocked_cooldown_initial;
+        config.blocked_cooldown_max = request.blocked_cooldown_max;
+        config.blocked_backoff_factor = request.blocked_backoff_factor;
+        config.blocked_wait_timeout = request.blocked_wait_timeout;
+        config.goal_timeout = request.goal_timeout;
+        config.block_bidirectional = request.block_bidirectional;
+        config.waypoint_reached_distance = request.waypoint_reached_distance;
+        config.fixed_route_final_xy_tolerance =
+            request.fixed_route_final_xy_tolerance;
+        std::string reason;
+        if (!validateNavConfig(config, reason))
+        {
+            response.success = false;
+            response.message = reason;
+            fillNavConfigResponse(response);
+            return true;
+        }
+
+        applyNavConfig(config);
+        response.success = true;
+        response.message = "AutoNAV 参数已应用到当前节点";
+        fillNavConfigResponse(response);
+        ROS_INFO("Applied AutoNAV runtime configuration from GUI.");
+        return true;
+    }
+
+    void loadSavedNavConfig(const std::string &filename)
+    {
+        std::ifstream file(filename);
+        if (!file.is_open())
+        {
+            ROS_INFO_STREAM("AutoNAV parameter file not found; use defaults: "
+                            << filename);
+            return;
+        }
+
+        NavConfigValues config = currentNavConfig();
+        std::string line;
+        try
+        {
+            while (std::getline(file, line))
+            {
+                const std::size_t comment = line.find('#');
+                if (comment != std::string::npos)
+                {
+                    line.erase(comment);
+                }
+                const std::size_t separator = line.find(':');
+                if (separator == std::string::npos)
+                {
+                    continue;
+                }
+                const std::string key = trim(line.substr(0, separator));
+                const std::string value = trim(line.substr(separator + 1));
+                if (key == "blocked_timeout")
+                    config.blocked_timeout = std::stod(value);
+                else if (key == "blocked_cooldown_initial")
+                    config.blocked_cooldown_initial = std::stod(value);
+                else if (key == "blocked_cooldown_max")
+                    config.blocked_cooldown_max = std::stod(value);
+                else if (key == "blocked_backoff_factor")
+                    config.blocked_backoff_factor = std::stod(value);
+                else if (key == "blocked_wait_timeout")
+                    config.blocked_wait_timeout = std::stod(value);
+                else if (key == "goal_timeout")
+                    config.goal_timeout = std::stod(value);
+                else if (key == "block_bidirectional")
+                    config.block_bidirectional =
+                        parseBool(value, config.block_bidirectional);
+                else if (key == "waypoint_reached_distance")
+                    config.waypoint_reached_distance = std::stod(value);
+                else if (key == "fixed_route_final_xy_tolerance")
+                    config.fixed_route_final_xy_tolerance = std::stod(value);
+            }
+        }
+        catch (const std::exception &error)
+        {
+            ROS_ERROR_STREAM("Invalid AutoNAV parameter file " << filename
+                             << ": " << error.what() << "; use defaults.");
+            return;
+        }
+
+        std::string reason;
+        if (!validateNavConfig(config, reason))
+        {
+            ROS_ERROR_STREAM("Rejected AutoNAV parameter file " << filename
+                             << ": " << reason << "; use defaults.");
+            return;
+        }
+        applyNavConfig(config);
+        ROS_INFO_STREAM("Loaded AutoNAV parameters from " << filename);
     }
 
     void parseMapOrigin(const std::string &value)
@@ -2208,12 +2464,21 @@ private:
             return;
         }
 
+        {
+            std::lock_guard<std::mutex> lock(nav_config_mutex_);
+            navigation_active_.store(true);
+        }
+
         std::vector<int> path_indices;
         for (int i = 0; i < static_cast<int>(target_poses.size()); ++i)
         {
             path_indices.push_back(i);
         }
         run_planed_pathnode(path_indices);
+        {
+            std::lock_guard<std::mutex> lock(nav_config_mutex_);
+            navigation_active_.store(false);
+        }
     }
 
     void start()

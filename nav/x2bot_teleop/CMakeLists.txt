@@ -21,6 +21,7 @@ find_package(catkin REQUIRED COMPONENTS
 
 add_service_files(
   FILES
+  NavConfig.srv
   SetInt.srv
   SetTagY.srv
 )
