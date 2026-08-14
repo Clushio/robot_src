@@ -24,9 +24,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <cmath>
 #include <fstream>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -49,6 +51,8 @@ struct TargetPose {
 struct TopoEdge {
     int to;
     double cost;
+    double length;
+    double min_clearance;
     bool trusted;
     bool bidirectional;
     bool configured_blocked;
@@ -106,9 +110,12 @@ public:
           static_map_resolution_(0.05),
           static_map_origin_x_(0.0),
           static_map_origin_y_(0.0),
+          static_map_origin_yaw_(0.0),
           static_map_occupied_thresh_(0.65),
+          static_map_free_thresh_(0.196),
           static_map_negate_(false),
-          static_map_inflation_radius_(0.40)
+          static_map_unknown_is_obstacle_(true),
+          static_map_inflation_radius_(std::hypot(0.36, 0.25) + 0.15)
     {
         ros::NodeHandle private_nh("~");
         maps_dir_ = defaultMapsDir();
@@ -165,6 +172,10 @@ public:
             "/anav/cancel_navigation", &mynav::cancelNavigationCallback, this);
         nav_config_service_ = control_nh_.advertiseService(
             "/anav/nav_config", &mynav::navConfigCallback, this);
+        // Reload mutates the graph and therefore runs on the main callback
+        // queue, serialized with planning and marker publication.
+        reload_topology_service_ = nh_.advertiseService(
+            "/anav/reload_topology", &mynav::reloadTopologyCallback, this);
         joy_spinner_.start();
         marker_pub = nh_.advertise<visualization_msgs::Marker>("visualization_marker", 1);
         marker_array_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("topology_markers", 1, true);
@@ -379,6 +390,11 @@ public:
         }
 
         numofpnts = target_poses.size();
+        if (!fingerprintFiles({positions_file}, loaded_positions_fingerprint_))
+        {
+            ROS_ERROR_STREAM("Failed to fingerprint " << positions_file);
+            return false;
+        }
         ROS_INFO("Loaded %d navigation points.", numofpnts);
         publishNavPointsMarkers();
         return numofpnts > 0;
@@ -386,28 +402,22 @@ public:
 
     bool loadTopology()
     {
+        const std::map<int, std::vector<TopoEdge>> previous_graph = graph;
         graph.clear();
         if (loadTopologyYaml(joinPath(maps_dir_, "topology.yaml")))
         {
             ROS_INFO_STREAM("Loaded topology.yaml with " << edgeCount() << " directed edges.");
             return true;
         }
-
-        ROS_WARN("topology.yaml not found or invalid, try legacy topo.txt.");
-        if (loadTopoFromTxt())
-        {
-            ROS_INFO_STREAM("Loaded topo.txt with " << edgeCount() << " directed edges.");
-            return true;
-        }
-
-        ROS_WARN("No topology file available, build sequential trusted topology from robot_positions.txt.");
-        buildSequentialTopology();
-        return edgeCount() > 0;
+        graph = previous_graph;
+        ROS_ERROR("topology.yaml is missing, stale, or unsafe; refusing implicit sequential fallback.");
+        return false;
     }
 
     bool loadStaticMap()
     {
         const std::string map_yaml = joinPath(maps_dir_, "map.yaml");
+        static_map_yaml_path_ = map_yaml;
         std::ifstream yaml_file(map_yaml);
         if (!yaml_file.is_open())
         {
@@ -435,6 +445,10 @@ public:
             else if (startsWith(line, "occupied_thresh:"))
             {
                 static_map_occupied_thresh_ = std::stod(afterColon(line));
+            }
+            else if (startsWith(line, "free_thresh:"))
+            {
+                static_map_free_thresh_ = std::stod(afterColon(line));
             }
             else if (startsWith(line, "negate:"))
             {
@@ -475,20 +489,54 @@ public:
             ROS_WARN_STREAM("Failed to read static map image: " << pgm_file);
             return false;
         }
+        static_map_image_path_ = pgm_file;
 
         static_map_occupied_.assign(pixels.size(), 0);
-        for (std::size_t i = 0; i < pixels.size(); ++i)
+        int unknown_cells = 0;
+        for (int my = 0; my < static_map_height_; ++my)
         {
-            const double normalized = static_cast<double>(pixels[i]) / std::max(1, max_value);
-            const double occupancy = static_map_negate_ ? normalized : (1.0 - normalized);
-            static_map_occupied_[i] = occupancy >= static_map_occupied_thresh_ ? 1 : 0;
+            const int raster_y = static_map_height_ - 1 - my;
+            for (int mx = 0; mx < static_map_width_; ++mx)
+            {
+                const std::size_t raster_index = raster_y * static_map_width_ + mx;
+                const std::size_t map_index = my * static_map_width_ + mx;
+                const double normalized =
+                    static_cast<double>(pixels[raster_index]) / std::max(1, max_value);
+                const double occupancy =
+                    static_map_negate_ ? normalized : (1.0 - normalized);
+                const bool occupied = occupancy >= static_map_occupied_thresh_;
+                const bool unknown = !occupied && occupancy > static_map_free_thresh_;
+                if (unknown)
+                {
+                    ++unknown_cells;
+                }
+                static_map_occupied_[map_index] =
+                    occupied || (static_map_unknown_is_obstacle_ && unknown) ? 1 : 0;
+            }
+        }
+        for (int mx = 0; mx < static_map_width_; ++mx)
+        {
+            static_map_occupied_[mx] = 1;
+            static_map_occupied_[(static_map_height_ - 1) * static_map_width_ + mx] = 1;
+        }
+        for (int my = 0; my < static_map_height_; ++my)
+        {
+            static_map_occupied_[my * static_map_width_] = 1;
+            static_map_occupied_[my * static_map_width_ + static_map_width_ - 1] = 1;
         }
         inflateStaticMap();
 
+        if (!fingerprintFiles({static_map_yaml_path_, static_map_image_path_},
+                              loaded_static_map_fingerprint_))
+        {
+            ROS_ERROR("Failed to fingerprint the loaded static map.");
+            return false;
+        }
+
         static_map_loaded_ = true;
-        ROS_INFO("Loaded static map for topology connect check: %dx%d, resolution %.3f, inflation %.2f m.",
+        ROS_INFO("Loaded static map for topology connect check: %dx%d, resolution %.3f, inflation %.3f m, unknown=%d.",
                  static_map_width_, static_map_height_, static_map_resolution_,
-                 static_map_inflation_radius_);
+                 static_map_inflation_radius_, unknown_cells);
         return true;
     }
 
@@ -519,6 +567,7 @@ private:
     ros::ServiceServer plan_path_service;
     ros::ServiceServer cancel_navigation_service_;
     ros::ServiceServer nav_config_service_;
+    ros::ServiceServer reload_topology_service_;
     ros::ServiceClient finish_motion_client_;
 
     int current_pose_index;
@@ -556,10 +605,17 @@ private:
     double static_map_resolution_;
     double static_map_origin_x_;
     double static_map_origin_y_;
+    double static_map_origin_yaw_;
     double static_map_occupied_thresh_;
+    double static_map_free_thresh_;
     bool static_map_negate_;
+    bool static_map_unknown_is_obstacle_;
     double static_map_inflation_radius_;
     std::vector<unsigned char> static_map_occupied_;
+    std::string static_map_yaml_path_;
+    std::string static_map_image_path_;
+    std::string loaded_positions_fingerprint_;
+    std::string loaded_static_map_fingerprint_;
 
     bool notifyMotionFinished(uint8_t reason)
     {
@@ -645,6 +701,48 @@ private:
             return dir + name;
         }
         return dir + "/" + name;
+    }
+
+    static std::string unquote(const std::string &value)
+    {
+        if (value.size() >= 2 &&
+            ((value.front() == '"' && value.back() == '"') ||
+             (value.front() == '\'' && value.back() == '\'')))
+        {
+            return value.substr(1, value.size() - 2);
+        }
+        return value;
+    }
+
+    static bool fingerprintFiles(const std::vector<std::string> &filenames,
+                                 std::string &fingerprint)
+    {
+        const uint64_t offset = UINT64_C(14695981039346656037);
+        const uint64_t prime = UINT64_C(1099511628211);
+        uint64_t value = offset;
+        char buffer[64 * 1024];
+        for (const std::string &filename : filenames)
+        {
+            std::ifstream file(filename, std::ios::binary);
+            if (!file.is_open())
+            {
+                return false;
+            }
+            while (file.good())
+            {
+                file.read(buffer, sizeof(buffer));
+                const std::streamsize count = file.gcount();
+                for (std::streamsize i = 0; i < count; ++i)
+                {
+                    value ^= static_cast<unsigned char>(buffer[i]);
+                    value *= prime;
+                }
+            }
+        }
+        std::ostringstream stream;
+        stream << std::hex << std::setfill('0') << std::setw(16) << value;
+        fingerprint = stream.str();
+        return true;
     }
 
     static std::string defaultMapsDir()
@@ -822,6 +920,30 @@ private:
         return true;
     }
 
+    bool reloadTopologyCallback(std_srvs::Trigger::Request &,
+                                std_srvs::Trigger::Response &response)
+    {
+        std::lock_guard<std::mutex> lock(nav_config_mutex_);
+        if (navigation_active_.load())
+        {
+            response.success = false;
+            response.message = "导航任务正在执行，拒绝热加载拓扑";
+            return true;
+        }
+        if (!loadTopology())
+        {
+            response.success = false;
+            response.message = "拓扑校验失败，继续使用上一版本";
+            return true;
+        }
+        active_path_.clear();
+        active_next_index_ = -1;
+        publishTopologyMarkers();
+        response.success = true;
+        response.message = "拓扑已校验并热加载";
+        return true;
+    }
+
     void loadSavedNavConfig(const std::string &filename)
     {
         std::ifstream file(filename);
@@ -896,7 +1018,7 @@ private:
         cleaned.erase(std::remove(cleaned.begin(), cleaned.end(), ']'), cleaned.end());
         std::replace(cleaned.begin(), cleaned.end(), ',', ' ');
         std::istringstream iss(cleaned);
-        iss >> static_map_origin_x_ >> static_map_origin_y_;
+        iss >> static_map_origin_x_ >> static_map_origin_y_ >> static_map_origin_yaw_;
     }
 
     bool readPgmToken(std::istream &stream, std::string &token)
@@ -967,6 +1089,54 @@ private:
         return true;
     }
 
+    static void squaredDistanceTransform1D(const std::vector<double> &input,
+                                           std::vector<double> &output)
+    {
+        const int size = static_cast<int>(input.size());
+        output.resize(size);
+        if (size == 0)
+        {
+            return;
+        }
+        std::vector<int> locations(size);
+        std::vector<double> boundaries(size + 1);
+        int envelope = 0;
+        locations[0] = 0;
+        boundaries[0] = -std::numeric_limits<double>::infinity();
+        boundaries[1] = std::numeric_limits<double>::infinity();
+        for (int q = 1; q < size; ++q)
+        {
+            double intersection = 0.0;
+            while (true)
+            {
+                const int location = locations[envelope];
+                intersection =
+                    ((input[q] + static_cast<double>(q) * q) -
+                     (input[location] + static_cast<double>(location) * location)) /
+                    (2.0 * (q - location));
+                if (intersection > boundaries[envelope] || envelope == 0)
+                {
+                    break;
+                }
+                --envelope;
+            }
+            ++envelope;
+            locations[envelope] = q;
+            boundaries[envelope] = intersection;
+            boundaries[envelope + 1] = std::numeric_limits<double>::infinity();
+        }
+        envelope = 0;
+        for (int q = 0; q < size; ++q)
+        {
+            while (boundaries[envelope + 1] < q)
+            {
+                ++envelope;
+            }
+            const double delta = q - locations[envelope];
+            output[q] = delta * delta + input[locations[envelope]];
+        }
+    }
+
     void inflateStaticMap()
     {
         if (static_map_occupied_.empty() || static_map_inflation_radius_ <= 0.0)
@@ -974,55 +1144,55 @@ private:
             return;
         }
 
-        const int radius_cells = static_cast<int>(
-            std::ceil(static_map_inflation_radius_ / std::max(0.001, static_map_resolution_)));
-        std::vector<int> distance(static_map_occupied_.size(), -1);
-        std::queue<int> q;
-        for (int i = 0; i < static_cast<int>(static_map_occupied_.size()); ++i)
+        // Exact Euclidean distance transform, matching build_topology.py.
+        // A finite sentinel avoids inf-inf when a complete row/column is free.
+        const double far_distance = 1e12;
+        std::vector<double> intermediate(static_map_occupied_.size(), far_distance);
+        std::vector<double> input(static_map_height_);
+        std::vector<double> output;
+        for (int x = 0; x < static_map_width_; ++x)
         {
-            if (static_map_occupied_[i])
+            for (int y = 0; y < static_map_height_; ++y)
             {
-                distance[i] = 0;
-                q.push(i);
+                input[y] = static_map_occupied_[y * static_map_width_ + x]
+                    ? 0.0 : far_distance;
+            }
+            squaredDistanceTransform1D(input, output);
+            for (int y = 0; y < static_map_height_; ++y)
+            {
+                intermediate[y * static_map_width_ + x] = output[y];
             }
         }
 
-        const int dx[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
-        const int dy[8] = {-1, -1, -1, 0, 0, 1, 1, 1};
-        while (!q.empty())
+        const double radius_cells =
+            static_map_inflation_radius_ / std::max(0.001, static_map_resolution_);
+        const double radius_squared = radius_cells * radius_cells;
+        input.resize(static_map_width_);
+        for (int y = 0; y < static_map_height_; ++y)
         {
-            const int index = q.front();
-            q.pop();
-            if (distance[index] >= radius_cells)
+            for (int x = 0; x < static_map_width_; ++x)
             {
-                continue;
+                input[x] = intermediate[y * static_map_width_ + x];
             }
-            const int x = index % static_map_width_;
-            const int y = index / static_map_width_;
-            for (int i = 0; i < 8; ++i)
+            squaredDistanceTransform1D(input, output);
+            for (int x = 0; x < static_map_width_; ++x)
             {
-                const int nx = x + dx[i];
-                const int ny = y + dy[i];
-                if (nx < 0 || ny < 0 || nx >= static_map_width_ || ny >= static_map_height_)
-                {
-                    continue;
-                }
-                const int next = ny * static_map_width_ + nx;
-                if (distance[next] >= 0)
-                {
-                    continue;
-                }
-                distance[next] = distance[index] + 1;
-                static_map_occupied_[next] = 1;
-                q.push(next);
+                static_map_occupied_[y * static_map_width_ + x] =
+                    output[x] + 1e-9 < radius_squared ? 1 : 0;
             }
         }
     }
 
     bool worldToStaticMap(double wx, double wy, int &mx, int &my) const
     {
-        mx = static_cast<int>(std::floor((wx - static_map_origin_x_) / static_map_resolution_));
-        my = static_cast<int>(std::floor((wy - static_map_origin_y_) / static_map_resolution_));
+        const double dx = wx - static_map_origin_x_;
+        const double dy = wy - static_map_origin_y_;
+        const double cos_yaw = std::cos(static_map_origin_yaw_);
+        const double sin_yaw = std::sin(static_map_origin_yaw_);
+        const double local_x = cos_yaw * dx + sin_yaw * dy;
+        const double local_y = -sin_yaw * dx + cos_yaw * dy;
+        mx = static_cast<int>(std::floor(local_x / static_map_resolution_));
+        my = static_cast<int>(std::floor(local_y / static_map_resolution_));
         return mx >= 0 && my >= 0 && mx < static_map_width_ && my < static_map_height_;
     }
 
@@ -1030,11 +1200,11 @@ private:
     {
         if (!static_map_loaded_)
         {
-            return true;
+            return false;
         }
 
         const double distance = std::hypot(x1 - x0, y1 - y0);
-        const double step = std::max(0.02, static_map_resolution_ * 0.5);
+        const double step = std::max(0.005, static_map_resolution_ * 0.5);
         const int steps = std::max(1, static_cast<int>(std::ceil(distance / step)));
         for (int i = 0; i <= steps; ++i)
         {
@@ -1384,7 +1554,9 @@ private:
     }
 
     void addDirectedEdge(int from, int to, double cost, bool trusted,
-                         bool bidirectional, bool blocked, const std::string &source)
+                         bool bidirectional, bool blocked, const std::string &source,
+                         double length = 0.0,
+                         double min_clearance = std::numeric_limits<double>::infinity())
     {
         if (!validIndex(from) || !validIndex(to) || from == to)
         {
@@ -1397,6 +1569,8 @@ private:
         TopoEdge edge;
         edge.to = to;
         edge.cost = cost;
+        edge.length = length > 0.0 ? length : poseDistance(target_poses[from], target_poses[to]);
+        edge.min_clearance = min_clearance;
         edge.trusted = trusted;
         edge.bidirectional = bidirectional;
         edge.configured_blocked = blocked;
@@ -1407,12 +1581,16 @@ private:
     }
 
     void addEdge(int from, int to, double cost, bool trusted,
-                 bool bidirectional, bool blocked, const std::string &source)
+                 bool bidirectional, bool blocked, const std::string &source,
+                 double length = 0.0,
+                 double min_clearance = std::numeric_limits<double>::infinity())
     {
-        addDirectedEdge(from, to, cost, trusted, bidirectional, blocked, source);
+        addDirectedEdge(from, to, cost, trusted, bidirectional, blocked, source,
+                        length, min_clearance);
         if (bidirectional)
         {
-            addDirectedEdge(to, from, cost, trusted, bidirectional, blocked, source);
+            addDirectedEdge(to, from, cost, trusted, bidirectional, blocked, source,
+                            length, min_clearance);
         }
     }
 
@@ -1426,6 +1604,59 @@ private:
         }
     }
 
+    bool topologyStronglyConnected() const
+    {
+        const int node_count = static_cast<int>(target_poses.size());
+        if (node_count == 0)
+        {
+            return false;
+        }
+        auto reachable = [&](bool reverse) {
+            std::vector<unsigned char> seen(node_count, 0);
+            std::queue<int> queue;
+            seen[0] = 1;
+            queue.push(0);
+            while (!queue.empty())
+            {
+                const int node = queue.front();
+                queue.pop();
+                if (!reverse)
+                {
+                    auto it = graph.find(node);
+                    if (it == graph.end())
+                    {
+                        continue;
+                    }
+                    for (const TopoEdge &edge : it->second)
+                    {
+                        if (!edge.configured_blocked && validIndex(edge.to) && !seen[edge.to])
+                        {
+                            seen[edge.to] = 1;
+                            queue.push(edge.to);
+                        }
+                    }
+                }
+                else
+                {
+                    for (const auto &item : graph)
+                    {
+                        for (const TopoEdge &edge : item.second)
+                        {
+                            if (!edge.configured_blocked && edge.to == node &&
+                                validIndex(item.first) && !seen[item.first])
+                            {
+                                seen[item.first] = 1;
+                                queue.push(item.first);
+                            }
+                        }
+                    }
+                }
+            }
+            return std::find(seen.begin(), seen.end(), 0) == seen.end();
+        };
+        return reachable(false) && reachable(true);
+    }
+
     bool loadTopologyYaml(const std::string &filename)
     {
         std::ifstream file(filename);
@@ -1434,89 +1665,181 @@ private:
             return false;
         }
 
+        if (!static_map_loaded_)
+        {
+            ROS_ERROR("Refuse topology load because the static map is unavailable.");
+            return false;
+        }
+
         bool in_edges = false;
         bool have_edge = false;
+        bool valid = true;
+        int schema_version = 0;
+        std::string positions_fingerprint;
+        std::string map_fingerprint;
+        double topology_required_clearance = -1.0;
         int from = -1;
         int to = -1;
         double cost = 0.0;
+        double length = 0.0;
+        double min_clearance = -1.0;
         bool trusted = true;
         bool bidirectional = true;
         bool blocked = false;
         std::string source = "manual";
         int loaded = 0;
+        std::set<std::pair<int, int>> directed_edges;
 
         auto flush_edge = [&]() {
-            if (have_edge && validIndex(from) && validIndex(to))
+            if (!have_edge)
             {
-                addEdge(from, to, cost, trusted, bidirectional, blocked, source);
-                loaded++;
+                return;
+            }
+            const double geometric_length =
+                validIndex(from) && validIndex(to)
+                    ? poseDistance(target_poses[from], target_poses[to]) : 0.0;
+            if (!validIndex(from) || !validIndex(to) || from == to ||
+                !std::isfinite(cost) || cost <= 0.0 ||
+                !std::isfinite(length) || length <= 0.0 ||
+                !std::isfinite(min_clearance) ||
+                std::fabs(length - geometric_length) > 0.05 ||
+                min_clearance + 1e-6 < static_map_inflation_radius_)
+            {
+                ROS_ERROR("Invalid topology edge P%d -> P%d.", from, to);
+                valid = false;
+            }
+            else if (!staticMapSegmentFree(target_poses[from].x, target_poses[from].y,
+                                           target_poses[to].x, target_poses[to].y))
+            {
+                ROS_ERROR("Topology edge P%d -> P%d fails current static-map clearance check.",
+                          from, to);
+                valid = false;
+            }
+            else
+            {
+                const std::pair<int, int> forward(from, to);
+                const std::pair<int, int> reverse(to, from);
+                if (directed_edges.count(forward) ||
+                    (bidirectional && directed_edges.count(reverse)))
+                {
+                    ROS_ERROR("Duplicate topology edge P%d -> P%d.", from, to);
+                    valid = false;
+                }
+                else
+                {
+                    directed_edges.insert(forward);
+                    if (bidirectional)
+                    {
+                        directed_edges.insert(reverse);
+                    }
+                    addEdge(from, to, cost, trusted, bidirectional, blocked, source,
+                            length, min_clearance);
+                    loaded++;
+                }
             }
             have_edge = false;
             from = -1;
             to = -1;
             cost = 0.0;
+            length = 0.0;
+            min_clearance = -1.0;
             trusted = true;
             bidirectional = true;
             blocked = false;
             source = "manual";
         };
 
-        std::string raw_line;
-        while (std::getline(file, raw_line))
+        try
         {
-            std::string line = trim(raw_line);
-            if (line.empty() || startsWith(line, "#"))
+            std::string raw_line;
+            while (std::getline(file, raw_line))
             {
-                continue;
-            }
-            if (line == "edges:")
-            {
-                in_edges = true;
-                continue;
-            }
-            if (!in_edges)
-            {
-                continue;
-            }
+                std::string line = trim(raw_line);
+                if (line.empty() || startsWith(line, "#"))
+                {
+                    continue;
+                }
+                if (line == "edges:")
+                {
+                    in_edges = true;
+                    continue;
+                }
+                if (!in_edges)
+                {
+                    if (startsWith(line, "schema_version:"))
+                        schema_version = std::stoi(afterColon(line));
+                    else if (startsWith(line, "positions_fingerprint:"))
+                        positions_fingerprint = unquote(afterColon(line));
+                    else if (startsWith(line, "map_fingerprint:"))
+                        map_fingerprint = unquote(afterColon(line));
+                    else if (startsWith(line, "required_clearance:"))
+                        topology_required_clearance = std::stod(afterColon(line));
+                    continue;
+                }
 
-            if (startsWith(line, "- from:"))
-            {
-                flush_edge();
-                have_edge = true;
-                from = std::stoi(afterColon(line));
+                if (startsWith(line, "- from:"))
+                {
+                    flush_edge();
+                    have_edge = true;
+                    from = std::stoi(afterColon(line));
+                }
+                else if (startsWith(line, "from:"))
+                {
+                    have_edge = true;
+                    from = std::stoi(afterColon(line));
+                }
+                else if (startsWith(line, "to:"))
+                    to = std::stoi(afterColon(line));
+                else if (startsWith(line, "length:"))
+                    length = std::stod(afterColon(line));
+                else if (startsWith(line, "cost:"))
+                    cost = std::stod(afterColon(line));
+                else if (startsWith(line, "min_clearance:"))
+                    min_clearance = std::stod(afterColon(line));
+                else if (startsWith(line, "trusted:"))
+                    trusted = parseBool(afterColon(line), true);
+                else if (startsWith(line, "bidirectional:"))
+                    bidirectional = parseBool(afterColon(line), true);
+                else if (startsWith(line, "blocked:"))
+                    blocked = parseBool(afterColon(line), false);
+                else if (startsWith(line, "source:"))
+                    source = unquote(afterColon(line));
             }
-            else if (startsWith(line, "from:"))
-            {
-                have_edge = true;
-                from = std::stoi(afterColon(line));
-            }
-            else if (startsWith(line, "to:"))
-            {
-                to = std::stoi(afterColon(line));
-            }
-            else if (startsWith(line, "cost:"))
-            {
-                cost = std::stod(afterColon(line));
-            }
-            else if (startsWith(line, "trusted:"))
-            {
-                trusted = parseBool(afterColon(line), true);
-            }
-            else if (startsWith(line, "bidirectional:"))
-            {
-                bidirectional = parseBool(afterColon(line), true);
-            }
-            else if (startsWith(line, "blocked:"))
-            {
-                blocked = parseBool(afterColon(line), false);
-            }
-            else if (startsWith(line, "source:"))
-            {
-                source = afterColon(line);
-            }
+            flush_edge();
         }
-        flush_edge();
-        return loaded > 0;
+        catch (const std::exception &error)
+        {
+            ROS_ERROR_STREAM("Invalid topology yaml " << filename << ": " << error.what());
+            return false;
+        }
+
+        std::string current_positions_fingerprint;
+        std::string current_map_fingerprint;
+        const bool fingerprints_read =
+            fingerprintFiles({joinPath(maps_dir_, "robot_positions.txt")},
+                             current_positions_fingerprint) &&
+            fingerprintFiles({static_map_yaml_path_, static_map_image_path_},
+                             current_map_fingerprint);
+        if (schema_version != 2 || !fingerprints_read ||
+            current_positions_fingerprint != loaded_positions_fingerprint_ ||
+            current_map_fingerprint != loaded_static_map_fingerprint_ ||
+            positions_fingerprint != loaded_positions_fingerprint_ ||
+            map_fingerprint != loaded_static_map_fingerprint_ ||
+            !std::isfinite(topology_required_clearance) ||
+            topology_required_clearance + 1e-6 < static_map_inflation_radius_)
+        {
+            ROS_ERROR("Topology metadata is stale or incompatible; rebuild topology.yaml.");
+            valid = false;
+        }
+        if (!valid || loaded <= 0 || !topologyStronglyConnected())
+        {
+            if (valid && loaded > 0)
+            {
+                ROS_ERROR("Topology is not strongly connected across all configured nodes.");
+            }
+            return false;
+        }
+        return true;
     }
 
     bool loadTopoFromTxt()
@@ -2566,9 +2889,21 @@ int main(int argc, char **argv)
     ros::init(argc, argv, "target_pose_loader");
 
     mynav current_nav;
-    current_nav.loadNavPnts();
-    current_nav.loadStaticMap();
-    current_nav.loadTopology();
+    if (!current_nav.loadNavPnts())
+    {
+        ROS_FATAL("Navigation points are missing or invalid; topology navigation will not start.");
+        return 2;
+    }
+    if (!current_nav.loadStaticMap())
+    {
+        ROS_FATAL("Static map is missing or invalid; topology navigation will not start.");
+        return 3;
+    }
+    if (!current_nav.loadTopology())
+    {
+        ROS_FATAL("Validated topology is unavailable; topology navigation will not start.");
+        return 4;
+    }
 
     while (ros::ok())
     {
