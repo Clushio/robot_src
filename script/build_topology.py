@@ -328,7 +328,8 @@ def graph_cut_analysis(node_count, edges):
     return sorted(articulation), sorted(set(bridges))
 
 
-def select_sparse_edges(node_count, candidates, min_degree, max_degree):
+def select_sparse_edges(node_count, candidates, poses, min_degree, max_degree,
+                        angular_sectors):
     ordered = sorted(
         candidates,
         key=lambda edge: (edge["cost"], -edge["min_clearance"],
@@ -336,27 +337,82 @@ def select_sparse_edges(node_count, candidates, min_degree, max_degree):
     )
     selected = []
     selected_keys = set()
+    selected_by_key = {}
     degree = [0] * node_count
 
-    def add(edge, enforce_max=True):
+    def add(edge, reason, enforce_max=True):
         key = (edge["from"], edge["to"])
         if key in selected_keys:
+            reasons = selected_by_key[key]["selection_reasons"]
+            if reason not in reasons:
+                reasons.append(reason)
             return False
         if enforce_max and (degree[key[0]] >= max_degree or degree[key[1]] >= max_degree):
             return False
-        selected.append(edge)
+        stored = dict(edge)
+        stored["selection_reasons"] = [reason]
+        selected.append(stored)
         selected_keys.add(key)
+        selected_by_key[key] = stored
         degree[key[0]] += 1
         degree[key[1]] += 1
         return True
 
-    # A minimum-cost spanning tree guarantees connectivity without using file
-    # order.  Degree limits are applied only to redundancy edges; connectivity
-    # is more important than the cosmetic maximum degree.
+    # Start from a natural local-neighborhood graph.  Gabriel edges keep local
+    # geometric continuity without creating an all-pairs spiderweb.  The
+    # nearest safe edge in each angular sector preserves visually obvious
+    # corridor continuations even when a third off-axis point suppresses a
+    # Gabriel edge.  Neither rule uses waypoint file order.
+    gabriel_keys = set()
+    for edge in ordered:
+        a = poses[edge["from"]]
+        b = poses[edge["to"]]
+        middle_x = 0.5 * (a["x"] + b["x"])
+        middle_y = 0.5 * (a["y"] + b["y"])
+        radius_squared = 0.25 * edge["length"] * edge["length"]
+        contains_other_node = any(
+            pose["id"] not in (edge["from"], edge["to"])
+            and (pose["x"] - middle_x) ** 2 + (pose["y"] - middle_y) ** 2
+            < radius_squared - 1e-9
+            for pose in poses
+        )
+        if not contains_other_node:
+            gabriel_keys.add((edge["from"], edge["to"]))
+
+    directional_keys = set()
+    sector_width = 2.0 * math.pi / angular_sectors
+    sector_offset = 0.5 * sector_width
+    for node in range(node_count):
+        best_by_sector = {}
+        for edge in ordered:
+            if node not in (edge["from"], edge["to"]):
+                continue
+            other = edge["to"] if edge["from"] == node else edge["from"]
+            dx = poses[other]["x"] - poses[node]["x"]
+            dy = poses[other]["y"] - poses[node]["y"]
+            angle = (math.atan2(dy, dx) + 2.0 * math.pi) % (2.0 * math.pi)
+            sector = int((angle + sector_offset) // sector_width) % angular_sectors
+            rank = (edge["cost"], edge["length"], other)
+            if sector not in best_by_sector or rank < best_by_sector[sector][0]:
+                best_by_sector[sector] = (rank, (edge["from"], edge["to"]))
+        directional_keys.update(value[1] for value in best_by_sector.values())
+
+    for edge in ordered:
+        key = (edge["from"], edge["to"])
+        if key in gabriel_keys:
+            add(edge, "gabriel_local", enforce_max=False)
+        if key in directional_keys:
+            add(edge, "directional_local", enforce_max=False)
+
+    # Complete disconnected local neighborhoods with a minimum-cost spanning
+    # forest.  Degree limits are relaxed for connectivity; reachability is more
+    # important than the cosmetic maximum degree.
     union_find = UnionFind(node_count)
+    for edge in selected:
+        union_find.union(edge["from"], edge["to"])
     for edge in ordered:
         if union_find.union(edge["from"], edge["to"]):
-            add(edge, enforce_max=False)
+            add(edge, "connectivity", enforce_max=False)
     if node_count > 0 and len(graph_components(node_count, selected)) != 1:
         raise RuntimeError("Safe candidate graph is disconnected")
 
@@ -366,7 +422,7 @@ def select_sparse_edges(node_count, candidates, min_degree, max_degree):
             if degree[node] >= min_degree:
                 break
             if node in (edge["from"], edge["to"]):
-                add(edge)
+                add(edge, "minimum_degree")
 
     # Greedily bypass articulation points.  This specifically avoids a single
     # topo node/area becoming the only route between two otherwise safe zones.
@@ -386,7 +442,7 @@ def select_sparse_edges(node_count, candidates, min_degree, max_degree):
                 and component_of.get(edge["from"]) != component_of.get(edge["to"])
             ]
             for edge in alternatives:
-                if add(edge):
+                if add(edge, "articulation_bypass"):
                     added = True
                     break
         if not added:
@@ -460,7 +516,8 @@ def build_topology(positions_path, map_yaml_path, args):
     if not candidates:
         raise RuntimeError("No safe topology edge candidates were found")
     selected = select_sparse_edges(
-        len(poses), candidates, args.min_node_degree, args.max_node_degree
+        len(poses), candidates, poses, args.min_node_degree,
+        args.max_node_degree, args.angular_sectors
     )
     components = graph_components(len(poses), selected)
     articulation, bridges = graph_cut_analysis(len(poses), selected)
@@ -486,6 +543,11 @@ def build_topology(positions_path, map_yaml_path, args):
         "minimum_node_clearance": min(node_clearances),
         "candidate_edge_count": len(candidates),
         "selected_edge_count": len(selected),
+        "natural_local_edge_count": sum(
+            1 for edge in selected
+            if "gabriel_local" in edge["selection_reasons"]
+            or "directional_local" in edge["selection_reasons"]
+        ),
         "rejected_edge_counts": dict(sorted(rejected.items())),
         "minimum_edge_clearance": min(edge["min_clearance"] for edge in selected),
         "component_count": len(components),
@@ -498,6 +560,7 @@ def build_topology(positions_path, map_yaml_path, args):
                 "length": round(edge["length"], 6),
                 "cost": round(edge["cost"], 6),
                 "min_clearance": round(edge["min_clearance"], 6),
+                "selection_reasons": edge["selection_reasons"],
             }
             for edge in selected
         ],
@@ -529,6 +592,7 @@ def topology_text(poses, edges, report, args):
         f"  map_fingerprint: {report['map_fingerprint']}",
         f"  required_clearance: {report['required_clearance']:.6f}",
         f"  max_edge_distance: {args.max_pgm_edge_distance:.6f}",
+        f"  angular_sectors: {args.angular_sectors}",
         f"  unknown_is_obstacle: {'true' if report['unknown_is_obstacle'] else 'false'}",
         "  point_order_defines_edges: false",
         "nodes:",
@@ -604,7 +668,8 @@ def parse_args(argv=None):
     parser.add_argument("--clearance-weight", type=float, default=0.30)
     parser.add_argument("--min-node-separation", type=float, default=0.10)
     parser.add_argument("--min-node-degree", type=int, default=2)
-    parser.add_argument("--max-node-degree", type=int, default=4)
+    parser.add_argument("--max-node-degree", type=int, default=6)
+    parser.add_argument("--angular-sectors", type=int, default=4)
     parser.add_argument("--allow-unknown", action="store_true")
     args = parser.parse_args(argv)
     if args.max_pgm_edge_distance <= 0.0 or args.sample_step <= 0.0:
@@ -613,6 +678,8 @@ def parse_args(argv=None):
         parser.error("robot dimensions must be positive")
     if args.min_node_degree < 1 or args.max_node_degree < args.min_node_degree:
         parser.error("invalid min/max node degree")
+    if args.angular_sectors < 4 or args.angular_sectors > 16:
+        parser.error("angular sectors must be between 4 and 16")
     return args
 
 

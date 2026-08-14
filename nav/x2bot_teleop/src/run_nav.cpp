@@ -26,6 +26,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <functional>
 #include <iomanip>
@@ -747,6 +748,18 @@ private:
 
     static std::string defaultMapsDir()
     {
+        const char *home = std::getenv("HOME");
+        if (home != nullptr && home[0] != '\0')
+        {
+            std::string home_dir(home);
+            while (home_dir.size() > 1 && home_dir[home_dir.size() - 1] == '/')
+            {
+                home_dir.erase(home_dir.size() - 1);
+            }
+            return home_dir + "/maps";
+        }
+
+        ROS_WARN("HOME is not set; falling back to /home/nav/maps.");
         return "/home/nav/maps";
     }
 

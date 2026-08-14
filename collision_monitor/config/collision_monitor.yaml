@@ -23,7 +23,7 @@ local_map_timeout: 0.30
 # positioning near a workstation.
 navigation_footprint_padding: 0.15
 tag_footprint_padding: 0.08
-teleop_footprint_padding: 0.15
+teleop_footprint_padding: 0.10
 
 max_navigation_linear_x: 0.20
 max_navigation_angular_z: 0.50

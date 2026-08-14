@@ -98,6 +98,24 @@ class TopologyBuilderTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "No safe topology edge"):
             topology.build_topology(positions, yaml, self.args(positions, yaml))
 
+    def test_natural_directional_neighbor_is_preserved(self):
+        yaml = self.write_map(50, 40, 0.1, obstacles={(0, 0)})
+        positions = self.write_positions([
+            (1.0, 1.0, "W1"),
+            (3.0, 1.0, "W2"),
+            # This point lies inside the diameter circle of P0-P1, so the
+            # Gabriel rule alone would remove P0-P1.  It is in another angular
+            # sector, therefore the obvious horizontal corridor must remain.
+            (1.6, 1.7, ""),
+        ])
+        args = self.args(positions, yaml)
+        _poses, edges, _report = topology.build_topology(positions, yaml, args)
+        by_endpoint = {(edge["from"], edge["to"]): edge for edge in edges}
+        self.assertIn((0, 1), by_endpoint)
+        self.assertIn(
+            "directional_local", by_endpoint[(0, 1)]["selection_reasons"]
+        )
+
     def test_audit_does_not_replace_topology(self):
         yaml = self.write_map(60, 40, 0.1, obstacles={(0, 0)})
         positions = self.write_positions([
