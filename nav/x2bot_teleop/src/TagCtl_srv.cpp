@@ -2,6 +2,9 @@
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/Twist.h>
 #include <cmd_vel_arbiter/FinishMotion.h>
+#include <diagnostic_msgs/DiagnosticArray.h>
+#include <diagnostic_msgs/DiagnosticStatus.h>
+#include <diagnostic_msgs/KeyValue.h>
 #include <x2bot_teleop/SetTagY.h>
 #include <tf/transform_datatypes.h> // 用于处理四元数
 #include <algorithm>
@@ -24,6 +27,14 @@ double normalizeAngleRad(double angle) {
         angle += 2.0 * 3.14159265358979323846;
     }
     return angle;
+}
+
+void addDiagnosticValue(diagnostic_msgs::DiagnosticStatus& status,
+                        const std::string& key, const std::string& value) {
+    diagnostic_msgs::KeyValue item;
+    item.key = key;
+    item.value = value;
+    status.values.push_back(item);
 }
 
 class ActiveControlGuard {
@@ -90,6 +101,8 @@ public:
         private_nh.param("cmd_vel_topic", cmd_vel_topic,
                          std::string("/cmd_vel/tag"));
         cmd_vel_publisher_ = nh_.advertise<geometry_msgs::Twist>(cmd_vel_topic, 10);
+        diagnostics_publisher_ =
+            nh_.advertise<diagnostic_msgs::DiagnosticArray>("/diagnostics", 10, true);
         finish_motion_client_ =
             nh_.serviceClient<cmd_vel_arbiter::FinishMotion>(
                 "/cmd_vel_arbiter/finish_motion");
@@ -120,6 +133,7 @@ private:
     ros::NodeHandle nh_;
     ros::Subscriber tag_subscriber_;
     ros::Publisher cmd_vel_publisher_;
+    ros::Publisher diagnostics_publisher_;
     ros::ServiceServer service_;
     ros::ServiceClient finish_motion_client_;
 
@@ -356,13 +370,44 @@ private:
         service.request.reason = reason;
         if (!finish_motion_client_.call(service)) {
             ROS_ERROR("[TAGCTL] Failed to call /cmd_vel_arbiter/finish_motion.");
+            publishDiagnostic(diagnostic_msgs::DiagnosticStatus::ERROR,
+                              "ANAV-TAG-010", "标签任务停车回正服务调用失败",
+                              "无法连接 /cmd_vel_arbiter/finish_motion。",
+                              "检查速度仲裁与底盘节点。", true);
             return false;
         }
         if (!service.response.centered) {
             ROS_ERROR_STREAM("[TAGCTL] Tag motion stopped, but centering was not confirmed: "
                              << service.response.message);
+            publishDiagnostic(diagnostic_msgs::DiagnosticStatus::ERROR,
+                              "ANAV-TAG-010", "标签任务结束但轮组未确认回正",
+                              service.response.message,
+                              "检查转向执行机构和底盘停车回正日志。", true);
+        } else if (reason == cmd_vel_arbiter::FinishMotionRequest::TASK_FINISHED) {
+            publishDiagnostic(diagnostic_msgs::DiagnosticStatus::OK,
+                              "ANAV-TAG-000", "标签靠站任务完成", "", "", false);
         }
         return service.response.centered;
+    }
+
+    void publishDiagnostic(uint8_t level, const std::string& code,
+                           const std::string& message,
+                           const std::string& detail,
+                           const std::string& action, bool active) {
+        diagnostic_msgs::DiagnosticArray array;
+        array.header.stamp = ros::Time::now();
+        diagnostic_msgs::DiagnosticStatus status;
+        status.level = level;
+        status.name = "/anav/tag_control";
+        status.hardware_id = "ranger";
+        status.message = message;
+        addDiagnosticValue(status, "code", code);
+        addDiagnosticValue(status, "active", active ? "true" : "false");
+        addDiagnosticValue(status, "kind", active ? "FAULT" : "STATE");
+        addDiagnosticValue(status, "detail", detail);
+        addDiagnosticValue(status, "action", action);
+        array.status.push_back(status);
+        diagnostics_publisher_.publish(array);
     }
 
     // 服务回调函数
@@ -371,6 +416,10 @@ private:
         if (!control_active_.compare_exchange_strong(expected, true)) {
             ROS_WARN("[TAGCTL] Reject a new target because another Tag control request is still active.");
             res.success = false;
+            publishDiagnostic(diagnostic_msgs::DiagnosticStatus::WARN,
+                              "ANAV-TAG-008", "标签控制器正忙",
+                              "已有一个靠站请求正在执行。",
+                              "等待当前任务结束后再发起新请求。", true);
             return true;
         }
         ActiveControlGuard control_guard(control_active_);
@@ -397,6 +446,10 @@ private:
             if (isDataStale() || (current_valid_ <0) ) {
                 if (invalid_since.isZero()) {
                     invalid_since = ros::WallTime::now();
+                    publishDiagnostic(diagnostic_msgs::DiagnosticStatus::WARN,
+                                      "ANAV-TAG-006", "标签数据无效或超时",
+                                      "活动靠站任务未收到有效 /tag_position。",
+                                      "检查标签是否在视野内、串口读取和识别节点。", true);
                 }
                 ROS_WARN_THROTTLE(1.0, "[TAGCTL] Tag position data is stale or invalid. Stopping the robot.");
                 publishStop(rate, 3);
@@ -406,12 +459,19 @@ private:
                     if (!isDataStale() && current_valid_ >= 0) {
                         ROS_INFO("[TAGCTL] Tag data became valid; resume the active control request.");
                         invalid_since = ros::WallTime();
+                        publishDiagnostic(diagnostic_msgs::DiagnosticStatus::OK,
+                                          "ANAV-TAG-000", "标签数据已恢复",
+                                          "", "", false);
                         break;
                     }
                     if ((ros::WallTime::now() - invalid_since).toSec() >=
                         tag_abort_timeout_) {
                         ROS_ERROR("[TAGCTL] Tag remained invalid for %.1f seconds; abort the task.",
                                   tag_abort_timeout_);
+                        publishDiagnostic(diagnostic_msgs::DiagnosticStatus::ERROR,
+                                          "ANAV-TAG-007", "标签数据持续超时，任务已终止",
+                                          "超过 tag_abort_timeout 仍无有效标签数据。",
+                                          "检查标签、相机/串口链路后重新发起任务。", true);
                         publishStop(rate, 3);
                         notifyMotionFinished(
                             cmd_vel_arbiter::FinishMotionRequest::TASK_FAILED);

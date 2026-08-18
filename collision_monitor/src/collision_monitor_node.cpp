@@ -64,6 +64,46 @@ std::string ToString(double value) {
   return buffer;
 }
 
+std::string DiagnosticCode(const std::string& state,
+                           const std::string& reason) {
+  if (reason == "STATIC_MAP_NOT_READY") return "ANAV-SAF-002";
+  if (reason == "LOCAL_MAP_NOT_READY") return "ANAV-SAF-003";
+  if (reason == "ODOM_STALE" || reason == "ODOM_NON_FINITE")
+    return "ANAV-SAF-004";
+  if (reason == "TF_UNAVAILABLE" || reason == "TF_HAS_ZERO_STAMP" ||
+      reason == "TF_STALE" || reason == "TF_NON_FINITE")
+    return "ANAV-SAF-005";
+  if (reason == "TF_JUMP") return "ANAV-SAF-006";
+  if (reason == "CANDIDATE_NON_FINITE" ||
+      reason == "NON_FINITE_COMMAND" ||
+      reason == "NON_FINITE_MEASURED_MOTION")
+    return "ANAV-SAF-008";
+  if (reason == "COMMAND_LIMIT_EXCEEDED") return "ANAV-SAF-009";
+  if (state == "SLOWDOWN") return "ANAV-SAF-010";
+  if (state == "COLLISION_STOP")
+    return reason.find("STATIC") != std::string::npos
+               ? "ANAV-SAF-011" : "ANAV-SAF-012";
+  if (state == "EMERGENCY_STOP") return "ANAV-SAF-013";
+  if (state == "PROFILE_TRANSITION") return "ANAV-SAF-014";
+  if (state == "UNSUPPORTED_MOTION") return "ANAV-SAF-015";
+  return "ANAV-SAF-000";
+}
+
+std::string DiagnosticAction(const std::string& code) {
+  if (code == "ANAV-SAF-002") return "检查 /map 与静态地图加载节点。";
+  if (code == "ANAV-SAF-003") return "检查局部代价地图及 MoveBase。";
+  if (code == "ANAV-SAF-004") return "检查底盘 /odom 数据是否持续更新。";
+  if (code == "ANAV-SAF-005" || code == "ANAV-SAF-006")
+    return "检查 map 到 base_link 的定位 TF。";
+  if (code == "ANAV-SAF-008" || code == "ANAV-SAF-009" ||
+      code == "ANAV-SAF-015")
+    return "检查当前速度来源及运动模式配置。";
+  if (code == "ANAV-SAF-010" || code == "ANAV-SAF-011" ||
+      code == "ANAV-SAF-012" || code == "ANAV-SAF-013")
+    return "检查机器人前后方障碍物和代价地图。";
+  return std::string();
+}
+
 struct MotionProfile {
   std::string name;
   double footprint_padding = 0.15;
@@ -140,7 +180,7 @@ class CollisionMonitorNode {
     private_nh_.param("local_map_topic", local_map_topic_,
                       std::string("/mxb_move_base/local_costmap/costmap"));
     private_nh_.param("status_topic", status_topic_,
-                      std::string("/collision_monitor/status"));
+                      std::string("/diagnostics"));
     private_nh_.param("marker_topic", marker_topic_,
                       std::string("/collision_monitor/markers"));
     private_nh_.param("global_frame", global_frame_, std::string("map"));
@@ -794,17 +834,27 @@ class CollisionMonitorNode {
     diagnostic_msgs::DiagnosticArray array;
     array.header.stamp = ros::Time::now();
     diagnostic_msgs::DiagnosticStatus status;
-    status.name = "collision_monitor";
+    status.name = "/anav/collision_monitor";
     status.hardware_id = "ranger";
     status.message = state + ": " + reason;
-    if (state == "OK" || state == "STOP_COMMAND") {
+    if (state == "OK" || state == "STOP_COMMAND" || state == "STOPPED") {
       status.level = diagnostic_msgs::DiagnosticStatus::OK;
     } else if (state == "SLOWDOWN" || state == "MANUAL_BYPASS" ||
-               state == "PROFILE_TRANSITION") {
+               state == "PROFILE_TRANSITION" ||
+               state == "COLLISION_STOP") {
       status.level = diagnostic_msgs::DiagnosticStatus::WARN;
     } else {
       status.level = diagnostic_msgs::DiagnosticStatus::ERROR;
     }
+    const std::string code = DiagnosticCode(state, reason);
+    AddDiagnosticValue(status, "code", code);
+    AddDiagnosticValue(status, "kind",
+                       status.level == diagnostic_msgs::DiagnosticStatus::OK
+                           ? "STATE" : "FAULT");
+    AddDiagnosticValue(status, "active",
+                       status.level == diagnostic_msgs::DiagnosticStatus::OK
+                           ? "false" : "true");
+    AddDiagnosticValue(status, "action", DiagnosticAction(code));
     AddDiagnosticValue(status, "state", state);
     AddDiagnosticValue(status, "reason", reason);
     AddDiagnosticValue(status, "source", source);

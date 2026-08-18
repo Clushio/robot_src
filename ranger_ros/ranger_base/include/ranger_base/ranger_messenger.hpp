@@ -15,6 +15,7 @@
 #include <actionlib/server/simple_action_server.h>
 #include <eigen3/Eigen/Core>
 #include <geometry_msgs/PoseArray.h>
+#include <diagnostic_msgs/DiagnosticArray.h>
 
 #include <ros/console.h>
 #include <ros/ros.h>
@@ -86,6 +87,10 @@ class RangerROSMessenger {
                            const RangerActuatorState& actuator_state);
   void CheckChassisFault(const RangerCoreState& state);
   void CompleteStopAndCenter(bool success, const std::string& message);
+  void PublishDiagnostic(uint8_t level, const std::string& code,
+                         const std::string& message,
+                         const std::string& detail,
+                         const std::string& action, bool active);
   bool StopCenterActive() const;
   bool VehicleIsStill(const RangerCoreState& state,
                       const RangerActuatorState& actuator_state) const;
@@ -152,6 +157,7 @@ class RangerROSMessenger {
   ros::Publisher odom_pub_;
   ros::Publisher battery_state_pub_;
   ros::Publisher rs_state_pub_;
+  ros::Publisher diagnostics_pub_;
 
   ros::Subscriber motion_cmd_sub_;
   ros::Subscriber light_cmd_subscriber_;

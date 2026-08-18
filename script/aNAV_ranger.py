@@ -25,9 +25,11 @@ from sensor_msgs.msg import Joy
 from nav_msgs.msg import Odometry
 from std_msgs.msg import String
 from geometry_msgs.msg import PoseStamped, Twist
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus
 from visualization_msgs.msg import Marker, MarkerArray
 
 from tagReader import SerialTagReader
+from fault_center import FaultCenterDialog
 import threading
 
 
@@ -244,6 +246,7 @@ class MyWindow(QWidget):
     topology_finished_requested = pyqtSignal(bool, str)
     loop_update_requested = pyqtSignal(int, str, str, int, str)
     nav_config_received = pyqtSignal(object, str, bool)
+    diagnostics_received = pyqtSignal(object)
 
     def __init__(self):
         super().__init__()
@@ -261,6 +264,7 @@ class MyWindow(QWidget):
         self.localization_odom_sub = None
         self.base_odom_sub = None
         self.motion_state_sub = None
+        self.diagnostics_sub = None
         self.record_pose_sub = None
         self.record_marker_pub = None
         self.localizationProcess = None
@@ -289,6 +293,8 @@ class MyWindow(QWidget):
         self.current_motion_mode = None
         self.odometry_lock = threading.Lock()
         self.health_check_running = False
+        self.expected_node_missing_counts = {}
+        self.can_start_requested_at = 0.0
         self.estop_active = False
         self.shutdown_in_progress = False
         self.topology_build_running = False
@@ -321,6 +327,13 @@ class MyWindow(QWidget):
                 self.ros_available = False
 
         self.initUI()
+        self.fault_center = FaultCenterDialog(self)
+        self.fault_center.counts_changed.connect(
+            self.update_fault_center_button
+        )
+        self.fault_center.attention_requested.connect(
+            self.show_fault_center_for_attention
+        )
         self.status_requested.connect(self.set_status)
         self.localization_ready_requested.connect(self.mark_localization_ready)
         self.record_pose_requested.connect(self.accept_record_pose)
@@ -329,6 +342,7 @@ class MyWindow(QWidget):
         self.topology_finished_requested.connect(self.on_topology_finished)
         self.loop_update_requested.connect(self.on_loop_update)
         self.nav_config_received.connect(self.on_nav_config_received)
+        self.diagnostics_received.connect(self.on_diagnostics_received)
         if self.ros_available:
             try:
                 self.task_status_sub = rospy.Subscriber(
@@ -350,6 +364,10 @@ class MyWindow(QWidget):
                     self.on_record_pose,
                     queue_size=1,
                 )
+                self.diagnostics_sub = rospy.Subscriber(
+                    '/diagnostics', DiagnosticArray,
+                    self.on_diagnostics_message, queue_size=100,
+                )
             except Exception as error:
                 print(f"ROS status subscription failed: {error}")
         self.set_chip(
@@ -359,6 +377,11 @@ class MyWindow(QWidget):
         )
         if not self.ros_available and not self.preview_mode:
             self.set_status('ROS 连接失败，请检查 ROS_MASTER_URI 或启动日志。', 'error')
+            self.fault_center.report_condition(
+                '/anav/system_monitor', 'ANAV-SYS-001',
+                DiagnosticStatus.ERROR, 'ROS Master 无法连接', True,
+                action='检查 roscore、ROS_MASTER_URI 和网络连接。',
+            )
         self.setpointProcess = None
         self.rvizProcess = None
         self.rviz_panel_mode = False
@@ -778,9 +801,13 @@ class MyWindow(QWidget):
         self.ros_chip = self.create_status_chip('ROS 已连接')
         self.localization_chip = self.create_status_chip('定位 未启动')
         self.nav_chip = self.create_status_chip('导航 未启动')
+        self.fault_center_button = QPushButton('状态中心')
+        self.fault_center_button.clicked.connect(self.show_fault_center)
+        self.fault_center_button.setToolTip('查看按时间记录的系统状态与异常')
         header.addWidget(self.ros_chip)
         header.addWidget(self.localization_chip)
         header.addWidget(self.nav_chip)
+        header.addWidget(self.fault_center_button)
         root.addLayout(header)
 
         divider = QFrame()
@@ -1515,6 +1542,36 @@ class MyWindow(QWidget):
         self.status_label.setStyleSheet(
             f'background: {background}; color: {foreground}; border-radius: 7px; padding: 9px 12px;'
         )
+
+    def show_fault_center(self):
+        self.fault_center.show()
+        self.fault_center.raise_()
+        self.fault_center.activateWindow()
+
+    def show_fault_center_for_attention(self, _level):
+        self.show_fault_center()
+
+    def update_fault_center_button(self, warn_count, error_count, stale_count):
+        total = warn_count + error_count + stale_count
+        self.fault_center_button.setText(
+            f'状态中心 ({total})' if total else '状态中心'
+        )
+        if error_count or stale_count:
+            self.fault_center_button.setStyleSheet(
+                'color: #B42318; border-color: #FDA29B; font-weight: 700;'
+            )
+        elif warn_count:
+            self.fault_center_button.setStyleSheet(
+                'color: #B54708; border-color: #FEC84B; font-weight: 700;'
+            )
+        else:
+            self.fault_center_button.setStyleSheet('')
+
+    def on_diagnostics_message(self, message):
+        self.diagnostics_received.emit(message)
+
+    def on_diagnostics_received(self, message):
+        self.fault_center.ingest_array(message)
 
     def on_task_status(self, message):
         """显示所有 /plan_path_and_go 调用的状态，包括 TCP 发起的任务。"""
@@ -2741,6 +2798,13 @@ class MyWindow(QWidget):
         self.set_chip(
             self.ros_chip, 'ROS 已连接' if ros_ok else 'ROS 未连接', ros_ok
         )
+        self.fault_center.report_condition(
+            '/anav/system_monitor', 'ANAV-SYS-001',
+            DiagnosticStatus.ERROR if not ros_ok else DiagnosticStatus.OK,
+            'ROS Master 连接中断' if not ros_ok else 'ROS Master 连接已恢复',
+            active=not ros_ok,
+            action='检查 roscore、ROS_MASTER_URI 和网络连接。',
+        )
 
         can_exists = snapshot.get('can_exists', False)
         can_up = snapshot.get('can_up', False)
@@ -2750,6 +2814,21 @@ class MyWindow(QWidget):
             self.set_health_chip('can', '未启用', 'warning')
         else:
             self.set_health_chip('can', '未检测', 'inactive')
+        can_expected = (
+            self.can_start_requested_at > 0.0
+            and time.monotonic() - self.can_start_requested_at >= 3.0
+        )
+        can_fault = can_expected and not can_up
+        self.fault_center.report_condition(
+            '/anav/process_monitor/can',
+            'ANAV-BASE-002' if can_exists else 'ANAV-BASE-001',
+            (DiagnosticStatus.WARN if can_exists else DiagnosticStatus.ERROR)
+            if can_fault else DiagnosticStatus.OK,
+            ('CAN 接口存在但未启用' if can_exists else '未检测到 CAN 接口')
+            if can_fault else 'CAN 接口状态正常',
+            active=can_fault,
+            action='检查 can0 接线、驱动、bitrate=500000 和接口 UP 状态。',
+        )
 
         checks = {
             'base': ('/ranger_base_node', '运行中'),
@@ -2764,6 +2843,38 @@ class MyWindow(QWidget):
                 'active' if active else 'inactive',
             )
 
+        expected_nodes = (
+            (self.baseProcess, '/ranger_base_node',
+             '/anav/system_monitor/ranger_base_node',
+             'ANAV-BASE-003', '底盘节点意外退出'),
+            (self.baseProcess, '/cmd_vel_arbiter',
+             '/anav/system_monitor/cmd_vel_arbiter',
+             'ANAV-ARB-001', '速度仲裁节点意外退出'),
+            (self.baseProcess, '/collision_monitor',
+             '/anav/system_monitor/collision_monitor',
+             'ANAV-SAF-001', '障碍安全节点意外退出'),
+            (self.runPntsNavProcess, '/runnav',
+             '/anav/system_monitor/navigation',
+             'ANAV-NAV-001', '导航任务节点意外退出'),
+        )
+        for process, node, module, code, message in expected_nodes:
+            process_running = process is not None and process.poll() is None
+            currently_missing = ros_ok and process_running and node not in nodes
+            if currently_missing:
+                self.expected_node_missing_counts[node] = (
+                    self.expected_node_missing_counts.get(node, 0) + 1
+                )
+            else:
+                self.expected_node_missing_counts[node] = 0
+            missing = self.expected_node_missing_counts[node] >= 3
+            self.fault_center.report_condition(
+                module, code,
+                DiagnosticStatus.STALE if missing else DiagnosticStatus.OK,
+                message if missing else f'{message}状态已恢复',
+                active=missing,
+                action=f'检查 rosnode list 与 {node} 的启动日志。',
+            )
+
         tag_nodes = {'/TagCtl_service', '/mm3v_serial_reader'}
         tag_count = len(tag_nodes.intersection(nodes))
         if tag_count == len(tag_nodes):
@@ -2772,6 +2883,19 @@ class MyWindow(QWidget):
             self.set_health_chip('tag', '部分运行', 'warning')
         else:
             self.set_health_chip('tag', '未运行', 'inactive')
+        tag_expected = any(
+            process is not None and process.poll() is None
+            for process in self.tagProcesses
+        )
+        tag_missing = ros_ok and tag_expected and tag_count < len(tag_nodes)
+        self.fault_center.report_condition(
+            '/anav/system_monitor/tag_nodes', 'ANAV-TAG-001',
+            DiagnosticStatus.STALE if tag_missing else DiagnosticStatus.OK,
+            '标签相关节点未全部运行' if tag_missing else '标签节点状态已恢复',
+            active=tag_missing,
+            detail=f'检测到 {tag_count}/{len(tag_nodes)} 个标签节点。',
+            action='检查 TagCtl_service 与 mm3v_serial_reader 启动日志。',
+        )
 
         odom_age = (
             time.monotonic() - self.last_odom_monotonic
@@ -2781,6 +2905,10 @@ class MyWindow(QWidget):
             self.localization_ready = True
             self.set_health_chip('localization', '数据正常', 'active')
             self.set_chip(self.localization_chip, '定位 已就绪', True)
+            self.fault_center.report_condition(
+                '/anav/localization', 'ANAV-LOC-002', DiagnosticStatus.OK,
+                '定位数据已恢复', active=False,
+            )
         else:
             had_odometry = self.last_odom_monotonic > 0.0
             self.localization_ready = False
@@ -2794,14 +2922,29 @@ class MyWindow(QWidget):
                 self.odometry_label.setText(
                     f'机器人位姿：定位数据已中断（{odom_age:.1f} 秒未更新）'
                 )
+                self.fault_center.report_condition(
+                    '/anav/localization', 'ANAV-LOC-002',
+                    DiagnosticStatus.STALE, '定位里程计数据超时', True,
+                    detail=f'/Odometry 已有 {odom_age:.1f} 秒未更新。',
+                    action='检查定位节点、激光雷达数据及 TF。',
+                )
             elif localization_running:
                 self.set_health_chip('localization', '等待数据', 'warning')
                 self.set_chip(self.localization_chip, '定位 等待数据', False)
+                self.fault_center.report_condition(
+                    '/anav/localization', 'ANAV-LOC-001',
+                    DiagnosticStatus.WARN, '定位启动后尚未收到数据', True,
+                    action='等待初始化；若长期无数据，请检查雷达与定位日志。',
+                )
             else:
                 self.set_health_chip('localization', '未运行', 'inactive')
                 self.set_chip(self.localization_chip, '定位 未启动', False)
                 if had_odometry:
                     self.odometry_label.setText('机器人位姿：定位已停止')
+                self.fault_center.report_condition(
+                    '/anav/localization', 'ANAV-LOC-000',
+                    DiagnosticStatus.OK, '定位未启动', active=False,
+                )
 
         if '/runnav' in nodes:
             self.set_chip(self.nav_chip, '导航 运行中', True)
@@ -2826,14 +2969,40 @@ class MyWindow(QWidget):
                 if stop_button:
                     stop_button.setEnabled(False)
 
+        if self.localizationProcess and self.localizationProcess.poll() is None:
+            self.fault_center.report_condition(
+                '/anav/process_monitor/localization', 'ANAV-LOC-003',
+                DiagnosticStatus.OK, '定位进程运行正常', active=False,
+            )
         if self.localizationProcess and self.localizationProcess.poll() is not None:
+            exit_code = self.localizationProcess.poll()
+            if not self.shutdown_in_progress:
+                self.fault_center.report_condition(
+                    '/anav/process_monitor/localization', 'ANAV-LOC-003',
+                    DiagnosticStatus.ERROR, '定位进程意外退出', True,
+                    detail=f'进程退出码：{exit_code}',
+                    action='查看定位终端日志，检查地图、雷达和参数文件。',
+                )
             self.localizationProcess = None
             self.localization_ready = False
             self.g2d_button.setEnabled(True)
             self.g2d_exit_button.setEnabled(False)
             self.set_chip(self.localization_chip, '定位 未启动', False)
             self.set_health_chip('localization', '未运行', 'inactive')
+        if self.runPntsNavProcess and self.runPntsNavProcess.poll() is None:
+            self.fault_center.report_condition(
+                '/anav/process_monitor/navigation', 'ANAV-NAV-002',
+                DiagnosticStatus.OK, 'AutoNAV 进程运行正常', active=False,
+            )
         if self.runPntsNavProcess and self.runPntsNavProcess.poll() is not None:
+            exit_code = self.runPntsNavProcess.poll()
+            if not self.shutdown_in_progress:
+                self.fault_center.report_condition(
+                    '/anav/process_monitor/navigation', 'ANAV-NAV-002',
+                    DiagnosticStatus.ERROR, 'AutoNAV 进程意外退出', True,
+                    detail=f'进程退出码：{exit_code}',
+                    action='查看 AutoNAV 终端及地图、点位、拓扑诊断。',
+                )
             self.runPntsNavProcess = None
             self.nav_button.setEnabled(True)
             self.nav_runstart.setEnabled(False)
@@ -2841,16 +3010,60 @@ class MyWindow(QWidget):
             self.nav_resume.setEnabled(False)
             self.cancel_task_button.setEnabled(False)
             self.set_nav_shortcuts_visible(False)
+        if self.moveBaseProcess and self.moveBaseProcess.poll() is None:
+            self.fault_center.report_condition(
+                '/anav/process_monitor/move_base', 'ANAV-NAV-003',
+                DiagnosticStatus.OK, 'MoveBase 进程运行正常', active=False,
+            )
         if self.moveBaseProcess and self.moveBaseProcess.poll() is not None:
+            exit_code = self.moveBaseProcess.poll()
+            if not self.shutdown_in_progress:
+                self.fault_center.report_condition(
+                    '/anav/process_monitor/move_base', 'ANAV-NAV-003',
+                    DiagnosticStatus.ERROR, 'MoveBase 进程意外退出', True,
+                    detail=f'进程退出码：{exit_code}',
+                    action='查看 MoveBase 终端、代价地图与规划器日志。',
+                )
             self.moveBaseProcess = None
+        if self.baseProcess and self.baseProcess.poll() is None:
+            self.fault_center.report_condition(
+                '/anav/process_monitor/ranger_base', 'ANAV-BASE-003',
+                DiagnosticStatus.OK, '底盘启动进程运行正常', active=False,
+            )
         if self.baseProcess and self.baseProcess.poll() is not None:
+            exit_code = self.baseProcess.poll()
+            if not self.shutdown_in_progress:
+                self.fault_center.report_condition(
+                    '/anav/process_monitor/ranger_base', 'ANAV-BASE-003',
+                    DiagnosticStatus.ERROR, '底盘启动进程意外退出', True,
+                    detail=f'进程退出码：{exit_code}',
+                    action='检查 CAN 接口和底盘启动终端日志。',
+                )
             self.baseProcess = None
         if self.joyProcess and self.joyProcess.poll() is not None:
             self.joyProcess = None
+        stopped_tag_processes = [
+            process for process in self.tagProcesses
+            if process is not None and process.poll() is not None
+        ]
+        if stopped_tag_processes and not self.shutdown_in_progress:
+            exit_codes = ', '.join(str(process.poll())
+                                   for process in stopped_tag_processes)
+            self.fault_center.report_condition(
+                '/anav/process_monitor/tag', 'ANAV-TAG-002',
+                DiagnosticStatus.ERROR, '标签相关进程意外退出', True,
+                detail=f'进程退出码：{exit_codes}',
+                action='查看 MM3V Tag 与 TCP Server 终端日志。',
+            )
         self.tagProcesses = [
             process for process in self.tagProcesses
             if process is not None and process.poll() is None
         ]
+        if self.tagProcesses:
+            self.fault_center.report_condition(
+                '/anav/process_monitor/tag', 'ANAV-TAG-002',
+                DiagnosticStatus.OK, '标签相关进程运行正常', active=False,
+            )
 
     def start_managed_process(self, command):
         """直接启动子进程并创建独立进程组，便于可靠停止 roslaunch 及其子节点。"""
@@ -3301,6 +3514,12 @@ class MyWindow(QWidget):
             )
         except (OSError, RuntimeError) as error:
             self.set_status(f'底盘驱动启动失败：{error}', 'error')
+            self.fault_center.report_condition(
+                '/anav/process_monitor/ranger_base', 'ANAV-BASE-003',
+                DiagnosticStatus.ERROR, '底盘启动失败', True,
+                detail=str(error),
+                action='检查 CAN 接口、roslaunch 环境和启动终端。',
+            )
             return
         self.set_status('底盘驱动已在新标签页启动。', 'success')
 
@@ -3331,9 +3550,16 @@ class MyWindow(QWidget):
             self.tagProcesses = []
             print(f"Failed to run command: {error}")
             self.set_status(f'标签服务启动失败：{error}', 'error')
+            self.fault_center.report_condition(
+                '/anav/process_monitor/tag', 'ANAV-TAG-002',
+                DiagnosticStatus.ERROR, '标签服务启动失败', True,
+                detail=str(error),
+                action='检查 MM3V、串口权限和标签启动文件。',
+            )
                             
     def start_can(self):
         try:
+            self.can_start_requested_at = time.monotonic()
             # 调试阶段使用设备的默认 sudo 密码。
             can_command = "echo '1' | sudo -S ip link set can0 up type can bitrate 500000"
 
@@ -3353,6 +3579,12 @@ class MyWindow(QWidget):
             # 如果失败，显示错误消息
             error_message = f"错误: {str(e)}"
             self.set_status(f'CAN 启动失败：{error_message}', 'error')
+            self.fault_center.report_condition(
+                '/anav/process_monitor/can', 'ANAV-BASE-001',
+                DiagnosticStatus.ERROR, 'CAN 接口启动失败', True,
+                detail=error_message,
+                action='检查 can0、sudo 权限和 CAN 设备连接。',
+            )
             #QMessageBox.critical(self, '错误', error_message)
 
     def send_joy_message(self,cmd):
@@ -3712,6 +3944,12 @@ class MyWindow(QWidget):
             )
         except (OSError, RuntimeError) as error:
             self.set_status(f'MoveBase 启动失败：{error}', 'error')
+            self.fault_center.report_condition(
+                '/anav/process_monitor/move_base', 'ANAV-NAV-003',
+                DiagnosticStatus.ERROR, 'MoveBase 启动失败', True,
+                detail=str(error),
+                action='检查 5nav.launch 和 ROS 启动环境。',
+            )
             return False
         self.start_bspline_log()
         self.quitnav_button.setEnabled(True)
@@ -3761,6 +3999,12 @@ class MyWindow(QWidget):
             self.stop_managed_process(self.bsplineLogProcess, 'B-spline log')
             self.bsplineLogProcess = None
             self.set_status('MoveBase 进程已退出，自动导航未启动，请查看终端日志。', 'error')
+            self.fault_center.report_condition(
+                '/anav/process_monitor/move_base', 'ANAV-NAV-003',
+                DiagnosticStatus.ERROR, 'MoveBase 启动后意外退出', True,
+                detail=f'进程退出码：{self.moveBaseProcess.poll()}',
+                action='查看 MoveBase 终端、代价地图与规划器日志。',
+            )
             return
         self.move_base_wait_attempts += 1
         if self.move_base_wait_attempts >= 60:
@@ -3768,6 +4012,12 @@ class MyWindow(QWidget):
             self.nav_button.setEnabled(True)
             self.set_chip(self.nav_chip, '导航 启动超时', False)
             self.set_status('MoveBase 在 30 秒内未就绪，已取消启动自动导航。', 'error')
+            self.fault_center.report_condition(
+                '/anav/process_monitor/move_base', 'ANAV-NAV-004',
+                DiagnosticStatus.ERROR, 'MoveBase 启动就绪超时', True,
+                detail='等待 /mxb_move_base 超过 30 秒。',
+                action='检查地图、TF、参数加载与 MoveBase 启动日志。',
+            )
             return
         QTimer.singleShot(500, self.wait_for_move_base_then_start_auto_nav)
 
@@ -3779,6 +4029,12 @@ class MyWindow(QWidget):
         except (OSError, RuntimeError) as error:
             self.nav_button.setEnabled(True)
             self.set_status(f'自动导航启动失败：{error}', 'error')
+            self.fault_center.report_condition(
+                '/anav/process_monitor/navigation', 'ANAV-NAV-002',
+                DiagnosticStatus.ERROR, 'AutoNAV 启动失败', True,
+                detail=str(error),
+                action='检查 3navlocations.launch 与地图、点位、拓扑文件。',
+            )
             return
         self.nav_button.setEnabled(False)
         self.quitnav_button.setEnabled(True)

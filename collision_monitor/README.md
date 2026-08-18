@@ -381,18 +381,18 @@ Collision Monitor 应是 `/cmd_vel` 的唯一发布者。
 | `angular.z` | rad/s | yaw 角速度 |
 | 其他分量 | — | V1 始终输出零 |
 
-### 诊断 `/collision_monitor/status`
+### 统一诊断 `/diagnostics`
 
 消息类型为 `diagnostic_msgs/DiagnosticArray`。
 
-其中包含一个名为 `collision_monitor` 的 `DiagnosticStatus`。
+其中包含一个名为 `/anav/collision_monitor` 的 `DiagnosticStatus`。
 
 #### 标准字段
 
 | 字段 | 内容 |
 | --- | --- |
 | `header.stamp` | 本次诊断时间 |
-| `status.name` | `collision_monitor` |
+| `status.name` | `/anav/collision_monitor` |
 | `status.hardware_id` | `ranger` |
 | `status.level` | 0、1 或 2 |
 | `status.message` | `state: reason` |
@@ -401,6 +401,10 @@ Collision Monitor 应是 `/cmd_vel` 的唯一发布者。
 
 | 键 | 含义 |
 | --- | --- |
+| `code` | `ANAV-SAF-*` 结构化错误码 |
+| `active` | 当前异常是否仍未恢复 |
+| `kind` | `STATE` 或 `FAULT` |
+| `action` | 建议的现场处理方式 |
 | `state` | 当前监控状态 |
 | `reason` | 状态原因 |
 | `source` | `nav`、`tag` 或 `teleop` |
@@ -426,7 +430,7 @@ Collision Monitor 应是 `/cmd_vel` 的唯一发布者。
 查看完整诊断：
 
 ```bash
-rostopic echo /collision_monitor/status
+rostopic echo /diagnostics
 ```
 
 ### RViz `/collision_monitor/markers`

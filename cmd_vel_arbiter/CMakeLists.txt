@@ -5,6 +5,7 @@ add_compile_options(-std=c++11)
 
 find_package(catkin REQUIRED COMPONENTS
   actionlib
+  diagnostic_msgs
   geometry_msgs
   message_generation
   ranger_msgs
@@ -29,7 +30,7 @@ generate_messages(
 )
 
 catkin_package(
-  CATKIN_DEPENDS actionlib geometry_msgs message_runtime ranger_msgs roscpp std_msgs
+  CATKIN_DEPENDS actionlib diagnostic_msgs geometry_msgs message_runtime ranger_msgs roscpp std_msgs
 )
 
 include_directories(${catkin_INCLUDE_DIRS})

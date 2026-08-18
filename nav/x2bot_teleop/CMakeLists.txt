@@ -6,6 +6,7 @@ project(x2bot_teleop)
 ## is used, also find other catkin packages
 find_package(catkin REQUIRED COMPONENTS
   cmd_vel_arbiter
+  diagnostic_msgs
   roscpp
   rospy
   std_msgs
@@ -124,7 +125,7 @@ generate_messages(
 catkin_package(
 #  INCLUDE_DIRS include
 #  LIBRARIES x2bot_teleop
-   CATKIN_DEPENDS cmd_vel_arbiter roscpp rospy std_msgs std_srvs joy message_runtime
+   CATKIN_DEPENDS cmd_vel_arbiter diagnostic_msgs roscpp rospy std_msgs std_srvs joy message_runtime
 #  DEPENDS system_lib
 )
 

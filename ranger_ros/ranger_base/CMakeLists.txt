@@ -10,6 +10,7 @@ add_compile_options(-std=c++11)
 find_package(catkin REQUIRED COMPONENTS
   actionlib
   controller_manager
+  diagnostic_msgs
   geometry_msgs
   ranger_msgs
   roscpp
@@ -116,7 +117,7 @@ include_directories(${EIGEN3_INCLUDE_DIR})
 catkin_package(
   INCLUDE_DIRS include
 #  LIBRARIES ranger_base
-  CATKIN_DEPENDS actionlib geometry_msgs nav_msgs ranger_msgs roscpp sensor_msgs tf2_ros ugv_sdk
+  CATKIN_DEPENDS actionlib diagnostic_msgs geometry_msgs nav_msgs ranger_msgs roscpp sensor_msgs tf2_ros ugv_sdk
 #  DEPENDS system_lib
 )
 

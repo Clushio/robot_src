@@ -11,8 +11,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <sstream>
 
 #include <boost/bind.hpp>
+#include <diagnostic_msgs/DiagnosticStatus.h>
+#include <diagnostic_msgs/KeyValue.h>
 #include <ros/ros.h>
 
 #include <nav_msgs/Odometry.h>
@@ -35,6 +38,14 @@ using namespace ranger_msgs;
 namespace westonrobot {
 namespace {
 double DegreeToRadian(double x) { return x * M_PI / 180.0; }
+
+void AddDiagnosticValue(diagnostic_msgs::DiagnosticStatus& status,
+                        const std::string& key, const std::string& value) {
+  diagnostic_msgs::KeyValue item;
+  item.key = key;
+  item.value = value;
+  status.values.push_back(item);
+}
 }  // namespace
 
 ///////////////////////////////////////////////////////////////////////////////////
@@ -195,6 +206,9 @@ void RangerROSMessenger::SetupSubscription() {
       nh_->advertise<ranger_msgs::BatteryState>("/battery_state", 10);
   rs_state_pub_ =
       nh_->advertise<ranger_msgs::RsStatus>("rs_state",10);
+  diagnostics_pub_ =
+      nh_->advertise<diagnostic_msgs::DiagnosticArray>("/diagnostics", 10,
+                                                       true);
 
   // subscriber
   motion_cmd_sub_ = nh_->subscribe<geometry_msgs::Twist>(
@@ -469,12 +483,21 @@ void RangerROSMessenger::TwistCmdCallback(
     cmd_vel_received_ = false;
     watchdog_active_ = true;
     RequestStopAndCenter(ranger_msgs::StopAndCenterGoal::CMD_TIMEOUT, false);
+    PublishDiagnostic(diagnostic_msgs::DiagnosticStatus::ERROR,
+                      "ANAV-BASE-007", "底盘收到非法速度指令",
+                      "/cmd_vel 中包含 NaN 或无穷值。",
+                      "检查速度仲裁输出和上游速度发布节点。", true);
     return;
   }
 
+  const bool watchdog_recovered = watchdog_active_ && cmd_vel_received_;
   last_cmd_vel_time_ = ros::WallTime::now();
   cmd_vel_received_ = true;
   watchdog_active_ = false;
+  if (watchdog_recovered && last_error_code_ == 0) {
+    PublishDiagnostic(diagnostic_msgs::DiagnosticStatus::OK,
+                      "ANAV-BASE-000", "底盘速度指令已恢复", "", "", false);
+  }
 
   if (StopCenterActive() || fault_motion_lock_) {
     SendZeroMotionCommand();
@@ -593,6 +616,10 @@ void RangerROSMessenger::CheckCmdVelWatchdog() {
     ROS_WARN("/cmd_vel timeout after %.3f s; commanding zero speed",
              cmd_vel_timeout_);
     RequestStopAndCenter(ranger_msgs::StopAndCenterGoal::CMD_TIMEOUT, false);
+    PublishDiagnostic(diagnostic_msgs::DiagnosticStatus::WARN,
+                      "ANAV-BASE-008", "底盘速度指令超时，已停车回正",
+                      "/cmd_vel 超过设定时限未更新。",
+                      "检查速度仲裁节点和 /cmd_vel 话题。", true);
   } else {
     SendZeroMotionCommand();
   }
@@ -717,6 +744,22 @@ void RangerROSMessenger::CompleteStopAndCenter(
   stop_center_state_ = StopCenterState::kIdle;
   still_feedback_count_ = 0;
   centered_feedback_count_ = 0;
+
+  if (!success) {
+    std::string code = "ANAV-BASE-011";
+    if (message.find("stationary") != std::string::npos) {
+      code = "ANAV-BASE-009";
+    } else if (message.find("mode switch") != std::string::npos) {
+      code = "ANAV-BASE-010";
+    }
+    PublishDiagnostic(diagnostic_msgs::DiagnosticStatus::ERROR, code,
+                      "底盘停车回正失败", message,
+                      "检查底盘反馈、运动模式与转向执行机构。", true);
+  } else if (last_error_code_ == 0) {
+    PublishDiagnostic(diagnostic_msgs::DiagnosticStatus::OK,
+                      "ANAV-BASE-000", "底盘已停车且轮组回正",
+                      message, "", false);
+  }
 }
 
 void RangerROSMessenger::UpdateStopAndCenter(
@@ -825,6 +868,12 @@ void RangerROSMessenger::CheckChassisFault(
     ROS_ERROR("Ranger chassis fault detected: error_code=0x%04x", error_code);
     RequestStopAndCenter(ranger_msgs::StopAndCenterGoal::CHASSIS_FAULT,
                          false);
+    std::ostringstream detail;
+    detail << "底盘 error_code=0x" << std::hex << error_code;
+    PublishDiagnostic(diagnostic_msgs::DiagnosticStatus::ERROR,
+                      "ANAV-BASE-005", "底盘控制器报告故障",
+                      detail.str(), "查阅 Ranger 底盘错误码并排除硬件故障。",
+                      true);
     return;
   }
 
@@ -832,7 +881,30 @@ void RangerROSMessenger::CheckChassisFault(
     ROS_WARN("Ranger chassis fault cleared; center steering before unlocking");
     RequestStopAndCenter(ranger_msgs::StopAndCenterGoal::CHASSIS_FAULT,
                          false);
+    PublishDiagnostic(diagnostic_msgs::DiagnosticStatus::WARN,
+                      "ANAV-BASE-015", "底盘故障已清除，正在停车回正",
+                      "解除运动锁前需确认车辆静止且轮组回正。",
+                      "等待自动回正完成。", true);
   }
+}
+
+void RangerROSMessenger::PublishDiagnostic(
+    uint8_t level, const std::string& code, const std::string& message,
+    const std::string& detail, const std::string& action, bool active) {
+  diagnostic_msgs::DiagnosticArray array;
+  array.header.stamp = ros::Time::now();
+  diagnostic_msgs::DiagnosticStatus status;
+  status.level = level;
+  status.name = "/anav/ranger_base";
+  status.hardware_id = robot_model_;
+  status.message = message;
+  AddDiagnosticValue(status, "code", code);
+  AddDiagnosticValue(status, "active", active ? "true" : "false");
+  AddDiagnosticValue(status, "kind", active ? "FAULT" : "STATE");
+  AddDiagnosticValue(status, "detail", detail);
+  AddDiagnosticValue(status, "action", action);
+  array.status.push_back(status);
+  diagnostics_pub_.publish(array);
 }
 
 void RangerROSMessenger::BestEffortStopAndCenterOnShutdown() {

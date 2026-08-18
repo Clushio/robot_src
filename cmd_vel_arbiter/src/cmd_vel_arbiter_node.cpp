@@ -2,6 +2,7 @@
 #include <atomic>
 #include <cmath>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -9,11 +10,22 @@
 #include <actionlib/client/simple_action_client.h>
 #include <cmd_vel_arbiter/FinishMotion.h>
 #include <cmd_vel_arbiter/ArbitratedCommand.h>
+#include <diagnostic_msgs/DiagnosticArray.h>
+#include <diagnostic_msgs/DiagnosticStatus.h>
+#include <diagnostic_msgs/KeyValue.h>
 #include <geometry_msgs/Twist.h>
 #include <ranger_msgs/StopAndCenterAction.h>
 #include <ros/ros.h>
 
 namespace {
+
+void AddDiagnosticValue(diagnostic_msgs::DiagnosticStatus& status,
+                        const std::string& key, const std::string& value) {
+  diagnostic_msgs::KeyValue item;
+  item.key = key;
+  item.value = value;
+  status.values.push_back(item);
+}
 
 double Clamp(double value, double limit) {
   return std::max(-limit, std::min(limit, value));
@@ -69,6 +81,8 @@ class CmdVelArbiter {
     output_pub_ =
         nh_.advertise<cmd_vel_arbiter::ArbitratedCommand>(output_topic_, 1,
                                                           false);
+    diagnostics_pub_ = nh_.advertise<diagnostic_msgs::DiagnosticArray>(
+        "/diagnostics", 10, false);
     stop_center_client_.reset(
         new StopCenterClient(stop_and_center_action_, true));
     finish_motion_server_ = private_nh_.advertiseService(
@@ -154,6 +168,10 @@ class CmdVelArbiter {
       ROS_ERROR_THROTTLE(1.0, "Rejected non-finite velocity from %s",
                          input->topic.c_str());
       if (!input->safety_only) {
+        SetDiagnosticFault("ANAV-ARB-005",
+                           "速度指令包含 NaN 或无穷值",
+                           "检查发布该速度的节点：" + input->topic,
+                           diagnostic_msgs::DiagnosticStatus::ERROR);
         input->received = false;
         return;
       }
@@ -165,6 +183,10 @@ class CmdVelArbiter {
           1.0, "Non-zero command on safety-only input %s was forced to zero",
           input->topic.c_str());
       command = geometry_msgs::Twist();
+      SetDiagnosticFault("ANAV-ARB-006",
+                         "安全通道收到非零速度，已强制置零",
+                         "检查 /cmd_vel/safety 的发布节点。",
+                         diagnostic_msgs::DiagnosticStatus::ERROR);
     }
 
     input->command = command;
@@ -216,6 +238,9 @@ class CmdVelArbiter {
       ROS_ERROR("stop-and-center failed: state=%s message=%s",
                 state.toString().c_str(),
                 result ? result->message.c_str() : "no result");
+      SetDiagnosticFault("ANAV-ARB-013", "轮组停车回正失败",
+                         result ? result->message : "action 未返回结果",
+                         diagnostic_msgs::DiagnosticStatus::ERROR);
     }
   }
 
@@ -227,6 +252,9 @@ class CmdVelArbiter {
         !stop_center_client_->waitForServer(ros::Duration(0.2))) {
       ROS_ERROR_THROTTLE(1.0, "stop-and-center action server %s unavailable",
                          stop_and_center_action_.c_str());
+      SetDiagnosticFault("ANAV-ARB-011", "停车回正服务不可用",
+                         "检查 ranger_base 的 /stop_and_center action。",
+                         diagnostic_msgs::DiagnosticStatus::ERROR);
       return false;
     }
 
@@ -264,6 +292,9 @@ class CmdVelArbiter {
     if (!stop_center_client_->getState().isDone()) {
       ROS_ERROR("stop-and-center did not finish within %.1f seconds",
                 stop_and_center_wait_timeout_);
+      SetDiagnosticFault("ANAV-ARB-012", "停车回正等待超时",
+                         "检查底盘反馈、轮组模式和转向执行机构。",
+                         diagnostic_msgs::DiagnosticStatus::ERROR);
       return false;
     }
     const ranger_msgs::StopAndCenterResultConstPtr result =
@@ -337,6 +368,9 @@ class CmdVelArbiter {
       stop_cycles_remaining_ = switch_stop_cycles_;
 
       if (selected_name == "safety") {
+        SetDiagnosticFault("ANAV-ARB-008", "安全速度通道正在接管",
+                           "确认现场安全后再解除紧急停止。",
+                           diagnostic_msgs::DiagnosticStatus::WARN, 1.0);
         RequestStopAndCenter(
             ranger_msgs::StopAndCenterGoal::SOFTWARE_ESTOP);
       } else if (selected_name.empty() &&
@@ -344,6 +378,11 @@ class CmdVelArbiter {
                  motion_since_center_) {
         ROS_WARN("motion source %s disappeared; stop and center",
                  previous_name.c_str());
+        SetDiagnosticFault(
+            previous_name == "tag" ? "ANAV-ARB-003" : "ANAV-ARB-002",
+            "运动速度来源超时，已停车并回正",
+            "检查对应控制节点及速度话题是否持续发布。",
+            diagnostic_msgs::DiagnosticStatus::WARN);
         RequestStopAndCenter(ranger_msgs::StopAndCenterGoal::CMD_TIMEOUT);
       }
     }
@@ -364,6 +403,13 @@ class CmdVelArbiter {
         Clamp(selected->command.linear.y, selected->max_linear_y);
     output.angular.z =
         Clamp(selected->command.angular.z, selected->max_angular_z);
+    if (output.linear.x != selected->command.linear.x ||
+        output.linear.y != selected->command.linear.y ||
+        output.angular.z != selected->command.angular.z) {
+      SetDiagnosticFault("ANAV-ARB-007", "速度指令超过限制，已限幅",
+                         "检查速度参数是否与底盘能力一致。",
+                         diagnostic_msgs::DiagnosticStatus::WARN, 1.0);
+    }
     if (!IsZero(output)) {
       motion_since_center_ = true;
     }
@@ -383,11 +429,57 @@ class CmdVelArbiter {
     output.source = source;
     output.command = command;
     output_pub_.publish(output);
+    PublishDiagnostic(source);
+  }
+
+  void SetDiagnosticFault(const std::string& code,
+                          const std::string& message,
+                          const std::string& action, uint8_t level,
+                          double hold_seconds = 3.0) {
+    std::lock_guard<std::mutex> lock(diagnostic_mutex_);
+    diagnostic_code_ = code;
+    diagnostic_message_ = message;
+    diagnostic_action_ = action;
+    diagnostic_level_ = level;
+    diagnostic_until_ =
+        ros::WallTime::now() + ros::WallDuration(hold_seconds);
+  }
+
+  void PublishDiagnostic(const std::string& source) {
+    diagnostic_msgs::DiagnosticArray array;
+    array.header.stamp = ros::Time::now();
+    diagnostic_msgs::DiagnosticStatus status;
+    status.name = "/anav/cmd_vel_arbiter";
+    status.hardware_id = "ranger";
+    {
+      std::lock_guard<std::mutex> lock(diagnostic_mutex_);
+      if (!diagnostic_until_.isZero() &&
+          ros::WallTime::now() < diagnostic_until_) {
+        status.level = diagnostic_level_;
+        status.message = diagnostic_message_;
+        AddDiagnosticValue(status, "code", diagnostic_code_);
+        AddDiagnosticValue(status, "action", diagnostic_action_);
+        AddDiagnosticValue(status, "active", "true");
+        AddDiagnosticValue(status, "kind", "FAULT");
+      } else {
+        status.level = diagnostic_msgs::DiagnosticStatus::OK;
+        status.message = "速度仲裁运行正常";
+        AddDiagnosticValue(status, "code", "ANAV-ARB-000");
+        AddDiagnosticValue(status, "active", "false");
+        AddDiagnosticValue(status, "kind", "STATE");
+      }
+    }
+    AddDiagnosticValue(status, "state",
+                       centering_active_.load() ? "CENTERING" : "RUNNING");
+    AddDiagnosticValue(status, "source", source.empty() ? "none" : source);
+    array.status.push_back(status);
+    diagnostics_pub_.publish(array);
   }
 
   ros::NodeHandle nh_;
   ros::NodeHandle private_nh_;
   ros::Publisher output_pub_;
+  ros::Publisher diagnostics_pub_;
   ros::WallTimer timer_;
   ros::ServiceServer finish_motion_server_;
   std::vector<std::shared_ptr<Input> > inputs_;
@@ -405,6 +497,12 @@ class CmdVelArbiter {
   bool motion_since_center_ = false;
   std::atomic<bool> centering_active_{false};
   std::atomic<bool> last_center_success_{false};
+  std::mutex diagnostic_mutex_;
+  std::string diagnostic_code_;
+  std::string diagnostic_message_;
+  std::string diagnostic_action_;
+  uint8_t diagnostic_level_ = diagnostic_msgs::DiagnosticStatus::OK;
+  ros::WallTime diagnostic_until_;
 };
 
 }  // namespace

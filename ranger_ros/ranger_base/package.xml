@@ -24,6 +24,7 @@
   <buildtool_depend>catkin</buildtool_depend>
 
   <depend>actionlib</depend>
+  <depend>diagnostic_msgs</depend>
 
   <!-- <build_depend>controller_manager</build_depend> -->
   <build_depend>roscpp</build_depend>

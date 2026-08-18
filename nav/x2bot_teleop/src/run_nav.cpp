@@ -1,6 +1,9 @@
 #include <actionlib/client/simple_action_client.h>
 #include <boost/bind.hpp>
 #include <cmd_vel_arbiter/FinishMotion.h>
+#include <diagnostic_msgs/DiagnosticArray.h>
+#include <diagnostic_msgs/DiagnosticStatus.h>
+#include <diagnostic_msgs/KeyValue.h>
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/Quaternion.h>
 #include <geometry_msgs/TransformStamped.h>
@@ -75,6 +78,18 @@ struct NavConfigValues {
 };
 
 typedef actionlib::SimpleActionClient<move_base_msgs::MoveBaseAction> MVClient;
+
+namespace
+{
+void addDiagnosticValue(diagnostic_msgs::DiagnosticStatus &status,
+                        const std::string &key, const std::string &value)
+{
+    diagnostic_msgs::KeyValue item;
+    item.key = key;
+    item.value = value;
+    status.values.push_back(item);
+}
+}
 
 class mynav
 {
@@ -182,6 +197,8 @@ public:
         marker_array_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("topology_markers", 1, true);
         path_pub_ = nh_.advertise<nav_msgs::Path>("topology_plan", 1, true);
         task_status_pub_ = nh_.advertise<std_msgs::String>("/anav/task_status", 10, true);
+        diagnostics_pub_ =
+            nh_.advertise<diagnostic_msgs::DiagnosticArray>("/diagnostics", 10, true);
         ros::SubscribeOptions status_options =
             ros::SubscribeOptions::create<geometry_msgs::Vector3Stamped>(
                 "/bspline_status", 1,
@@ -203,6 +220,28 @@ public:
             runth_->join();
         }
         delete global_ac;
+    }
+
+    void publishDiagnostic(uint8_t level, const std::string &code,
+                           const std::string &message,
+                           const std::string &detail,
+                           const std::string &action,
+                           bool active)
+    {
+        diagnostic_msgs::DiagnosticArray array;
+        array.header.stamp = ros::Time::now();
+        diagnostic_msgs::DiagnosticStatus status;
+        status.level = level;
+        status.name = "/anav/navigation";
+        status.hardware_id = "ranger";
+        status.message = message;
+        addDiagnosticValue(status, "code", code);
+        addDiagnosticValue(status, "active", active ? "true" : "false");
+        addDiagnosticValue(status, "kind", active ? "FAULT" : "STATE");
+        addDiagnosticValue(status, "detail", detail);
+        addDiagnosticValue(status, "action", action);
+        array.status.push_back(status);
+        diagnostics_pub_.publish(array);
     }
 
     bool planPathCallback(x2bot_teleop::SetInt::Request &req,
@@ -558,6 +597,7 @@ private:
     ros::Publisher marker_array_pub_;
     ros::Publisher path_pub_;
     ros::Publisher task_status_pub_;
+    ros::Publisher diagnostics_pub_;
     ros::CallbackQueue reference_status_queue_;
     ros::AsyncSpinner reference_status_spinner_;
     ros::Subscriber reference_status_sub_;
@@ -1336,6 +1376,19 @@ private:
         status.data = cleanStatusField(state) + "\t" + std::to_string(requested_index) +
                       "\t" + cleanStatusField(target_name) + "\t" + cleanStatusField(detail);
         task_status_pub_.publish(status);
+        if (state == "failed")
+        {
+            publishDiagnostic(
+                diagnostic_msgs::DiagnosticStatus::ERROR,
+                "ANAV-NAV-012", "导航任务执行失败", detail,
+                "查看目标点、拓扑路径、局部规划和障碍安全状态。", true);
+        }
+        else if (state == "running" || state == "arrived")
+        {
+            publishDiagnostic(
+                diagnostic_msgs::DiagnosticStatus::OK,
+                "ANAV-NAV-000", "导航任务状态正常", detail, "", false);
+        }
     }
 
     geometry_msgs::PoseStamped toPoseStamped(const TargetPose &pose)
@@ -2945,19 +2998,41 @@ int main(int argc, char **argv)
     mynav current_nav;
     if (!current_nav.loadNavPnts())
     {
+        current_nav.publishDiagnostic(
+            diagnostic_msgs::DiagnosticStatus::ERROR,
+            "ANAV-MAP-004", "导航点文件缺失或内容无效",
+            "无法加载 robot_positions.txt。",
+            "检查 ~/maps/robot_positions.txt 的路径、格式和点位数量。", true);
         ROS_FATAL("Navigation points are missing or invalid; topology navigation will not start.");
+        ros::WallDuration(0.2).sleep();
         return 2;
     }
     if (!current_nav.loadStaticMap())
     {
+        current_nav.publishDiagnostic(
+            diagnostic_msgs::DiagnosticStatus::ERROR,
+            "ANAV-MAP-002", "静态地图检查未通过",
+            "map.yaml 或其图像文件缺失、格式错误或无法读取。",
+            "检查 ~/maps/map.yaml、image 路径及文件权限。", true);
         ROS_FATAL("Static map is missing or invalid; topology navigation will not start.");
+        ros::WallDuration(0.2).sleep();
         return 3;
     }
     if (!current_nav.loadTopology())
     {
+        current_nav.publishDiagnostic(
+            diagnostic_msgs::DiagnosticStatus::ERROR,
+            "ANAV-MAP-009", "导航拓扑检查未通过",
+            "topology.yaml 缺失、与点位/地图不匹配或校验失败。",
+            "在 GUI 中重新构建导航拓扑并检查构建输出。", true);
         ROS_FATAL("Validated topology is unavailable; topology navigation will not start.");
+        ros::WallDuration(0.2).sleep();
         return 4;
     }
+    current_nav.publishDiagnostic(
+        diagnostic_msgs::DiagnosticStatus::OK,
+        "ANAV-NAV-000", "导航配置检查通过", "点位、静态地图和拓扑已加载。",
+        "", false);
 
     while (ros::ok())
     {
