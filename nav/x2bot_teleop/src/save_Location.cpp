@@ -10,6 +10,7 @@
 #include <iostream>
 #include <fstream>
 #include <chrono>
+#include <cstdlib>
 #include <iomanip>
 #include <sstream>
 
@@ -25,9 +26,12 @@ tf2_ros::Buffer tf_buffer_;
  std::ofstream file_poseRecordTest;
 
  // 文件路径
-std::string filename_ = "/home/nav/maps/robot_positions.txt";
+std::string filename_;
     // 标志变量，用于指示文件是否已经打开
 bool file_opened = false;
+bool counters_initialized = false;
+
+void loadExistingPointCounters();
 
 std::stringstream time2filename()
 {
@@ -47,7 +51,11 @@ bool file_1_openend = false;
 bool openPositionFile()
 {
     if (!file_opened) {
-        file_.open(filename_, std::ios_base::out);
+        if (!counters_initialized) {
+            loadExistingPointCounters();
+            counters_initialized = true;
+        }
+        file_.open(filename_, std::ios_base::out | std::ios_base::app);
         if (!file_.is_open()) {
             std::cerr << "Unable to open file: " << filename_ << std::endl;
             return false;
@@ -55,6 +63,48 @@ bool openPositionFile()
         file_opened = true;
     }
     return true;
+}
+
+std::string defaultPositionFilename()
+{
+    const char* home = std::getenv("HOME");
+    if (home != nullptr && home[0] != '\0') {
+        std::string home_dir(home);
+        while (home_dir.size() > 1 && home_dir.back() == '/') {
+            home_dir.pop_back();
+        }
+        return home_dir + "/maps/robot_positions.txt";
+    }
+    ROS_WARN("HOME is not set; using robot_positions.txt in the working directory.");
+    return "robot_positions.txt";
+}
+
+void loadExistingPointCounters()
+{
+    std::ifstream input(filename_);
+    std::string line;
+    while (std::getline(input, line)) {
+        std::istringstream stream(line);
+        double x, y, z, roll, pitch, yaw;
+        if (!(stream >> x >> y >> z >> roll >> pitch >> yaw)) {
+            continue;
+        }
+        ++id;
+        std::string label;
+        if (stream >> label && label.size() > 1 && label[0] == 'W') {
+            try {
+                const int existing_id = std::stoi(label.substr(1));
+                if (existing_id > workstation_id) {
+                    workstation_id = existing_id;
+                }
+            }
+            catch (const std::exception&) {
+                // Non-numeric labels do not participate in W1, W2... numbering.
+            }
+        }
+    }
+    ROS_INFO("Continue point recording at P%d; next workstation is W%d.",
+             id, workstation_id + 1);
 }
 
 bool lookupCurrentPose(double& x, double& y, double& z, double& roll, double& pitch, double& yaw)
@@ -113,11 +163,16 @@ void joyCallback(const sensor_msgs::Joy::ConstPtr& joy_msg)
             saveCurrentPose("");
 	    }
 
-         if (joy_msg->buttons[4]) // 工位点
-        {
-            workstation_id++;
-            saveCurrentPose("W" + std::to_string(workstation_id));
-        }
+	         if (joy_msg->buttons[4]) // 工位点
+	        {
+	            // Initialize counters from the existing file before choosing the
+	            // next W number. saveCurrentPose() will reuse the open stream.
+	            if (!openPositionFile()) {
+	                return;
+	            }
+	            workstation_id++;
+	            saveCurrentPose("W" + std::to_string(workstation_id));
+	        }
 
 	     if (joy_msg->buttons[5]) // 检查按钮 5 是否按下
         {
@@ -175,6 +230,9 @@ int main(int argc, char** argv)
     ros::init(argc, argv, "joy_location_saver");
    // ros::NodeHandle nh;
     ros::NodeHandle nh_;
+    ros::NodeHandle private_nh("~");
+    private_nh.param<std::string>(
+        "positions_file", filename_, defaultPositionFilename());
 
     tf2_ros::TransformListener tfListener(tf_buffer_);
     ros::Subscriber joy_sub_ = nh_.subscribe("/joy", 1, &joyCallback);

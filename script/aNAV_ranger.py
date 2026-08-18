@@ -274,6 +274,7 @@ class MyWindow(QWidget):
         self.point_edit_preview_pose = None
         self.record_session_active = False
         self.record_file_backup = ''
+        self.record_start_count = 0
         self.point_undo_stack = []
         self.positions_file_stamp = None
         self.dynamic_nav_buttons = []
@@ -423,6 +424,15 @@ class MyWindow(QWidget):
         self.start_button.move(18, 10)
         self.start_button.clicked.connect(self.start_setlocation)
         self.start_button.resize(150,70)
+
+        self.continue_points_button = QPushButton('继续添加点位', self)
+        self.continue_points_button.clicked.connect(
+            lambda _checked=False: self.start_setlocation(True)
+        )
+        self.continue_points_button.setToolTip(
+            '保留 robot_positions.txt 中的已有点位，继续追加导航点或工位'
+        )
+        self.continue_points_button.resize(150,70)
 
         # 创建停止按钮
         self.stop_button = QPushButton('结束设置', self)
@@ -732,6 +742,7 @@ class MyWindow(QWidget):
         self.nav_Pause.setText('暂停任务')
         self.nav_resume.setText('继续任务')
         self.start_button.setText('进入点位设置')
+        self.continue_points_button.setText('继续添加点位')
         self.stop_button.setText('结束点位设置')
         self.add_pnt.setText('添加导航点')
         self.add_workstation.setText('添加工位')
@@ -745,7 +756,7 @@ class MyWindow(QWidget):
         self.position_label.setText('最新标签定位：暂无数据')
 
         for button in (self.g2d_button, self.nav_button, self.nav_runstart, self.target_send_button,
-                       self.start_button):
+                       self.start_button, self.continue_points_button):
             button.setProperty('primary', True)
         for button in (self.g2d_exit_button, self.quitnav_button, self.stop_button, self.quit_button):
             button.setProperty('danger', True)
@@ -1293,6 +1304,7 @@ class MyWindow(QWidget):
         mode_row = QHBoxLayout()
         mode_row.setSpacing(10)
         mode_row.addWidget(self.start_button)
+        mode_row.addWidget(self.continue_points_button)
         mode_row.addWidget(self.stop_button)
         mode_row.addStretch()
         editor_layout.addLayout(mode_row)
@@ -1605,7 +1617,7 @@ class MyWindow(QWidget):
             'success',
         )
 
-    def backup_and_reset_record_file(self):
+    def prepare_record_file(self, keep_existing=False):
         directory = os.path.dirname(ROBOT_POSITIONS_FILE)
         os.makedirs(directory, exist_ok=True)
         self.record_file_backup = ''
@@ -1626,8 +1638,9 @@ class MyWindow(QWidget):
             shutil.copy2(ROBOT_POSITIONS_FILE, backup)
             self.record_file_backup = backup
 
-        with open(ROBOT_POSITIONS_FILE, 'w', encoding='utf-8'):
-            pass
+        if not keep_existing or not os.path.exists(ROBOT_POSITIONS_FILE):
+            with open(ROBOT_POSITIONS_FILE, 'w', encoding='utf-8'):
+                pass
 
     def read_record_positions(self):
         poses = []
@@ -2024,6 +2037,9 @@ class MyWindow(QWidget):
             button.setEnabled(has_points)
         self.navigate_point_button.setEnabled(
             has_points and self.nav_shortcuts_enabled
+        )
+        self.continue_points_button.setEnabled(
+            has_points and not self.record_session_active
         )
         self.undo_point_button.setEnabled(bool(self.point_undo_stack))
 
@@ -3530,12 +3546,20 @@ class MyWindow(QWidget):
         if self.joy_pub is not None:
             self.set_status('自动导航任务已继续。', 'success')
 
-    def start_setlocation(self):
+    def start_setlocation(self, continue_existing=False):
         if self.record_session_active:
             self.set_status('点位设置已在运行。', 'info')
             return
         if not self.ros_available:
             self.set_status('ROS 未连接，无法进入点位设置模式。', 'error')
+            return
+
+        existing_points = self.read_record_positions()
+        if continue_existing and not existing_points:
+            self.set_status(
+                '当前没有可续加的点位，请使用“进入点位设置”开始首次采集。',
+                'warning',
+            )
             return
 
         rviz_mode = self.rviz_record_mode.isChecked()
@@ -3563,7 +3587,7 @@ class MyWindow(QWidget):
                 return
 
         try:
-            self.backup_and_reset_record_file()
+            self.prepare_record_file(keep_existing=continue_existing)
         except OSError as error:
             self.stop_managed_process(self.setpointProcess, 'point setting')
             self.setpointProcess = None
@@ -3572,10 +3596,12 @@ class MyWindow(QWidget):
         self.refresh_points_table()
 
         self.record_session_active = True
+        self.record_start_count = len(existing_points) if continue_existing else 0
         self.pending_record_pose = None
         self.real_record_mode.setEnabled(False)
         self.rviz_record_mode.setEnabled(False)
         self.start_button.setEnabled(False)
+        self.continue_points_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.location_pnt.show()
         self.add_pnt.show()
@@ -3586,15 +3612,23 @@ class MyWindow(QWidget):
                 '等待 RViz 目标位姿：请选择工具栏中的“记录点位”'
                 '（快捷键 R）。'
             )
-            message = '已进入 RViz 采点模式；请在地图上拖出记录箭头。'
+            mode_message = '请在地图上拖出记录箭头。'
         else:
-            message = '已进入实车采点模式；请移动机器人后添加点位。'
+            mode_message = '请移动机器人后添加点位。'
+        if continue_existing:
+            message = (
+                f'已保留原有 {len(existing_points)} 个点位并进入续加模式；'
+                f'{mode_message}'
+            )
+        else:
+            message = f'已进入全新点位采集模式；{mode_message}'
         if self.record_file_backup:
             message += f' 原点位已备份到 {self.record_file_backup}。'
         self.set_status(message, 'success')
 
     def stop_setlocation(self):
         had_session = self.record_session_active
+        start_count = self.record_start_count
         self.stop_managed_process(self.setpointProcess, 'point setting')
         self.setpointProcess = None
         self.record_session_active = False
@@ -3609,10 +3643,16 @@ class MyWindow(QWidget):
         self.publish_record_markers()
         self.refresh_points_table()
         if had_session:
-            self.set_status(
-                f'已结束点位设置，点位保存在 {ROBOT_POSITIONS_FILE}。',
-                'info',
+            total_count = len(self.read_record_positions())
+            added_count = max(0, total_count - start_count)
+            message = (
+                f'已结束点位设置，当前共 {total_count} 个点位，'
+                f'本次新增 {added_count} 个。'
             )
+            if added_count:
+                message += ' 请重新构建导航拓扑后再启动 AutoNAV。'
+            self.set_status(message, 'success' if added_count else 'info')
+        self.record_start_count = 0
 
     def is_rviz_running(self):
         if self.rvizProcess and self.rvizProcess.poll() is None:
