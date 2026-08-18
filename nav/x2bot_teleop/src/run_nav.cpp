@@ -94,10 +94,10 @@ public:
           cancel_requested_(false),
           current_status(0),
           blocked_timeout_(10.0),
-          blocked_cooldown_initial_(20.0),
-          blocked_cooldown_max_(120.0),
+          blocked_cooldown_initial_(60.0),
+          blocked_cooldown_max_(180.0),
           blocked_backoff_factor_(2.0),
-          blocked_wait_timeout_(180.0),
+          blocked_wait_timeout_(240.0),
           progress_distance_(0.05),
           progress_yaw_(6.0 * M_PI / 180.0),
           waypoint_reached_distance_(0.20),
@@ -1990,20 +1990,30 @@ private:
         }
 
         const int n = target_poses.size();
+        // A temporary block is a hard exclusion until blocked_until.  After
+        // it expires, keep the failure history as a route-level hysteresis:
+        // prefer a path containing fewer previously failed edges before
+        // comparing geometric cost.  This prevents a just-expired short edge
+        // from immediately pulling the robot off a healthy detour, while
+        // still allowing the failed edge when it is the only available path.
+        std::vector<int> failed_edge_score(n, std::numeric_limits<int>::max());
         std::vector<double> dist(n, std::numeric_limits<double>::infinity());
         std::vector<int> parent(n, -1);
-        typedef std::pair<double, int> QueueItem;
+        typedef std::pair<std::pair<int, double>, int> QueueItem;
         std::priority_queue<QueueItem, std::vector<QueueItem>, std::greater<QueueItem>> q;
 
+        failed_edge_score[start] = 0;
         dist[start] = 0.0;
-        q.push(QueueItem(0.0, start));
+        q.push(QueueItem(std::make_pair(0, 0.0), start));
 
         while (!q.empty())
         {
-            const double cost = q.top().first;
+            const int failure_score = q.top().first.first;
+            const double cost = q.top().first.second;
             const int node = q.top().second;
             q.pop();
-            if (cost > dist[node])
+            if (failure_score > failed_edge_score[node] ||
+                (failure_score == failed_edge_score[node] && cost > dist[node]))
             {
                 continue;
             }
@@ -2026,12 +2036,20 @@ private:
                 {
                     continue;
                 }
+                const int edge_failure_score =
+                    fixed_route ? 0 : std::max(0, edge.failure_count);
+                const int next_failure_score =
+                    failure_score + edge_failure_score;
                 const double next_cost = cost + edge.cost;
-                if (next_cost < dist[edge.to])
+                if (next_failure_score < failed_edge_score[edge.to] ||
+                    (next_failure_score == failed_edge_score[edge.to] &&
+                     next_cost < dist[edge.to]))
                 {
+                    failed_edge_score[edge.to] = next_failure_score;
                     dist[edge.to] = next_cost;
                     parent[edge.to] = node;
-                    q.push(QueueItem(next_cost, edge.to));
+                    q.push(QueueItem(
+                        std::make_pair(next_failure_score, next_cost), edge.to));
                 }
             }
         }
@@ -2055,6 +2073,12 @@ private:
             return {};
         }
         std::reverse(path.begin(), path.end());
+        if (!fixed_route && failed_edge_score[goal] > 0)
+        {
+            ROS_WARN("Topology path to P%d must retry previously failed edges "
+                     "(failure score=%d); no clean alternative is available.",
+                     goal, failed_edge_score[goal]);
+        }
         return path;
     }
 
@@ -2749,10 +2773,27 @@ private:
                     blockEdge(previous_index, next_index);
                 }
 
-                start_index = nearestPoseIndex();
-                if (!validIndex(start_index))
+                // Replan from the last confirmed topology node.  Selecting an
+                // arbitrary nearest node here can choose the failed edge's
+                // destination while the robot is between nodes, effectively
+                // bypassing the temporary edge block and making it turn back
+                // and forth between routes.  A controlled return to the last
+                // confirmed node is conservative and gives Dijkstra a stable
+                // branch point for the detour.
+                if (validIndex(previous_index))
                 {
-                    start_index = current_pose_index;
+                    start_index = previous_index;
+                    ROS_INFO("Anchor blocked-edge replan at last confirmed node P%d "
+                             "instead of choosing an arbitrary nearest node.",
+                             start_index);
+                }
+                else
+                {
+                    start_index = nearestPoseIndex();
+                    if (!validIndex(start_index))
+                    {
+                        start_index = current_pose_index;
+                    }
                 }
                 path_indices = dijkstraShortestPath(start_index, target_index);
                 execution_start = 0;
