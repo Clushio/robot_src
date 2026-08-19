@@ -25,9 +25,9 @@ topology_phase_timeout: 0.50
 # The physical footprint is shared. Only the additional operating margin is
 # source-specific: navigation/teleop are conservative, tag is low-speed fine
 # positioning near a workstation.
-navigation_footprint_padding: 0.15
-navigation_terminal_footprint_padding: 0.08
-tag_footprint_padding: 0.08
+navigation_footprint_padding: 0.10
+navigation_terminal_footprint_padding: 0.06
+tag_footprint_padding: 0.06
 teleop_footprint_padding: 0.10
 
 max_navigation_linear_x: 0.20
