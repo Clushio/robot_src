@@ -110,9 +110,6 @@ OK = 0    WARN = 1    ERROR = 2
 - 输出：零速度；
 - `WAITING_FOR_ROBOT_TO_STOP`：底盘还没有停稳；
 - `WAITING_FOR_STATIONARY_HOLD`：已经停稳，正在等待保持时间。
-- `WAITING_FOR_NAVIGATION_TERMINAL_STOP`：首段或末段准备缩小 padding，
-  正在等待底盘停稳；
-- `WAITING_FOR_NAVIGATION_TERMINAL_HOLD`：底盘已经停稳，正在等待保持时间。
 
 例如从 `nav` 切换到 `tag` 时，不能在车辆仍运动时直接把 padding
 从 0.15 m 缩小到 0.08 m。
@@ -120,9 +117,10 @@ OK = 0    WARN = 1    ERROR = 2
 节点会先使用导航的保守 footprint 检查停车轨迹。实测速度连续低于
 阈值 0.20 s 后，才启用新的 Tag profile。
 
-拓扑首段和末段同样使用这个原则：`nav` 的 0.15 m 只有在实测停车并
-保持 0.20 s 后，才能切换到 `nav_terminal` 的 0.08 m。反向扩大为
-0.15 m 会立即生效。
+拓扑首段和末段仍属于同一个 `nav` 来源，只改变 footprint padding。
+`nav` 与 `nav_terminal` 双向立即切换，不注入停车；切换后的同一监控
+周期会使用新 footprint 执行完整 swept-volume 检测，不安全时仍按正常
+碰撞策略减速或停车。
 
 ### `STOPPED`
 

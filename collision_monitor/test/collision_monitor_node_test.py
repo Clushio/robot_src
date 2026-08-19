@@ -274,28 +274,21 @@ class CollisionMonitorNodeTest(unittest.TestCase):
         self.assertAlmostEqual(1.0, float(status['scale']), places=2)
         self.assertAlmostEqual(0.20, output.linear.x, places=2)
 
-        # START_SEGMENT and FINAL_SEGMENT use the 0.08 m nav_terminal
-        # footprint, but shrinking from normal navigation must wait for real
-        # odometry to stop. Navigation limits and source remain unchanged.
+        # START_SEGMENT and FINAL_SEGMENT switch immediately to the 0.08 m
+        # nav_terminal footprint without injecting a stop. Navigation limits
+        # and source remain unchanged, and the new footprint is checked in the
+        # same monitor cycle.
         with self._lock:
             self._odom_linear_x = 0.03
         self._set_phase(1)
         self._set_command('nav', linear_x=0.10)
-        status, output = self._wait_for_state(
-            'PROFILE_TRANSITION',
-            'WAITING_FOR_NAVIGATION_TERMINAL_STOP')
-        self.assertEqual('transition', status['profile'])
-        self.assertAlmostEqual(0.15, float(status['footprint_padding']),
-                               places=2)
-        self.assertAlmostEqual(0.0, output.linear.x)
-        with self._lock:
-            self._odom_linear_x = 0.0
         status, output = self._wait_for_ok_output(0.10, 0.0)
         self.assertEqual('nav_terminal', status['profile'])
         self.assertEqual('START_SEGMENT', status['topology_phase'])
         self.assertEqual('true', status['topology_phase_fresh'])
         self.assertAlmostEqual(0.08, float(status['footprint_padding']),
                                places=2)
+        self.assertAlmostEqual(0.10, output.linear.x, places=3)
 
         # Expanding back to normal navigation is conservative and immediate.
         self._set_phase(0)

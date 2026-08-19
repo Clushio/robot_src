@@ -635,50 +635,16 @@ class CollisionMonitorNode {
            topology_phase_ == kTopologyPhaseFinalSegment;
   }
 
-  // Expanding 0.08 -> 0.15 is immediately conservative. Shrinking 0.15 ->
-  // 0.08 is allowed only after measured chassis motion has stopped for the
-  // same hold time used by command-source transitions.
-  bool NavigationTerminalTransitionBlocks(bool requested,
-                                          const ros::WallTime& now) {
-    if (!requested) {
-      navigation_terminal_active_ = false;
-      navigation_terminal_pending_ = false;
-      navigation_transition_stopped_since_ = ros::WallTime();
-      return false;
-    }
-    if (navigation_terminal_active_) {
-      navigation_terminal_pending_ = false;
-      navigation_transition_stopped_since_ = ros::WallTime();
-      return false;
-    }
-    if (!navigation_terminal_pending_) {
-      navigation_terminal_pending_ = true;
-      navigation_transition_stopped_since_ = ros::WallTime();
-      ForceStoppedScale();
-    }
-    if (!MeasuredStopped(odom_.twist.twist)) {
-      navigation_transition_stopped_since_ = ros::WallTime();
-      return true;
-    }
-    if (navigation_transition_stopped_since_.isZero()) {
-      navigation_transition_stopped_since_ = now;
-      return true;
-    }
-    if ((now - navigation_transition_stopped_since_).toSec() <
-        source_transition_hold_time_) {
-      return true;
-    }
-    navigation_terminal_active_ = true;
-    navigation_terminal_pending_ = false;
-    navigation_transition_stopped_since_ = ros::WallTime();
-    ForceStoppedScale();
-    return false;
+  // A topology phase only changes the footprint padding. Apply it immediately
+  // and let the normal swept-volume check decide whether the command remains
+  // safe with the newly selected footprint. Unlike a command-source change,
+  // this does not require stopping the chassis first.
+  void UpdateNavigationTerminalProfile(const ros::WallTime& now) {
+    navigation_terminal_active_ = NavigationTerminalRequested(now);
   }
 
   void ResetNavigationTerminalProfile() {
     navigation_terminal_active_ = false;
-    navigation_terminal_pending_ = false;
-    navigation_transition_stopped_since_ = ros::WallTime();
   }
 
   bool SourceTransitionBlocks(const std::string& source,
@@ -857,30 +823,7 @@ class CollisionMonitorNode {
     }
 
     if (candidate_.source == navigation_source_) {
-      const bool terminal_requested = NavigationTerminalRequested(now);
-      if (NavigationTerminalTransitionBlocks(terminal_requested, now)) {
-        const CollisionResult transition_stop =
-            navigation_profile_.checker.simulate(
-                initial, initial.linear_x, initial.linear_y, initial.angular_z,
-                reaction_time_, static_map_, static_policy_, local_map_,
-                local_policy_, rollout_options_);
-        visualization = transition_stop;
-        if (transition_stop.collision) {
-          state = "EMERGENCY_STOP";
-          reason = transition_stop.static_collision
-                       ? "STATIC_COLLISION_DURING_PROFILE_TRANSITION"
-                       : "LOCAL_COLLISION_DURING_PROFILE_TRANSITION";
-          collision_time = transition_stop.collision_time;
-        } else {
-          state = "PROFILE_TRANSITION";
-          reason = MeasuredStopped(odom_.twist.twist)
-                       ? "WAITING_FOR_NAVIGATION_TERMINAL_HOLD"
-                       : "WAITING_FOR_NAVIGATION_TERMINAL_STOP";
-        }
-        Publish(output, state, reason, scale, collision_time, visualization,
-                candidate_.source, &navigation_profile_);
-        return;
-      }
+      UpdateNavigationTerminalProfile(now);
       profile = ProfileForSource(candidate_.source);
     }
 
@@ -1259,8 +1202,6 @@ class CollisionMonitorNode {
   std::string pending_source_;
   ros::WallTime transition_stopped_since_;
   bool navigation_terminal_active_ = false;
-  bool navigation_terminal_pending_ = false;
-  ros::WallTime navigation_transition_stopped_since_;
 
   std::string candidate_topic_;
   std::string output_topic_;
