@@ -7,6 +7,7 @@
     <param name="odom_topic" value="/collision_monitor_test/odom" />
     <param name="static_map_topic" value="/collision_monitor_test/static_map" />
     <param name="local_map_topic" value="/collision_monitor_test/local_map" />
+    <param name="topology_phase_topic" value="/collision_monitor_test/topology_phase" />
     <param name="status_topic" value="/collision_monitor_test/status" />
     <param name="marker_topic" value="/collision_monitor_test/markers" />
     <param name="global_frame" value="collision_test_map" />
@@ -16,9 +17,11 @@
     <param name="odom_timeout" value="0.20" />
     <param name="tf_timeout" value="0.30" />
     <param name="local_map_timeout" value="0.30" />
+    <param name="topology_phase_timeout" value="0.25" />
     <param name="clear_hold_time" value="0.15" />
     <param name="source_transition_hold_time" value="0.10" />
     <param name="navigation_footprint_padding" value="0.15" />
+    <param name="navigation_terminal_footprint_padding" value="0.08" />
     <param name="tag_footprint_padding" value="0.08" />
     <param name="teleop_footprint_padding" value="0.15" />
     <rosparam param="footprint">

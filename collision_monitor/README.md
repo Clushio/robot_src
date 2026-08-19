@@ -110,12 +110,19 @@ OK = 0    WARN = 1    ERROR = 2
 - 输出：零速度；
 - `WAITING_FOR_ROBOT_TO_STOP`：底盘还没有停稳；
 - `WAITING_FOR_STATIONARY_HOLD`：已经停稳，正在等待保持时间。
+- `WAITING_FOR_NAVIGATION_TERMINAL_STOP`：首段或末段准备缩小 padding，
+  正在等待底盘停稳；
+- `WAITING_FOR_NAVIGATION_TERMINAL_HOLD`：底盘已经停稳，正在等待保持时间。
 
 例如从 `nav` 切换到 `tag` 时，不能在车辆仍运动时直接把 padding
 从 0.15 m 缩小到 0.08 m。
 
 节点会先使用导航的保守 footprint 检查停车轨迹。实测速度连续低于
 阈值 0.20 s 后，才启用新的 Tag profile。
+
+拓扑首段和末段同样使用这个原则：`nav` 的 0.15 m 只有在实测停车并
+保持 0.20 s 后，才能切换到 `nav_terminal` 的 0.08 m。反向扩大为
+0.15 m 会立即生效。
 
 ### `STOPPED`
 
@@ -346,6 +353,7 @@ OK = 0    WARN = 1    ERROR = 2
 | `/odom` | `Odometry` | 实测初始速度 |
 | `/map` | `OccupancyGrid` | 静态障碍 |
 | local costmap | `OccupancyGrid` | 当前传感器障碍 |
+| `/anav/topology_safety_phase` | `std_msgs/UInt8` | 首段/中间段/末段心跳 |
 | `map -> base_link` | TF2 | 当前真实位姿 |
 
 默认 local costmap 话题：
@@ -410,6 +418,8 @@ Collision Monitor 应是 `/cmd_vel` 的唯一发布者。
 | `source` | `nav`、`tag` 或 `teleop` |
 | `profile` | 实际使用的运动 profile |
 | `footprint_padding` | 当前安全裕度，单位 m |
+| `topology_phase` | `NORMAL`、`START_SEGMENT` 或 `FINAL_SEGMENT` |
+| `topology_phase_fresh` | AutoNAV 阶段心跳是否仍然有效 |
 | `scale` | 候选速度缩放比例 |
 | `collision_time` | 预计首次碰撞时间，单位 s |
 | `output_linear_x` | 实际输出 x 线速度 |
@@ -519,18 +529,21 @@ footprint:
 | Profile | Padding | 最大 vx | 最大 vy | 最大 wz |
 | --- | ---: | ---: | ---: | ---: |
 | `nav` | 0.15 m | 0.20 m/s | 0 | 0.50 rad/s |
+| `nav_terminal` | 0.08 m | 0.20 m/s | 0 | 0.50 rad/s |
 | `tag` | 0.08 m | 0.05 m/s | 0.05 m/s | 0.15 rad/s |
-| `teleop` | 0.15 m | 0.35 m/s | 0 | 1.10 rad/s |
+| `teleop` | 0.10 m | 0.35 m/s | 0 | 1.10 rad/s |
 
 加 padding 后的近似外包尺寸：
 
 - `nav`：1.02 m × 0.80 m；
+- `nav_terminal`：0.88 m × 0.66 m；
 - `tag`：0.88 m × 0.66 m；
-- `teleop`：1.02 m × 0.80 m。
+- `teleop`：0.92 m × 0.70 m。
 
 运动限制：
 
 - `nav`：允许前进、前进圆弧和原地旋转，不允许倒车和横移；
+- `nav_terminal`：运动限制与 `nav` 相同，只在拓扑首尾段使用较小 padding；
 - `tag`：允许低速前后、横移和旋转精调；
 - `teleop`：当前配置不允许倒车和横移；数据缺失时允许人工旁路。
 

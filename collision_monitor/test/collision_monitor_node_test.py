@@ -12,6 +12,7 @@ from cmd_vel_arbiter.msg import ArbitratedCommand
 from diagnostic_msgs.msg import DiagnosticArray
 from geometry_msgs.msg import TransformStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry
+from std_msgs.msg import UInt8
 from visualization_msgs.msg import Marker, MarkerArray
 
 
@@ -23,6 +24,8 @@ class CollisionMonitorNodeTest(unittest.TestCase):
         self._publish_odom = False
         self._publish_local = False
         self._publish_tf = False
+        self._publish_phase = True
+        self._phase = 0
         self._candidate = None
         self._odom_linear_x = 0.0
         self._odom_linear_y = 0.0
@@ -42,6 +45,8 @@ class CollisionMonitorNodeTest(unittest.TestCase):
             queue_size=1, latch=True)
         self._local_pub = rospy.Publisher(
             '/collision_monitor_test/local_map', OccupancyGrid, queue_size=1)
+        self._phase_pub = rospy.Publisher(
+            '/collision_monitor_test/topology_phase', UInt8, queue_size=1)
         self._output_sub = rospy.Subscriber(
             '/collision_monitor_test/output', Twist, self._output_callback,
             queue_size=1)
@@ -87,7 +92,8 @@ class CollisionMonitorNodeTest(unittest.TestCase):
             if (self._candidate_pub.get_num_connections() and
                     self._odom_pub.get_num_connections() and
                     self._static_pub.get_num_connections() and
-                    self._local_pub.get_num_connections()):
+                    self._local_pub.get_num_connections() and
+                    self._phase_pub.get_num_connections()):
                 return
             time.sleep(0.02)
         self.fail('collision monitor subscriptions did not connect')
@@ -124,6 +130,8 @@ class CollisionMonitorNodeTest(unittest.TestCase):
                 odom_linear_x = self._odom_linear_x
                 odom_linear_y = self._odom_linear_y
                 odom_angular_z = self._odom_angular_z
+                publish_phase = self._publish_phase
+                phase = self._phase
 
             if candidate is not None:
                 candidate.header.stamp = stamp
@@ -147,7 +155,15 @@ class CollisionMonitorNodeTest(unittest.TestCase):
                 transform.child_frame_id = 'collision_test_base'
                 transform.transform.rotation.w = 1.0
                 self._tf_broadcaster.sendTransform(transform)
+            if publish_phase:
+                self._phase_pub.publish(UInt8(data=phase))
             rate.sleep()
+
+    def _set_phase(self, phase, publish=True):
+        with self._lock:
+            self._phase = phase
+            self._publish_phase = publish
+            self._last_status = None
 
     def _set_command(self, source, linear_x=0.0, linear_y=0.0,
                      angular_z=0.0):
@@ -257,6 +273,57 @@ class CollisionMonitorNodeTest(unittest.TestCase):
         status, output = self._wait_for_ok_output(0.20, 0.0, timeout=3.0)
         self.assertAlmostEqual(1.0, float(status['scale']), places=2)
         self.assertAlmostEqual(0.20, output.linear.x, places=2)
+
+        # START_SEGMENT and FINAL_SEGMENT use the 0.08 m nav_terminal
+        # footprint, but shrinking from normal navigation must wait for real
+        # odometry to stop. Navigation limits and source remain unchanged.
+        with self._lock:
+            self._odom_linear_x = 0.03
+        self._set_phase(1)
+        self._set_command('nav', linear_x=0.10)
+        status, output = self._wait_for_state(
+            'PROFILE_TRANSITION',
+            'WAITING_FOR_NAVIGATION_TERMINAL_STOP')
+        self.assertEqual('transition', status['profile'])
+        self.assertAlmostEqual(0.15, float(status['footprint_padding']),
+                               places=2)
+        self.assertAlmostEqual(0.0, output.linear.x)
+        with self._lock:
+            self._odom_linear_x = 0.0
+        status, output = self._wait_for_ok_output(0.10, 0.0)
+        self.assertEqual('nav_terminal', status['profile'])
+        self.assertEqual('START_SEGMENT', status['topology_phase'])
+        self.assertEqual('true', status['topology_phase_fresh'])
+        self.assertAlmostEqual(0.08, float(status['footprint_padding']),
+                               places=2)
+
+        # Expanding back to normal navigation is conservative and immediate.
+        self._set_phase(0)
+        status, output = self._wait_for_ok_output(0.10, 0.0)
+        self.assertEqual('nav', status['profile'])
+        self.assertAlmostEqual(0.15, float(status['footprint_padding']),
+                               places=2)
+
+        # A lost AutoNAV heartbeat must fail back to 0.15 m rather than leave
+        # the terminal padding active.
+        self._set_phase(2)
+        status, output = self._wait_for_ok_output(0.10, 0.0)
+        self.assertEqual('nav_terminal', status['profile'])
+        self.assertEqual('FINAL_SEGMENT', status['topology_phase'])
+        self._set_phase(2, publish=False)
+        status, output = self._wait_for_ok_output(0.10, 0.0)
+        deadline = time.monotonic() + 2.0
+        while (status.get('profile') != 'nav' and
+               time.monotonic() < deadline):
+            time.sleep(0.03)
+            with self._lock:
+                status = copy.deepcopy(self._last_status)
+        self.assertIsNotNone(status)
+        self.assertEqual('nav', status['profile'])
+        self.assertEqual('false', status['topology_phase_fresh'])
+        self.assertAlmostEqual(0.15, float(status['footprint_padding']),
+                               places=2)
+        self._set_phase(0)
 
         with self._lock:
             self._odom_linear_x = 0.03

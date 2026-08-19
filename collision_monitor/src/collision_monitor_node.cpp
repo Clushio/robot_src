@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstdio>
+#include <cstdint>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -18,6 +19,7 @@
 #include <nav_msgs/OccupancyGrid.h>
 #include <nav_msgs/Odometry.h>
 #include <ros/ros.h>
+#include <std_msgs/UInt8.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <tf2_ros/transform_listener.h>
 #include <tf2/utils.h>
@@ -27,6 +29,25 @@
 
 namespace collision_monitor {
 namespace {
+
+enum TopologySafetyPhase : uint8_t {
+  kTopologyPhaseNormal = 0,
+  kTopologyPhaseStartSegment = 1,
+  kTopologyPhaseFinalSegment = 2,
+};
+
+const char* TopologyPhaseName(uint8_t phase) {
+  switch (phase) {
+    case kTopologyPhaseNormal:
+      return "NORMAL";
+    case kTopologyPhaseStartSegment:
+      return "START_SEGMENT";
+    case kTopologyPhaseFinalSegment:
+      return "FINAL_SEGMENT";
+    default:
+      return "INVALID";
+  }
+}
 
 bool IsFinite(const geometry_msgs::Twist& twist) {
   return std::isfinite(twist.linear.x) && std::isfinite(twist.linear.y) &&
@@ -127,6 +148,9 @@ class CollisionMonitorNode {
     candidate_sub_ = nh_.subscribe(candidate_topic_, 1,
                                    &CollisionMonitorNode::CandidateCallback,
                                    this);
+    topology_phase_sub_ = nh_.subscribe(
+        topology_phase_topic_, 1,
+        &CollisionMonitorNode::TopologyPhaseCallback, this);
     odom_sub_ = nh_.subscribe(odom_topic_, 1,
                               &CollisionMonitorNode::OdomCallback, this);
     static_map_sub_ = nh_.subscribe(static_map_topic_, 1,
@@ -145,11 +169,14 @@ class CollisionMonitorNode {
 
     ROS_INFO(
         "collision_monitor: %s -> %s at %.1f Hz, frames=%s/%s, "
-        "padding(nav/tag/teleop)=%.3f/%.3f/%.3f",
+        "padding(nav/nav_terminal/tag/teleop)=%.3f/%.3f/%.3f/%.3f, "
+        "topology_phase=%s",
         candidate_topic_.c_str(), output_topic_.c_str(), monitor_rate_,
         global_frame_.c_str(), base_frame_.c_str(),
         navigation_profile_.footprint_padding,
-        tag_profile_.footprint_padding, teleop_profile_.footprint_padding);
+        navigation_terminal_profile_.footprint_padding,
+        tag_profile_.footprint_padding, teleop_profile_.footprint_padding,
+        topology_phase_topic_.c_str());
   }
 
   ~CollisionMonitorNode() {
@@ -164,6 +191,9 @@ class CollisionMonitorNode {
     navigation_profile_.name = "nav";
     navigation_profile_.allow_reverse = false;
     navigation_profile_.allow_lateral = false;
+    navigation_terminal_profile_.name = "nav_terminal";
+    navigation_terminal_profile_.allow_reverse = false;
+    navigation_terminal_profile_.allow_lateral = false;
     tag_profile_.name = "tag";
     tag_profile_.allow_reverse = true;
     tag_profile_.allow_lateral = true;
@@ -190,6 +220,8 @@ class CollisionMonitorNode {
     private_nh_.param("tag_source", tag_source_, std::string("tag"));
     private_nh_.param("navigation_source", navigation_source_,
                       std::string("nav"));
+    private_nh_.param("topology_phase_topic", topology_phase_topic_,
+                      std::string("/anav/topology_safety_phase"));
 
     private_nh_.param("monitor_rate", monitor_rate_, 50.0);
     private_nh_.param("diagnostic_rate", diagnostic_rate_, 1.0);
@@ -197,13 +229,18 @@ class CollisionMonitorNode {
     private_nh_.param("odom_timeout", odom_timeout_, 0.20);
     private_nh_.param("tf_timeout", tf_timeout_, 0.30);
     private_nh_.param("local_map_timeout", local_map_timeout_, 0.30);
+    private_nh_.param("topology_phase_timeout", topology_phase_timeout_,
+                      0.50);
     double legacy_padding = 0.15;
     private_nh_.param("footprint_padding", legacy_padding, 0.15);
     navigation_profile_.footprint_padding = legacy_padding;
+    navigation_terminal_profile_.footprint_padding = 0.08;
     teleop_profile_.footprint_padding = legacy_padding;
     tag_profile_.footprint_padding = 0.08;
     private_nh_.param("navigation_footprint_padding",
                       navigation_profile_.footprint_padding, legacy_padding);
+    private_nh_.param("navigation_terminal_footprint_padding",
+                      navigation_terminal_profile_.footprint_padding, 0.08);
     private_nh_.param("tag_footprint_padding",
                       tag_profile_.footprint_padding, 0.08);
     private_nh_.param("teleop_footprint_padding",
@@ -214,6 +251,12 @@ class CollisionMonitorNode {
     navigation_profile_.max_linear_y = 0.0;
     private_nh_.param("max_navigation_angular_z",
                       navigation_profile_.max_angular_z, 0.50);
+    navigation_terminal_profile_.max_linear_x =
+        navigation_profile_.max_linear_x;
+    navigation_terminal_profile_.max_linear_y =
+        navigation_profile_.max_linear_y;
+    navigation_terminal_profile_.max_angular_z =
+        navigation_profile_.max_angular_z;
     private_nh_.param("max_tag_linear_x", tag_profile_.max_linear_x, 0.05);
     private_nh_.param("max_tag_linear_y", tag_profile_.max_linear_y, 0.05);
     private_nh_.param("max_tag_angular_z", tag_profile_.max_angular_z, 0.15);
@@ -267,7 +310,10 @@ class CollisionMonitorNode {
         !finite_positive(candidate_timeout_) ||
         !finite_positive(odom_timeout_) || !finite_positive(tf_timeout_) ||
         !finite_positive(local_map_timeout_) ||
+        !finite_positive(topology_phase_timeout_) ||
         !finite_nonnegative(navigation_profile_.footprint_padding) ||
+        !finite_nonnegative(
+            navigation_terminal_profile_.footprint_padding) ||
         !finite_nonnegative(tag_profile_.footprint_padding) ||
         !finite_nonnegative(teleop_profile_.footprint_padding) ||
         !finite_nonnegative(navigation_profile_.max_linear_x) ||
@@ -303,6 +349,7 @@ class CollisionMonitorNode {
     odom_timeout_ = std::max(0.02, odom_timeout_);
     tf_timeout_ = std::max(0.02, tf_timeout_);
     local_map_timeout_ = std::max(0.02, local_map_timeout_);
+    topology_phase_timeout_ = std::max(0.02, topology_phase_timeout_);
     reaction_time_ = std::max(0.0, reaction_time_);
     preview_time_ = std::max(0.0, preview_time_);
     clear_hold_time_ = std::max(0.0, clear_hold_time_);
@@ -328,7 +375,8 @@ class CollisionMonitorNode {
     }
     std::string error;
     MotionProfile* profiles[] = {
-        &navigation_profile_, &tag_profile_, &teleop_profile_};
+        &navigation_profile_, &navigation_terminal_profile_, &tag_profile_,
+        &teleop_profile_};
     for (MotionProfile* profile : profiles) {
       if (!profile->checker.setFootprint(
               footprint, profile->footprint_padding, &error)) {
@@ -341,7 +389,8 @@ class CollisionMonitorNode {
 
   MotionProfile* ProfileForSource(const std::string& source) {
     if (source == navigation_source_) {
-      return &navigation_profile_;
+      return navigation_terminal_active_ ? &navigation_terminal_profile_
+                                         : &navigation_profile_;
     }
     if (source == tag_source_) {
       return &tag_profile_;
@@ -354,7 +403,8 @@ class CollisionMonitorNode {
 
   const MotionProfile* ProfileForSource(const std::string& source) const {
     if (source == navigation_source_) {
-      return &navigation_profile_;
+      return navigation_terminal_active_ ? &navigation_terminal_profile_
+                                         : &navigation_profile_;
     }
     if (source == tag_source_) {
       return &tag_profile_;
@@ -370,6 +420,18 @@ class CollisionMonitorNode {
     candidate_ = *message;
     candidate_received_at_ = ros::WallTime::now();
     have_candidate_ = true;
+  }
+
+  void TopologyPhaseCallback(const std_msgs::UInt8::ConstPtr& message) {
+    topology_phase_ = message->data;
+    topology_phase_received_at_ = ros::WallTime::now();
+    have_topology_phase_ = true;
+    if (topology_phase_ > kTopologyPhaseFinalSegment) {
+      ROS_ERROR_THROTTLE(
+          1.0, "collision_monitor: invalid topology safety phase %u; "
+               "using conservative navigation padding",
+          static_cast<unsigned int>(topology_phase_));
+    }
   }
 
   void OdomCallback(const nav_msgs::Odometry::ConstPtr& message) {
@@ -491,6 +553,7 @@ class CollisionMonitorNode {
 
   bool footprintReady() const {
     return navigation_profile_.checker.footprint().size() >= 3 &&
+           navigation_terminal_profile_.checker.footprint().size() >= 3 &&
            tag_profile_.checker.footprint().size() >= 3 &&
            teleop_profile_.checker.footprint().size() >= 3;
   }
@@ -558,8 +621,71 @@ class CollisionMonitorNode {
            std::abs(measured.angular.z) <= transition_stopped_angular_;
   }
 
+  bool TopologyPhaseFresh(const ros::WallTime& now) const {
+    return have_topology_phase_ &&
+           (now - topology_phase_received_at_).toSec() <=
+               topology_phase_timeout_;
+  }
+
+  bool NavigationTerminalRequested(const ros::WallTime& now) const {
+    if (!TopologyPhaseFresh(now)) {
+      return false;
+    }
+    return topology_phase_ == kTopologyPhaseStartSegment ||
+           topology_phase_ == kTopologyPhaseFinalSegment;
+  }
+
+  // Expanding 0.08 -> 0.15 is immediately conservative. Shrinking 0.15 ->
+  // 0.08 is allowed only after measured chassis motion has stopped for the
+  // same hold time used by command-source transitions.
+  bool NavigationTerminalTransitionBlocks(bool requested,
+                                          const ros::WallTime& now) {
+    if (!requested) {
+      navigation_terminal_active_ = false;
+      navigation_terminal_pending_ = false;
+      navigation_transition_stopped_since_ = ros::WallTime();
+      return false;
+    }
+    if (navigation_terminal_active_) {
+      navigation_terminal_pending_ = false;
+      navigation_transition_stopped_since_ = ros::WallTime();
+      return false;
+    }
+    if (!navigation_terminal_pending_) {
+      navigation_terminal_pending_ = true;
+      navigation_transition_stopped_since_ = ros::WallTime();
+      ForceStoppedScale();
+    }
+    if (!MeasuredStopped(odom_.twist.twist)) {
+      navigation_transition_stopped_since_ = ros::WallTime();
+      return true;
+    }
+    if (navigation_transition_stopped_since_.isZero()) {
+      navigation_transition_stopped_since_ = now;
+      return true;
+    }
+    if ((now - navigation_transition_stopped_since_).toSec() <
+        source_transition_hold_time_) {
+      return true;
+    }
+    navigation_terminal_active_ = true;
+    navigation_terminal_pending_ = false;
+    navigation_transition_stopped_since_ = ros::WallTime();
+    ForceStoppedScale();
+    return false;
+  }
+
+  void ResetNavigationTerminalProfile() {
+    navigation_terminal_active_ = false;
+    navigation_terminal_pending_ = false;
+    navigation_transition_stopped_since_ = ros::WallTime();
+  }
+
   bool SourceTransitionBlocks(const std::string& source,
                               const ros::WallTime& now) {
+    if (source != navigation_source_) {
+      ResetNavigationTerminalProfile();
+    }
     if (source == active_source_ && pending_source_.empty()) {
       return false;
     }
@@ -665,6 +791,7 @@ class CollisionMonitorNode {
         active_source_ = teleop_source_;
         pending_source_.clear();
         transition_stopped_since_ = ros::WallTime();
+        ResetNavigationTerminalProfile();
         applied_scale_ = 1.0;
         scale_increase_since_ = ros::WallTime();
         ROS_WARN_THROTTLE(1.0,
@@ -729,13 +856,41 @@ class CollisionMonitorNode {
       return;
     }
 
+    if (candidate_.source == navigation_source_) {
+      const bool terminal_requested = NavigationTerminalRequested(now);
+      if (NavigationTerminalTransitionBlocks(terminal_requested, now)) {
+        const CollisionResult transition_stop =
+            navigation_profile_.checker.simulate(
+                initial, initial.linear_x, initial.linear_y, initial.angular_z,
+                reaction_time_, static_map_, static_policy_, local_map_,
+                local_policy_, rollout_options_);
+        visualization = transition_stop;
+        if (transition_stop.collision) {
+          state = "EMERGENCY_STOP";
+          reason = transition_stop.static_collision
+                       ? "STATIC_COLLISION_DURING_PROFILE_TRANSITION"
+                       : "LOCAL_COLLISION_DURING_PROFILE_TRANSITION";
+          collision_time = transition_stop.collision_time;
+        } else {
+          state = "PROFILE_TRANSITION";
+          reason = MeasuredStopped(odom_.twist.twist)
+                       ? "WAITING_FOR_NAVIGATION_TERMINAL_HOLD"
+                       : "WAITING_FOR_NAVIGATION_TERMINAL_STOP";
+        }
+        Publish(output, state, reason, scale, collision_time, visualization,
+                candidate_.source, &navigation_profile_);
+        return;
+      }
+      profile = ProfileForSource(candidate_.source);
+    }
+
     if (!SupportedMeasuredMotion(*profile, odom_.twist.twist,
                                  unsupported_reason)) {
       ForceStoppedScale();
       state = "UNSUPPORTED_MOTION";
       reason = unsupported_reason;
       Publish(output, state, reason, scale, collision_time, visualization,
-              candidate_.source);
+              candidate_.source, profile);
       return;
     }
 
@@ -751,7 +906,7 @@ class CollisionMonitorNode {
       collision_time = emergency.collision_time;
       visualization = emergency;
       Publish(output, state, reason, scale, collision_time, visualization,
-              candidate_.source);
+              candidate_.source, profile);
       return;
     }
 
@@ -805,7 +960,7 @@ class CollisionMonitorNode {
       reason = "FULL_COMMAND_SAFE";
     }
     Publish(output, state, reason, scale, collision_time, visualization,
-            candidate_.source);
+            candidate_.source, profile);
   }
 
   void Publish(const geometry_msgs::Twist& output, const std::string& state,
@@ -874,6 +1029,10 @@ class CollisionMonitorNode {
                        profile == nullptr
                            ? std::string("-1")
                            : ToString(profile->footprint_padding));
+    AddDiagnosticValue(status, "topology_phase",
+                       TopologyPhaseName(topology_phase_));
+    AddDiagnosticValue(status, "topology_phase_fresh",
+                       TopologyPhaseFresh(now) ? "true" : "false");
     AddDiagnosticValue(status, "scale", ToString(scale));
     AddDiagnosticValue(status, "collision_time", ToString(collision_time));
     AddDiagnosticValue(status, "output_linear_x", ToString(output.linear.x));
@@ -891,7 +1050,9 @@ class CollisionMonitorNode {
 
     const std::string signature =
         std::to_string(status.level) + "|" + code + "|" + state + "|" +
-        source + "|" + profile_name;
+        source + "|" + profile_name + "|" +
+        TopologyPhaseName(topology_phase_) + "|" +
+        (TopologyPhaseFresh(now) ? "fresh" : "stale");
     const bool state_changed = signature != last_diagnostic_signature_;
     const bool heartbeat_due =
         last_diagnostic_publish_.isZero() ||
@@ -1056,6 +1217,7 @@ class CollisionMonitorNode {
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
   MotionProfile navigation_profile_;
+  MotionProfile navigation_terminal_profile_;
   MotionProfile tag_profile_;
   MotionProfile teleop_profile_;
   GridPolicy static_policy_;
@@ -1063,6 +1225,7 @@ class CollisionMonitorNode {
   RolloutOptions rollout_options_;
 
   ros::Subscriber candidate_sub_;
+  ros::Subscriber topology_phase_sub_;
   ros::Subscriber odom_sub_;
   ros::Subscriber static_map_sub_;
   ros::Subscriber local_map_sub_;
@@ -1078,10 +1241,13 @@ class CollisionMonitorNode {
   ros::WallTime candidate_received_at_;
   ros::WallTime odom_received_at_;
   ros::WallTime local_map_received_at_;
+  ros::WallTime topology_phase_received_at_;
   bool have_candidate_ = false;
   bool have_odom_ = false;
   bool have_static_map_ = false;
   bool have_local_map_ = false;
+  bool have_topology_phase_ = false;
+  uint8_t topology_phase_ = kTopologyPhaseNormal;
 
   Pose2D last_pose_;
   ros::Time last_tf_stamp_;
@@ -1092,6 +1258,9 @@ class CollisionMonitorNode {
   std::string active_source_;
   std::string pending_source_;
   ros::WallTime transition_stopped_since_;
+  bool navigation_terminal_active_ = false;
+  bool navigation_terminal_pending_ = false;
+  ros::WallTime navigation_transition_stopped_since_;
 
   std::string candidate_topic_;
   std::string output_topic_;
@@ -1105,12 +1274,14 @@ class CollisionMonitorNode {
   std::string teleop_source_;
   std::string tag_source_;
   std::string navigation_source_;
+  std::string topology_phase_topic_;
   double monitor_rate_ = 50.0;
   double diagnostic_rate_ = 1.0;
   double candidate_timeout_ = 0.25;
   double odom_timeout_ = 0.20;
   double tf_timeout_ = 0.30;
   double local_map_timeout_ = 0.30;
+  double topology_phase_timeout_ = 0.50;
   double zero_epsilon_ = 1e-4;
   double reaction_time_ = 0.30;
   double preview_time_ = 2.0;

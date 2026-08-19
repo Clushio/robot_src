@@ -11,6 +11,7 @@ base_frame: base_link
 navigation_source: nav
 tag_source: tag
 teleop_source: teleop
+topology_phase_topic: /anav/topology_safety_phase
 
 monitor_rate: 50.0
 # Collision checks stay at 50 Hz; unchanged diagnostics heartbeat at 1 Hz.
@@ -19,11 +20,13 @@ candidate_timeout: 0.25
 odom_timeout: 0.20
 tf_timeout: 0.30
 local_map_timeout: 0.30
+topology_phase_timeout: 0.50
 
 # The physical footprint is shared. Only the additional operating margin is
 # source-specific: navigation/teleop are conservative, tag is low-speed fine
 # positioning near a workstation.
 navigation_footprint_padding: 0.15
+navigation_terminal_footprint_padding: 0.08
 tag_footprint_padding: 0.08
 teleop_footprint_padding: 0.10
 

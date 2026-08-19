@@ -16,6 +16,7 @@
 #include <sensor_msgs/Joy.h>
 #include <std_msgs/Bool.h>
 #include <std_msgs/String.h>
+#include <std_msgs/UInt8.h>
 #include <std_srvs/Trigger.h>
 #include <tf/transform_listener.h>
 #include <tf2_ros/buffer.h>
@@ -81,6 +82,28 @@ typedef actionlib::SimpleActionClient<move_base_msgs::MoveBaseAction> MVClient;
 
 namespace
 {
+enum TopologySafetyPhase : uint8_t
+{
+    TOPOLOGY_SAFETY_NORMAL = 0,
+    TOPOLOGY_SAFETY_START_SEGMENT = 1,
+    TOPOLOGY_SAFETY_FINAL_SEGMENT = 2
+};
+
+const char *topologySafetyPhaseName(uint8_t phase)
+{
+    switch (phase)
+    {
+    case TOPOLOGY_SAFETY_NORMAL:
+        return "NORMAL";
+    case TOPOLOGY_SAFETY_START_SEGMENT:
+        return "START_SEGMENT";
+    case TOPOLOGY_SAFETY_FINAL_SEGMENT:
+        return "FINAL_SEGMENT";
+    default:
+        return "INVALID";
+    }
+}
+
 void addDiagnosticValue(diagnostic_msgs::DiagnosticStatus &status,
                         const std::string &key, const std::string &value)
 {
@@ -100,6 +123,7 @@ public:
           tf_listener_(tf_buffer_),
           joy_spinner_(1, &joy_callback_queue_),
           reference_status_spinner_(1, &reference_status_queue_),
+          safety_phase_spinner_(1, &safety_phase_callback_queue_),
           current_pose_index(0),
           numofpnts(0),
           current_pnt(0),
@@ -172,6 +196,21 @@ public:
         private_nh.param("cmd_vel_topic", cmd_vel_topic,
                          std::string("/cmd_vel/nav"));
         vel_pub_ = nh_.advertise<geometry_msgs::Twist>(cmd_vel_topic, 1);
+        private_nh.param("topology_safety_phase_topic",
+                         topology_safety_phase_topic_,
+                         std::string("/anav/topology_safety_phase"));
+        private_nh.param("topology_safety_phase_rate",
+                         topology_safety_phase_rate_, 10.0);
+        topology_safety_phase_rate_ =
+            std::max(2.0, topology_safety_phase_rate_);
+        topology_safety_phase_pub_ = nh_.advertise<std_msgs::UInt8>(
+            topology_safety_phase_topic_, 1, false);
+        safety_phase_nh_.setCallbackQueue(&safety_phase_callback_queue_);
+        safety_phase_timer_ = safety_phase_nh_.createWallTimer(
+            ros::WallDuration(1.0 / topology_safety_phase_rate_),
+            &mynav::topologySafetyPhaseTimerCallback, this);
+        safety_phase_spinner_.start();
+        setTopologySafetyPhase(TOPOLOGY_SAFETY_NORMAL);
         fixed_route_mode_pub_ =
             nh_.advertise<std_msgs::Bool>("/anav/fixed_route_mode", 1, true);
         publishFixedRouteMode(false);
@@ -213,6 +252,9 @@ public:
 
     ~mynav()
     {
+        setTopologySafetyPhase(TOPOLOGY_SAFETY_NORMAL);
+        safety_phase_timer_.stop();
+        safety_phase_spinner_.stop();
         joy_spinner_.stop();
         reference_status_spinner_.stop();
         if (runth_ && runth_->joinable())
@@ -315,6 +357,7 @@ public:
         if (exec_path)
         {
             publishFixedRouteMode(fixed_route);
+            setTopologySafetyPhase(TOPOLOGY_SAFETY_START_SEGMENT);
             {
                 std::lock_guard<std::mutex> lock(nav_config_mutex_);
                 navigation_active_.store(true);
@@ -332,6 +375,7 @@ public:
                    : (canceled
                           ? cmd_vel_arbiter::FinishMotionRequest::TASK_CANCELED
                           : cmd_vel_arbiter::FinishMotionRequest::TASK_FAILED));
+            setTopologySafetyPhase(TOPOLOGY_SAFETY_NORMAL);
             res.success = ok;
             if (ok)
             {
@@ -601,6 +645,15 @@ private:
     ros::CallbackQueue reference_status_queue_;
     ros::AsyncSpinner reference_status_spinner_;
     ros::Subscriber reference_status_sub_;
+    ros::NodeHandle safety_phase_nh_;
+    ros::CallbackQueue safety_phase_callback_queue_;
+    ros::AsyncSpinner safety_phase_spinner_;
+    ros::WallTimer safety_phase_timer_;
+    ros::Publisher topology_safety_phase_pub_;
+    std::mutex topology_safety_phase_mutex_;
+    uint8_t topology_safety_phase_ = TOPOLOGY_SAFETY_NORMAL;
+    std::string topology_safety_phase_topic_;
+    double topology_safety_phase_rate_ = 10.0;
     std::mutex reference_status_mutex_;
     ros::Time reference_status_stamp_;
     int reference_status_path_index_ = -1;
@@ -683,6 +736,55 @@ private:
         mode.data = enabled;
         fixed_route_mode_pub_.publish(mode);
         ROS_INFO("Fixed-route navigation mode %s.", enabled ? "enabled" : "disabled");
+    }
+
+    void publishTopologySafetyPhase()
+    {
+        std::lock_guard<std::mutex> lock(topology_safety_phase_mutex_);
+        std_msgs::UInt8 message;
+        message.data = topology_safety_phase_;
+        topology_safety_phase_pub_.publish(message);
+    }
+
+    void topologySafetyPhaseTimerCallback(const ros::WallTimerEvent &)
+    {
+        publishTopologySafetyPhase();
+    }
+
+    void setTopologySafetyPhase(uint8_t phase)
+    {
+        uint8_t previous;
+        {
+            std::lock_guard<std::mutex> lock(topology_safety_phase_mutex_);
+            previous = topology_safety_phase_;
+            topology_safety_phase_ = phase;
+            std_msgs::UInt8 message;
+            message.data = phase;
+            topology_safety_phase_pub_.publish(message);
+        }
+        if (previous != phase)
+        {
+            ROS_INFO("Topology safety phase: %s -> %s.",
+                     topologySafetyPhaseName(previous),
+                     topologySafetyPhaseName(phase));
+        }
+    }
+
+    void selectTopologySafetyPhase(bool start_segment_active,
+                                   bool final_goal)
+    {
+        if (final_goal)
+        {
+            setTopologySafetyPhase(TOPOLOGY_SAFETY_FINAL_SEGMENT);
+        }
+        else if (start_segment_active)
+        {
+            setTopologySafetyPhase(TOPOLOGY_SAFETY_START_SEGMENT);
+        }
+        else
+        {
+            setTopologySafetyPhase(TOPOLOGY_SAFETY_NORMAL);
+        }
     }
 
     static std::string trim(const std::string &value)
@@ -2670,6 +2772,8 @@ private:
             return false;
         }
 
+        bool start_segment_active = true;
+
         for (std::size_t i = 0; i < path_indices.size(); ++i)
         {
             const int next_index = path_indices[i];
@@ -2681,6 +2785,7 @@ private:
 
             const int previous_index = (i == 0) ? -1 : path_indices[i - 1];
             const bool final_goal = next_index == target_index;
+            selectTopologySafetyPhase(start_segment_active, final_goal);
             while (ros::ok())
             {
                 const GoalMonitorResult result = sendGoalAndMonitor(
@@ -2712,6 +2817,12 @@ private:
                           next_index);
                 return false;
             }
+            // i=0 acquires/confirms P0. Keep the terminal profile through the
+            // complete P0->P1 departure edge, then expand back to 0.15 m.
+            if (i >= 1)
+            {
+                start_segment_active = false;
+            }
             if (!ros::ok())
             {
                 stopRobot();
@@ -2733,6 +2844,8 @@ private:
             return runFixedTopologyMission(target_index, path_indices);
         }
         int start_index = path_indices.empty() ? nearestPoseIndex() : path_indices.front();
+        const int mission_start_index = start_index;
+        bool start_segment_active = true;
         std::size_t execution_start = 0;
         int replan_count = 0;
         const int max_replans = std::max(3, static_cast<int>(target_poses.size()) * 2);
@@ -2764,11 +2877,17 @@ private:
 
                 const int previous_index = (i == 0) ? -1 : path_indices[i - 1];
                 const bool final_goal = next_index == target_index;
+                selectTopologySafetyPhase(start_segment_active, final_goal);
                 const GoalMonitorResult goal_result =
                     sendGoalAndMonitor(next_index, previous_index, final_goal,
                                        static_cast<int>(i), false);
                 if (goal_result == GOAL_REACHED)
                 {
+                    if (start_segment_active &&
+                        previous_index == mission_start_index)
+                    {
+                        start_segment_active = false;
+                    }
                     if (validIndex(previous_index))
                     {
                         markEdgeSuccess(previous_index, next_index);
@@ -2794,6 +2913,12 @@ private:
                 const bool path_deviated = goal_result == GOAL_PATH_DEVIATED;
                 const bool paused = goal_result == GOAL_PAUSED ||
                                     goal_result == GOAL_PAUSED_AFTER_PASS;
+                if (start_segment_active &&
+                    goal_result == GOAL_PAUSED_AFTER_PASS &&
+                    previous_index == mission_start_index)
+                {
+                    start_segment_active = false;
+                }
                 const bool needs_forward_reentry = path_deviated || paused;
 
                 if (needs_forward_reentry)
@@ -2881,10 +3006,12 @@ private:
         {
             return;
         }
+        setTopologySafetyPhase(TOPOLOGY_SAFETY_START_SEGMENT);
         const bool ok = runTopologyMission(path_indices.back(), path_indices);
         notifyMotionFinished(
             ok ? cmd_vel_arbiter::FinishMotionRequest::TASK_FINISHED
                : cmd_vel_arbiter::FinishMotionRequest::TASK_FAILED);
+        setTopologySafetyPhase(TOPOLOGY_SAFETY_NORMAL);
     }
 
     void startRun_()

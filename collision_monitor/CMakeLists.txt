@@ -10,6 +10,7 @@ find_package(catkin REQUIRED COMPONENTS
   geometry_msgs
   nav_msgs
   roscpp
+  std_msgs
   tf2
   tf2_geometry_msgs
   tf2_ros
@@ -20,7 +21,7 @@ catkin_package(
   INCLUDE_DIRS include
   LIBRARIES collision_checker
   CATKIN_DEPENDS cmd_vel_arbiter costmap_2d diagnostic_msgs geometry_msgs
-                 nav_msgs roscpp tf2 tf2_geometry_msgs tf2_ros
+                 nav_msgs roscpp std_msgs tf2 tf2_geometry_msgs tf2_ros
                  visualization_msgs
 )
 

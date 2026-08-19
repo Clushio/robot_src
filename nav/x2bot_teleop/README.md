@@ -51,6 +51,7 @@ x y z roll pitch yaw [label]
 | `/anav/nav_config` | `x2bot_teleop/NavConfig` | 读取或应用运行参数 |
 | `/anav/task_status` | `std_msgs/String` | GUI 使用的任务状态 |
 | `/anav/fixed_route_mode` | `std_msgs/Bool` | 通知局部规划器当前是否固定路线 |
+| `/anav/topology_safety_phase` | `std_msgs/UInt8` | 10 Hz 发布拓扑首段、中间段、末段安全阶段 |
 | `/topology_plan` | `nav_msgs/Path` | 当前拓扑路径 |
 | `/topology_markers` | `visualization_msgs/MarkerArray` | RViz 拓扑显示 |
 | `/cmd_vel/nav` | `geometry_msgs/Twist` | AutoNAV 直接控制阶段的导航速度输入 |
@@ -78,6 +79,11 @@ rosservice call /plan_path_and_go '{data: -1, currentID: 0, run: 2}'
 
 `runnav` 会优先通过定位选择最近的有效起点。服务返回成功不应只理解为“MoveBase
 action 返回 SUCCEEDED”；代码还会检查真实到点距离，并在任务结束请求底盘停车回正。
+
+安全阶段取值为 `0=NORMAL`、`1=START_SEGMENT`、`2=FINAL_SEGMENT`。
+当前位置到首点以及首点到第二点保持 `START_SEGMENT`；中间拓扑边使用
+`NORMAL`；向最终目标发送最后一段时使用 `FINAL_SEGMENT`。首段完成状态会
+跨重规划锁存，避免中途生成的新路径因索引重新从零开始而误用小 padding。
 
 ## 拓扑验证和堵塞策略
 
