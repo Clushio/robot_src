@@ -53,6 +53,7 @@ class CmdVelArbiter {
     private_nh_.param("output_topic", output_topic_,
                       std::string("/cmd_vel/candidate"));
     private_nh_.param("publish_rate", publish_rate_, 50.0);
+    private_nh_.param("diagnostic_rate", diagnostic_rate_, 1.0);
     private_nh_.param("switch_stop_cycles", switch_stop_cycles_, 1);
     private_nh_.param("stop_and_center_action", stop_and_center_action_,
                       std::string("/stop_and_center"));
@@ -64,6 +65,7 @@ class CmdVelArbiter {
     private_nh_.param("center_on_tag_loss", center_on_tag_loss_, true);
 
     publish_rate_ = std::max(1.0, publish_rate_);
+    diagnostic_rate_ = std::max(0.1, diagnostic_rate_);
     switch_stop_cycles_ = std::max(1, switch_stop_cycles_);
     stop_and_center_wait_timeout_ =
         std::max(0.5, stop_and_center_wait_timeout_);
@@ -92,6 +94,8 @@ class CmdVelArbiter {
         &CmdVelArbiter::TimerCallback, this);
     ROS_INFO("cmd_vel arbiter publishing %s at %.1f Hz",
              output_topic_.c_str(), publish_rate_);
+    ROS_INFO("cmd_vel arbiter diagnostics heartbeat at %.1f Hz",
+             diagnostic_rate_);
     ROS_INFO("stop-and-center action=%s, finish service=%s",
              stop_and_center_action_.c_str(),
              private_nh_.resolveName("finish_motion").c_str());
@@ -446,32 +450,51 @@ class CmdVelArbiter {
   }
 
   void PublishDiagnostic(const std::string& source) {
+    const ros::WallTime now = ros::WallTime::now();
     diagnostic_msgs::DiagnosticArray array;
     array.header.stamp = ros::Time::now();
     diagnostic_msgs::DiagnosticStatus status;
     status.name = "/anav/cmd_vel_arbiter";
     status.hardware_id = "ranger";
+    std::string code;
     {
       std::lock_guard<std::mutex> lock(diagnostic_mutex_);
       if (!diagnostic_until_.isZero() &&
-          ros::WallTime::now() < diagnostic_until_) {
+          now < diagnostic_until_) {
         status.level = diagnostic_level_;
         status.message = diagnostic_message_;
-        AddDiagnosticValue(status, "code", diagnostic_code_);
+        code = diagnostic_code_;
+        AddDiagnosticValue(status, "code", code);
         AddDiagnosticValue(status, "action", diagnostic_action_);
         AddDiagnosticValue(status, "active", "true");
         AddDiagnosticValue(status, "kind", "FAULT");
       } else {
         status.level = diagnostic_msgs::DiagnosticStatus::OK;
         status.message = "速度仲裁运行正常";
-        AddDiagnosticValue(status, "code", "ANAV-ARB-000");
+        code = "ANAV-ARB-000";
+        AddDiagnosticValue(status, "code", code);
         AddDiagnosticValue(status, "active", "false");
         AddDiagnosticValue(status, "kind", "STATE");
       }
     }
-    AddDiagnosticValue(status, "state",
-                       centering_active_.load() ? "CENTERING" : "RUNNING");
-    AddDiagnosticValue(status, "source", source.empty() ? "none" : source);
+    const std::string state =
+        centering_active_.load() ? "CENTERING" : "RUNNING";
+    const std::string source_name = source.empty() ? "none" : source;
+    AddDiagnosticValue(status, "state", state);
+    AddDiagnosticValue(status, "source", source_name);
+
+    const std::string signature =
+        std::to_string(status.level) + "|" + code + "|" + state + "|" +
+        source_name;
+    const bool state_changed = signature != last_diagnostic_signature_;
+    const bool heartbeat_due =
+        last_diagnostic_publish_.isZero() ||
+        (now - last_diagnostic_publish_).toSec() >= 1.0 / diagnostic_rate_;
+    if (!state_changed && !heartbeat_due) {
+      return;
+    }
+    last_diagnostic_signature_ = signature;
+    last_diagnostic_publish_ = now;
     array.status.push_back(status);
     diagnostics_pub_.publish(array);
   }
@@ -488,6 +511,7 @@ class CmdVelArbiter {
   std::string stop_and_center_action_;
   std::string active_input_;
   double publish_rate_ = 50.0;
+  double diagnostic_rate_ = 1.0;
   double stop_and_center_wait_timeout_ = 7.0;
   double finish_source_suppression_ = 0.5;
   int switch_stop_cycles_ = 1;
@@ -503,6 +527,8 @@ class CmdVelArbiter {
   std::string diagnostic_action_;
   uint8_t diagnostic_level_ = diagnostic_msgs::DiagnosticStatus::OK;
   ros::WallTime diagnostic_until_;
+  std::string last_diagnostic_signature_;
+  ros::WallTime last_diagnostic_publish_;
 };
 
 }  // namespace

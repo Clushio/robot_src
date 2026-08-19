@@ -29,6 +29,13 @@ AutoNAV / TagCtl / cmd_vel_arbiter / collision_monitor / ranger_base
                         /diagnostics
                               │
                               ▼
+               ROS 回调线程：DiagnosticInbox
+                 - 同状态心跳去重
+                 - 状态跳变立即入队
+                 - 2048 条有界缓存
+                              │
+                    Qt 定时器每 250 ms 批量取出
+                              ▼
                     aNAV_ranger.py（GUI）
                               │
               ┌───────────────┴────────────────┐
@@ -46,7 +53,7 @@ AutoNAV / TagCtl / cmd_vel_arbiter / collision_monitor / ranger_base
                     - 当前未恢复异常
                     - 历史与恢复记录
                     - 详细原因和处理建议
-                    - JSONL 留档 / CSV 导出
+                    - 后台线程写 JSONL / CSV 导出
 ```
 
 模块内部异常必须由模块自己发布，因为模块最清楚失败原因；GUI 只补充它从外部
@@ -57,8 +64,8 @@ AutoNAV / TagCtl / cmd_vel_arbiter / collision_monitor / ranger_base
 
 | 文件 | 职责 |
 | --- | --- |
-| `script/fault_center.py` | 独立非模态状态窗口、事件去重、恢复、筛选、落盘和导出 |
-| `script/aNAV_ranger.py` | 订阅 `/diagnostics`，执行 GUI 本地健康检查，维护主窗口状态中心入口 |
+| `script/fault_center.py` | 有界诊断缓存、异步日志、独立状态窗口、事件去重、恢复、筛选和导出 |
+| `script/aNAV_ranger.py` | 订阅 `/diagnostics`，每 250 ms 批量处理，执行本地健康检查并维护状态中心入口 |
 | `nav/x2bot_teleop/src/run_nav.cpp` | 地图、点位、拓扑校验以及导航任务失败诊断 |
 | `nav/x2bot_teleop/src/TagCtl_srv.cpp` | 标签数据、控制占用和停车回正诊断 |
 | `cmd_vel_arbiter/src/cmd_vel_arbiter_node.cpp` | 速度来源、非法速度、限幅、安全接管和回正诊断 |
@@ -110,6 +117,28 @@ AutoNAV / TagCtl / cmd_vel_arbiter / collision_monitor / ranger_base
 
 建议后续增加“本次运行不再自动弹出”，但它只能关闭弹窗动作，不能停止异常
 采集、计数和留档。当前版本尚未实现静音或确认功能。
+
+### 3.4 线程、限流和容量保护
+
+Qt 控件只能由 GUI 主线程操作。当前实现使用以下分层保护：
+
+1. `cmd_vel_arbiter` 和 `collision_monitor` 的控制循环仍保持 50 Hz；
+2. 两个节点的诊断状态变化时立即发布，相同状态只按 `diagnostic_rate=1.0 Hz`
+   发送心跳；
+3. rospy 回调线程只把 ROS 消息转换为普通字典并写入 `DiagnosticInbox`，不访问任何
+   Qt 控件；
+4. 相同模块、错误码、级别和 active 状态在 1 秒内重复到达时被合并；
+5. `OK → ERROR → OK` 等状态跳变分别入队，不会简单覆盖成最后一个 OK；
+6. 缓存最多 2048 条。容量满时优先丢弃旧心跳；全是状态跳变时才丢最旧跳变，
+   并在终端输出丢弃数量；
+7. Qt 主线程每 250 ms 最多批量取 256 条，一批只执行一次计数和表格刷新；
+8. 相同活动故障和没有待恢复故障的 OK 不刷新表格；
+9. 状态窗口隐藏时只标记表格为待刷新，真正打开窗口时再重建；
+10. 内存历史最多保留 2000 条，活动异常优先保留；
+11. JSONL 由独立后台线程写入，慢磁盘不会阻塞 Qt 事件循环。
+
+ROS 订阅队列设置为 10。它用于吸收短时调度抖动；真正的长期过载保护由发布端
+限频、`DiagnosticInbox` 去重和有界容量共同完成。
 
 ## 4. ROS 诊断消息协议
 
@@ -182,7 +211,7 @@ kind=STATE
 
 状态中心按 `(name, code)` 识别同一活动异常：
 
-1. 第一次收到 `active=true`：创建事件、计数一次、写入 JSONL；
+1. 第一次收到 `active=true`：创建事件、计数一次，并提交后台线程写 JSONL；
 2. 再次收到相同活动异常：不新增行，只更新 `last_seen`、`detail` 和扩展字段；
 3. 同一 `name` 改为另一个活动错误码：旧状态结束，新错误创建一行；
 4. 收到同一 `name` 的 `OK` 或 `active=false`：结束该模块所有活动异常并追加一条
@@ -271,8 +300,9 @@ kind=STATE
 | `ANAV-ARB-012` | ERROR | 等待停车回正超过配置时限 | 底盘反馈、运动模式和转向机构 |
 | `ANAV-ARB-013` | ERROR | 停车回正 action 返回失败 | action 返回详情和底盘日志 |
 
-仲裁器周期发布当前状态。短时 WARN 会保持配置的诊断窗口，结束后发布
-`ANAV-ARB-000` 恢复。
+仲裁器控制输出保持 50 Hz；诊断状态变化立即发布，相同状态按照
+`diagnostic_rate=1.0 Hz` 发布心跳。短时 WARN 会保持配置的诊断窗口，结束后立即
+发布 `ANAV-ARB-000` 恢复。
 
 ### 6.5 碰撞安全层
 
@@ -352,7 +382,7 @@ GUI 监听 `/Odometry`：
 
 ### 8.1 自动 JSONL 日志
 
-新激活异常和恢复事件按天追加写入：
+新激活异常和恢复事件由独立后台线程按天追加写入：
 
 ```text
 ~/anav_logs/diagnostics_YYYYMMDD.jsonl
@@ -376,6 +406,9 @@ GUI 监听 `/Odometry`：
 
 相同活动错误的周期心跳不会重复写盘，只更新 GUI 内存中的 `last_seen`。恢复事件
 单独写一行。
+
+日志线程使用 2048 条有界队列。队列满时宁可丢弃新的日志记录并输出节流警告，
+也不能阻塞机器人 GUI；状态中心内存中的当前异常不受日志写入速度影响。
 
 当前版本启动 GUI 时不会回读以前的 JSONL，因此窗口只展示本次运行收到的记录；
 磁盘历史仍可直接查看。日志尚未实现自动保留天数和容量清理。
@@ -403,7 +436,8 @@ GUI 监听 `/Odometry`：
 - 速度仲裁非法值、限幅、来源超时、安全接管和回正失败；
 - 碰撞安全层地图、里程计、TF、障碍和运动模式异常；
 - Ranger 底盘错误码、非法速度、速度超时和回正异常；
-- JSONL 自动留档与 CSV 手动导出。
+- 诊断发布限频、有界线程缓存、250 ms 批量 GUI 更新和 2000 条历史上限；
+- JSONL 后台自动留档与 CSV 手动导出。
 
 ### 9.2 尚未完整接入
 
@@ -469,6 +503,8 @@ GUI 监听 `/Odometry`：
 6. 取消勾选恢复/OK：恢复记录隐藏但未删除；
 7. 清除已恢复记录：当前列表清理，磁盘 JSONL 保留；
 8. 导出 CSV：中文、时间和详情可正常打开。
+9. 连续输入 10 万条相同 OK：缓存只保留限频后的心跳，GUI 不生成历史记录；
+10. 在一个刷新周期内输入 `OK → ERROR → OK`：ERROR 和恢复必须同时保留。
 
 ### 11.2 现场故障注入
 

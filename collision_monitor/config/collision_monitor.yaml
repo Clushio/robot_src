@@ -13,6 +13,8 @@ tag_source: tag
 teleop_source: teleop
 
 monitor_rate: 50.0
+# Collision checks stay at 50 Hz; unchanged diagnostics heartbeat at 1 Hz.
+diagnostic_rate: 1.0
 candidate_timeout: 0.25
 odom_timeout: 0.20
 tf_timeout: 0.30

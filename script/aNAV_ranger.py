@@ -29,7 +29,7 @@ from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus
 from visualization_msgs.msg import Marker, MarkerArray
 
 from tagReader import SerialTagReader
-from fault_center import FaultCenterDialog
+from fault_center import DiagnosticInbox, FaultCenterDialog
 import threading
 
 
@@ -246,7 +246,6 @@ class MyWindow(QWidget):
     topology_finished_requested = pyqtSignal(bool, str)
     loop_update_requested = pyqtSignal(int, str, str, int, str)
     nav_config_received = pyqtSignal(object, str, bool)
-    diagnostics_received = pyqtSignal(object)
 
     def __init__(self):
         super().__init__()
@@ -327,6 +326,9 @@ class MyWindow(QWidget):
                 self.ros_available = False
 
         self.initUI()
+        self.diagnostic_inbox = DiagnosticInbox(
+            max_events=2048, repeat_interval=1.0
+        )
         self.fault_center = FaultCenterDialog(self)
         self.fault_center.counts_changed.connect(
             self.update_fault_center_button
@@ -342,7 +344,6 @@ class MyWindow(QWidget):
         self.topology_finished_requested.connect(self.on_topology_finished)
         self.loop_update_requested.connect(self.on_loop_update)
         self.nav_config_received.connect(self.on_nav_config_received)
-        self.diagnostics_received.connect(self.on_diagnostics_received)
         if self.ros_available:
             try:
                 self.task_status_sub = rospy.Subscriber(
@@ -366,7 +367,7 @@ class MyWindow(QWidget):
                 )
                 self.diagnostics_sub = rospy.Subscriber(
                     '/diagnostics', DiagnosticArray,
-                    self.on_diagnostics_message, queue_size=100,
+                    self.on_diagnostics_message, queue_size=10,
                 )
             except Exception as error:
                 print(f"ROS status subscription failed: {error}")
@@ -415,6 +416,9 @@ class MyWindow(QWidget):
         self.health_timer = QTimer(self)
         self.health_timer.timeout.connect(self.schedule_health_check)
         self.health_timer.start(1000)
+        self.diagnostic_flush_timer = QTimer(self)
+        self.diagnostic_flush_timer.timeout.connect(self.flush_diagnostics)
+        self.diagnostic_flush_timer.start(250)
         QTimer.singleShot(0, self.schedule_health_check)
 
         #self.init_reader()
@@ -1568,10 +1572,19 @@ class MyWindow(QWidget):
             self.fault_center_button.setStyleSheet('')
 
     def on_diagnostics_message(self, message):
-        self.diagnostics_received.emit(message)
+        # rospy callbacks do not touch Qt widgets. They only update a bounded,
+        # thread-safe transition inbox consumed by the GUI timer.
+        self.diagnostic_inbox.submit_array(message)
 
-    def on_diagnostics_received(self, message):
-        self.fault_center.ingest_array(message)
+    def flush_diagnostics(self):
+        events, dropped = self.diagnostic_inbox.drain(max_items=256)
+        if dropped:
+            print(
+                f'Diagnostic inbox dropped {dropped} old heartbeat/event(s) '
+                'after reaching its capacity.'
+            )
+        if events:
+            self.fault_center.ingest_events(events)
 
     def on_task_status(self, message):
         """显示所有 /plan_path_and_go 调用的状态，包括 TCP 发起的任务。"""
@@ -4113,6 +4126,11 @@ class MyWindow(QWidget):
             return
         self.shutdown_in_progress = True
         self.health_timer.stop()
+        self.diagnostic_flush_timer.stop()
+        if self.diagnostics_sub is not None:
+            self.diagnostics_sub.unregister()
+            self.diagnostics_sub = None
+        self.flush_diagnostics()
         self.stop_loop_navigation(notify=False)
         self.estop_active = True
         self.estop_timer.start(100)
@@ -4138,6 +4156,7 @@ class MyWindow(QWidget):
         self.tagProcesses = []
         self.publish_stop_burst()
         self.estop_timer.stop()
+        self.fault_center.shutdown()
         event.accept()
         
 

@@ -1,8 +1,11 @@
 """ANAV GUI 的独立状态与异常中心。"""
 
 import csv
+from collections import deque
 import json
 import os
+import queue
+import threading
 import time
 
 from PyQt5.QtCore import Qt, pyqtSignal
@@ -40,25 +43,179 @@ def _truthy(value, default=False):
     return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
 
 
+def diagnostic_events_from_array(message):
+    """Convert a ROS DiagnosticArray into thread-safe plain dictionaries."""
+    stamp = time.time()
+    try:
+        if message.header.stamp.to_sec() > 0:
+            stamp = message.header.stamp.to_sec()
+    except (AttributeError, TypeError):
+        pass
+
+    events = []
+    for status in message.status:
+        values = {item.key: item.value for item in status.values}
+        code = values.get('code', 'ANAV-SYS-999')
+        level = int(status.level)
+        events.append({
+            'module': status.name or 'unknown',
+            'code': code,
+            'level': level,
+            'message': status.message or values.get('state', code),
+            'active': _truthy(values.get('active'), level != LEVEL_OK),
+            'detail': values.get('detail', values.get('reason', '')),
+            'action': values.get('action', ''),
+            'kind': values.get('kind', 'FAULT'),
+            'values': values,
+            'timestamp': stamp,
+        })
+    return events
+
+
+class DiagnosticInbox:
+    """Thread-safe, bounded transition inbox used by ROS callback threads."""
+
+    def __init__(self, max_events=2048, repeat_interval=1.0):
+        self.max_events = max(32, int(max_events))
+        self.repeat_interval = max(0.1, float(repeat_interval))
+        self._events = deque()
+        self._last_state_by_module = {}
+        self._last_enqueue_by_module = {}
+        self._dropped = 0
+        self._lock = threading.Lock()
+
+    def submit_array(self, message):
+        now = time.monotonic()
+        for event in diagnostic_events_from_array(message):
+            self.submit_event(event, now=now)
+
+    def submit_event(self, event, now=None):
+        now = time.monotonic() if now is None else now
+        module = event['module']
+        state = (
+            event['code'], int(event['level']), bool(event['active'])
+        )
+        with self._lock:
+            transition = self._last_state_by_module.get(module) != state
+            last_enqueue = self._last_enqueue_by_module.get(module, 0.0)
+            if not transition and now - last_enqueue < self.repeat_interval:
+                return False
+
+            queued_event = dict(event)
+            queued_event['values'] = dict(event.get('values') or {})
+            queued_event['_transition'] = transition
+            self._make_room_locked()
+            self._events.append(queued_event)
+            self._last_state_by_module[module] = state
+            self._last_enqueue_by_module[module] = now
+            return True
+
+    def _make_room_locked(self):
+        if len(self._events) < self.max_events:
+            return
+
+        # Prefer dropping an old heartbeat. State transitions are retained
+        # unless the queue consists entirely of transitions.
+        for index, event in enumerate(self._events):
+            if not event.get('_transition', False):
+                del self._events[index]
+                self._dropped += 1
+                return
+        self._events.popleft()
+        self._dropped += 1
+
+    def drain(self, max_items=256):
+        drained = []
+        with self._lock:
+            for _ in range(min(max_items, len(self._events))):
+                event = self._events.popleft()
+                event.pop('_transition', None)
+                drained.append(event)
+            dropped = self._dropped
+            self._dropped = 0
+        return drained, dropped
+
+
+class DiagnosticLogWriter:
+    """Write JSONL records away from the Qt GUI thread."""
+
+    def __init__(self, log_directory, max_pending=2048):
+        self.log_directory = log_directory
+        self._queue = queue.Queue(maxsize=max(32, int(max_pending)))
+        self._stop_event = threading.Event()
+        self._last_warning_at = 0.0
+        self._thread = threading.Thread(
+            target=self._run, name='anav-diagnostic-log', daemon=True
+        )
+        self._thread.start()
+
+    def submit(self, event):
+        if self._stop_event.is_set():
+            return
+        serializable = dict(event)
+        serializable['values'] = dict(event.get('values') or {})
+        try:
+            self._queue.put_nowait(serializable)
+        except queue.Full:
+            self._warn_throttled('Diagnostic log queue is full; record dropped')
+
+    def _warn_throttled(self, message):
+        now = time.monotonic()
+        if now - self._last_warning_at >= 5.0:
+            print(message)
+            self._last_warning_at = now
+
+    def _run(self):
+        while not self._stop_event.is_set() or not self._queue.empty():
+            try:
+                event = self._queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            try:
+                os.makedirs(self.log_directory, exist_ok=True)
+                date = time.strftime(
+                    '%Y%m%d', time.localtime(event['timestamp'])
+                )
+                path = os.path.join(
+                    self.log_directory, f'diagnostics_{date}.jsonl'
+                )
+                with open(path, 'a', encoding='utf-8') as handle:
+                    handle.write(json.dumps(
+                        event, ensure_ascii=False, sort_keys=True
+                    ) + '\n')
+            except OSError as error:
+                self._warn_throttled(
+                    f'Unable to persist diagnostic event: {error}'
+                )
+            finally:
+                self._queue.task_done()
+
+    def shutdown(self, timeout=1.0):
+        self._stop_event.set()
+        self._thread.join(timeout=max(0.0, timeout))
+
+
 class FaultCenterDialog(QDialog):
     """Non-modal diagnostic history for both ROS and GUI watchdog events."""
 
     counts_changed = pyqtSignal(int, int, int)
     attention_requested = pyqtSignal(int)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, log_directory=None, max_history=2000):
         super().__init__(parent, Qt.Window)
         self.setWindowTitle('系统状态与异常中心')
         self.resize(1080, 620)
         self.setMinimumSize(820, 480)
+        self.max_history = max(100, int(max_history))
         self.events = []
         self.active_by_key = {}
         self.last_level_by_module = {}
-        self._build_ui()
-
-        self.log_directory = os.path.join(
+        self._table_dirty = False
+        self.log_directory = log_directory or os.path.join(
             os.path.expanduser('~'), 'anav_logs'
         )
+        self.log_writer = DiagnosticLogWriter(self.log_directory)
+        self._build_ui()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -127,32 +284,36 @@ class FaultCenterDialog(QDialog):
         layout.addLayout(actions)
 
     def ingest_array(self, message):
-        stamp = time.time()
-        try:
-            if message.header.stamp.to_sec() > 0:
-                stamp = message.header.stamp.to_sec()
-        except (AttributeError, TypeError):
-            pass
-        for status in message.status:
-            values = {item.key: item.value for item in status.values}
-            code = values.get('code', 'ANAV-SYS-999')
-            active = _truthy(
-                values.get('active'), status.level != LEVEL_OK
-            )
-            self.report_condition(
-                module=status.name or 'unknown',
-                code=code,
-                level=int(status.level),
-                message=status.message or values.get('state', code),
-                active=active,
-                detail=values.get('detail', values.get('reason', '')),
-                action=values.get('action', ''),
-                kind=values.get('kind', 'FAULT'),
-                values=values,
-                timestamp=stamp,
-            )
+        self.ingest_events(diagnostic_events_from_array(message))
+
+    def ingest_events(self, events):
+        changed = False
+        attention_level = None
+        for event in events:
+            event_changed, event_attention = self._apply_condition(**event)
+            changed = changed or event_changed
+            if event_attention is not None:
+                attention_level = event_attention
+        if changed:
+            self._finish_model_change()
+        if attention_level is not None:
+            self.attention_requested.emit(attention_level)
 
     def report_condition(self, module, code, level, message, active=True,
+                         detail='', action='', kind='FAULT', values=None,
+                         timestamp=None):
+        changed, attention_level = self._apply_condition(
+            module=module, code=code, level=level, message=message,
+            active=active, detail=detail, action=action, kind=kind,
+            values=values, timestamp=timestamp,
+        )
+        if changed:
+            self._finish_model_change()
+        if attention_level is not None:
+            self.attention_requested.emit(attention_level)
+        return changed
+
+    def _apply_condition(self, module, code, level, message, active=True,
                          detail='', action='', kind='FAULT', values=None,
                          timestamp=None):
         timestamp = time.time() if timestamp is None else timestamp
@@ -186,9 +347,7 @@ class FaultCenterDialog(QDialog):
                     'resolved_at': timestamp,
                 }, persist=True)
             self.last_level_by_module[module] = LEVEL_OK
-            self.refresh_table()
-            self._emit_counts()
-            return
+            return bool(recovered), None
 
         existing_index = self.active_by_key.get(key)
         if existing_index is not None:
@@ -196,7 +355,7 @@ class FaultCenterDialog(QDialog):
             event['last_seen'] = timestamp
             event['detail'] = detail or event['detail']
             event['values'].update(values)
-            return
+            return False, None
 
         # A DiagnosticStatus name represents one current state. When its code
         # changes, close the old state before opening the new one.
@@ -230,10 +389,8 @@ class FaultCenterDialog(QDialog):
         self.active_by_key[key] = len(self.events) - 1
         self.last_level_by_module[module] = level
         self._persist_event(event)
-        self.refresh_table()
-        self._emit_counts()
-        if level in (LEVEL_ERROR, LEVEL_STALE):
-            self.attention_requested.emit(level)
+        attention = level if level in (LEVEL_ERROR, LEVEL_STALE) else None
+        return True, attention
 
     def _append_event(self, event, persist=False):
         self.events.append(event)
@@ -241,19 +398,55 @@ class FaultCenterDialog(QDialog):
             self._persist_event(event)
 
     def _persist_event(self, event):
-        try:
-            os.makedirs(self.log_directory, exist_ok=True)
-            date = time.strftime('%Y%m%d', time.localtime(event['timestamp']))
-            path = os.path.join(
-                self.log_directory, f'diagnostics_{date}.jsonl'
+        self.log_writer.submit(event)
+
+    def _finish_model_change(self):
+        self._trim_history()
+        self._emit_counts()
+        if self.isVisible():
+            self.refresh_table()
+        else:
+            self._table_dirty = True
+
+    def _trim_history(self):
+        if len(self.events) <= self.max_history:
+            return
+
+        active_indices = set(self.active_by_key.values())
+        if len(active_indices) >= self.max_history:
+            keep_indices = set(
+                sorted(active_indices)[-self.max_history:]
             )
-            serializable = dict(event)
-            with open(path, 'a', encoding='utf-8') as handle:
-                handle.write(json.dumps(
-                    serializable, ensure_ascii=False, sort_keys=True
-                ) + '\n')
-        except OSError as error:
-            print(f'Unable to persist diagnostic event: {error}')
+        else:
+            resolved_indices = [
+                index for index in range(len(self.events))
+                if index not in active_indices
+            ]
+            resolved_budget = self.max_history - len(active_indices)
+            keep_indices = active_indices.union(
+                resolved_indices[-resolved_budget:]
+            )
+
+        self.events = [
+            event for index, event in enumerate(self.events)
+            if index in keep_indices
+        ]
+        self._rebuild_active_index()
+
+    def _rebuild_active_index(self):
+        self.active_by_key = {
+            (event['module'], event['code']): index
+            for index, event in enumerate(self.events)
+            if event['active']
+        }
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._table_dirty:
+            self.refresh_table()
+
+    def shutdown(self):
+        self.log_writer.shutdown()
 
     def selected_levels(self):
         levels = set()
@@ -270,6 +463,7 @@ class FaultCenterDialog(QDialog):
     def refresh_table(self):
         if not hasattr(self, 'table'):
             return
+        self._table_dirty = False
         selected_levels = self.selected_levels()
         visible = [
             (index, event) for index, event in enumerate(self.events)
@@ -326,18 +520,18 @@ class FaultCenterDialog(QDialog):
         self.detail.setPlainText('\n'.join(lines))
 
     def _emit_counts(self):
-        warn_count = sum(
-            event['active'] and event['level'] == LEVEL_WARN
-            for event in self.events
+        active_events = (
+            self.events[index]
+            for index in self.active_by_key.values()
+            if 0 <= index < len(self.events)
         )
-        error_count = sum(
-            event['active'] and event['level'] == LEVEL_ERROR
-            for event in self.events
-        )
-        stale_count = sum(
-            event['active'] and event['level'] == LEVEL_STALE
-            for event in self.events
-        )
+        counts = {LEVEL_WARN: 0, LEVEL_ERROR: 0, LEVEL_STALE: 0}
+        for event in active_events:
+            if event['level'] in counts:
+                counts[event['level']] += 1
+        warn_count = counts[LEVEL_WARN]
+        error_count = counts[LEVEL_ERROR]
+        stale_count = counts[LEVEL_STALE]
         total = warn_count + error_count + stale_count
         self.summary_label.setText(
             f'未恢复：{total}（WARN {warn_count} / ERROR {error_count} / '
@@ -349,13 +543,13 @@ class FaultCenterDialog(QDialog):
     def clear_resolved(self):
         active_events = [event for event in self.events if event['active']]
         self.events = active_events
-        self.active_by_key = {
-            (event['module'], event['code']): index
-            for index, event in enumerate(self.events)
-        }
+        self._rebuild_active_index()
         self.detail.clear()
-        self.refresh_table()
         self._emit_counts()
+        if self.isVisible():
+            self.refresh_table()
+        else:
+            self._table_dirty = True
 
     def export_events(self):
         destination, _selected_filter = QFileDialog.getSaveFileName(

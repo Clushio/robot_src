@@ -1,5 +1,7 @@
 output_topic: /cmd_vel/candidate
 publish_rate: 50.0
+# Control stays at 50 Hz; unchanged diagnostics use a low-rate heartbeat.
+diagnostic_rate: 1.0
 switch_stop_cycles: 1
 
 # Stop-and-center is an explicit chassis operation, separate from ordinary

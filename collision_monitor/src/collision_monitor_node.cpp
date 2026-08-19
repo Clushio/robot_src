@@ -192,6 +192,7 @@ class CollisionMonitorNode {
                       std::string("nav"));
 
     private_nh_.param("monitor_rate", monitor_rate_, 50.0);
+    private_nh_.param("diagnostic_rate", diagnostic_rate_, 1.0);
     private_nh_.param("candidate_timeout", candidate_timeout_, 0.25);
     private_nh_.param("odom_timeout", odom_timeout_, 0.20);
     private_nh_.param("tf_timeout", tf_timeout_, 0.30);
@@ -262,6 +263,7 @@ class CollisionMonitorNode {
       return std::isfinite(value) && value >= 0.0;
     };
     if (!finite_positive(monitor_rate_) ||
+        !finite_positive(diagnostic_rate_) ||
         !finite_positive(candidate_timeout_) ||
         !finite_positive(odom_timeout_) || !finite_positive(tf_timeout_) ||
         !finite_positive(local_map_timeout_) ||
@@ -296,6 +298,7 @@ class CollisionMonitorNode {
     }
 
     monitor_rate_ = std::max(1.0, monitor_rate_);
+    diagnostic_rate_ = std::max(0.1, diagnostic_rate_);
     candidate_timeout_ = std::max(0.02, candidate_timeout_);
     odom_timeout_ = std::max(0.02, odom_timeout_);
     tf_timeout_ = std::max(0.02, tf_timeout_);
@@ -831,6 +834,7 @@ class CollisionMonitorNode {
                      const std::string& source,
                      const geometry_msgs::Twist& output,
                      const MotionProfile* profile_override) {
+    const ros::WallTime now = ros::WallTime::now();
     diagnostic_msgs::DiagnosticArray array;
     array.header.stamp = ros::Time::now();
     diagnostic_msgs::DiagnosticStatus status;
@@ -861,11 +865,11 @@ class CollisionMonitorNode {
     const MotionProfile* profile = profile_override != nullptr
                                        ? profile_override
                                        : ProfileForSource(source);
-    AddDiagnosticValue(
-        status, "profile",
+    const std::string profile_name =
         state == "PROFILE_TRANSITION"
             ? std::string("transition")
-            : (profile == nullptr ? std::string("none") : profile->name));
+            : (profile == nullptr ? std::string("none") : profile->name);
+    AddDiagnosticValue(status, "profile", profile_name);
     AddDiagnosticValue(status, "footprint_padding",
                        profile == nullptr
                            ? std::string("-1")
@@ -884,6 +888,19 @@ class CollisionMonitorNode {
     AddDiagnosticValue(status, "measured_angular_z",
                        have_odom_ ? ToString(odom_.twist.twist.angular.z)
                                   : std::string("-1"));
+
+    const std::string signature =
+        std::to_string(status.level) + "|" + code + "|" + state + "|" +
+        source + "|" + profile_name;
+    const bool state_changed = signature != last_diagnostic_signature_;
+    const bool heartbeat_due =
+        last_diagnostic_publish_.isZero() ||
+        (now - last_diagnostic_publish_).toSec() >= 1.0 / diagnostic_rate_;
+    if (!state_changed && !heartbeat_due) {
+      return;
+    }
+    last_diagnostic_signature_ = signature;
+    last_diagnostic_publish_ = now;
     array.status.push_back(status);
     status_pub_.publish(array);
   }
@@ -1089,6 +1106,7 @@ class CollisionMonitorNode {
   std::string tag_source_;
   std::string navigation_source_;
   double monitor_rate_ = 50.0;
+  double diagnostic_rate_ = 1.0;
   double candidate_timeout_ = 0.25;
   double odom_timeout_ = 0.20;
   double tf_timeout_ = 0.30;
@@ -1103,6 +1121,8 @@ class CollisionMonitorNode {
   double max_pose_jump_distance_ = 0.50;
   double max_pose_jump_yaw_ = 0.80;
   double pose_jump_hold_time_ = 0.50;
+  std::string last_diagnostic_signature_;
+  ros::WallTime last_diagnostic_publish_;
 };
 
 }  // namespace collision_monitor
