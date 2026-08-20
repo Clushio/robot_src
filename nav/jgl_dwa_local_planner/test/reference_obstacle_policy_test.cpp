@@ -11,14 +11,14 @@ using jgl_dwa_local_planner::referenceObstacleSpeedScale;
 
 TEST(ReferenceObstaclePolicyTest, UsesFiveConfiguredSpeedLevels)
 {
-  EXPECT_DOUBLE_EQ(1.0, referenceObstacleSpeedScale(1.01, 1.0, 0.5));
-  EXPECT_DOUBLE_EQ(1.0, referenceObstacleSpeedScale(1.00, 1.0, 0.5));
-  EXPECT_DOUBLE_EQ(0.75, referenceObstacleSpeedScale(0.90, 1.0, 0.5));
-  EXPECT_DOUBLE_EQ(0.50, referenceObstacleSpeedScale(0.80, 1.0, 0.5));
-  EXPECT_DOUBLE_EQ(0.25, referenceObstacleSpeedScale(0.70, 1.0, 0.5));
-  EXPECT_DOUBLE_EQ(0.25, referenceObstacleSpeedScale(0.51, 1.0, 0.5));
-  EXPECT_DOUBLE_EQ(0.0, referenceObstacleSpeedScale(0.50, 1.0, 0.5));
-  EXPECT_DOUBLE_EQ(0.0, referenceObstacleSpeedScale(0.20, 1.0, 0.5));
+  EXPECT_DOUBLE_EQ(1.0, referenceObstacleSpeedScale(1.01, 1.0, 0.7));
+  EXPECT_DOUBLE_EQ(1.0, referenceObstacleSpeedScale(1.00, 1.0, 0.7));
+  EXPECT_DOUBLE_EQ(0.75, referenceObstacleSpeedScale(0.95, 1.0, 0.7));
+  EXPECT_DOUBLE_EQ(0.50, referenceObstacleSpeedScale(0.88, 1.0, 0.7));
+  EXPECT_DOUBLE_EQ(0.25, referenceObstacleSpeedScale(0.80, 1.0, 0.7));
+  EXPECT_DOUBLE_EQ(0.25, referenceObstacleSpeedScale(0.71, 1.0, 0.7));
+  EXPECT_DOUBLE_EQ(0.0, referenceObstacleSpeedScale(0.70, 1.0, 0.7));
+  EXPECT_DOUBLE_EQ(0.0, referenceObstacleSpeedScale(0.20, 1.0, 0.7));
 }
 
 TEST(ReferenceObstaclePolicyTest, FailsSafeForInvalidInputs)

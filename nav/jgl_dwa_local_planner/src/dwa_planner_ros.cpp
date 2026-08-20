@@ -141,7 +141,7 @@ namespace jgl_dwa_local_planner
     reference_fallback_boundary_distance_ = 0.15;
     obstacle_wait_time_ = 10.0;
     reference_obstacle_slowdown_distance_ = 1.0;
-    reference_obstacle_stop_distance_ = 0.5;
+    reference_obstacle_stop_distance_ = 0.7;
     path_deviation_replan_threshold_ = 0.60;
     fixed_route_mode_.store(false);
     reference_obstacle_start_ = ros::Time(0);
@@ -1156,7 +1156,7 @@ namespace jgl_dwa_local_planner
         private_nh.param("obstacle_slowdown_distance",
                          reference_obstacle_slowdown_distance_, 1.0);
         private_nh.param("obstacle_stop_distance",
-                         reference_obstacle_stop_distance_, 0.5);
+                         reference_obstacle_stop_distance_, 0.7);
         private_nh.param("path_deviation_replan_threshold",
                          path_deviation_replan_threshold_, 0.60);
         double terminal_yaw_tolerance = 0.04;
