@@ -137,6 +137,7 @@ catkin_package(
 ## Your package locations should be listed before other locations
 # include_directories(include)
 include_directories(
+  include
   ${catkin_INCLUDE_DIRS}
 )
 
@@ -216,6 +217,11 @@ target_link_libraries(TagCtl ${catkin_LIBRARIES})
 #############
 ## Testing ##
 #############
+
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(goal_advance_policy_test
+    test/goal_advance_policy_test.cpp)
+endif()
 
 ## Add gtest based cpp test target and link libraries
 # catkin_add_gtest(${PROJECT_NAME}-test test/test_x2bot_teleop.cpp)

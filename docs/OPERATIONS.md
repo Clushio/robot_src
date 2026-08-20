@@ -403,6 +403,7 @@ GUI“导航参数”页可以读取、应用和保存 AutoNAV 参数。保存�
 | `goal_timeout` | 单个目标执行时限 |
 | `block_bidirectional` | 堵塞一条边时是否同时封锁反向边 |
 | `waypoint_reached_distance` | 中间拓扑点到达距离 |
+| `controller_handoff_distance` | 首尾控制模式交接时的 base_link 到点距离 |
 | `fixed_route_final_xy_tolerance` | 固定路线最终点位置容差 |
 
 默认堵塞冷却时间按 `60 → 120 → 180` 秒退避，无替代路线最长等待 240 秒。临时
