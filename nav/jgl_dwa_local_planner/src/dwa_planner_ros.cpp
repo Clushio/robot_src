@@ -140,6 +140,8 @@ namespace jgl_dwa_local_planner
     reference_safe_distance_ = 0.25;
     reference_fallback_boundary_distance_ = 0.15;
     obstacle_wait_time_ = 10.0;
+    reference_obstacle_slowdown_distance_ = 1.0;
+    reference_obstacle_stop_distance_ = 0.5;
     path_deviation_replan_threshold_ = 0.60;
     fixed_route_mode_.store(false);
     reference_obstacle_start_ = ros::Time(0);
@@ -829,8 +831,10 @@ namespace jgl_dwa_local_planner
     return false;
   }
 
-  bool DWAPlannerROS::referencePathBlocked(const nav_msgs::Path &path)
+  bool DWAPlannerROS::referencePathObstacleDistance(
+      const nav_msgs::Path &path, double &obstacle_distance)
   {
+    obstacle_distance = std::numeric_limits<double>::infinity();
     if (path.poses.empty() || costmap_ros_ == NULL || costmap_ros_->getCostmap() == NULL)
     {
       return false;
@@ -840,8 +844,7 @@ namespace jgl_dwa_local_planner
     const double resolution = std::max(0.01, costmap->getResolution());
     const int radius_cells =
         static_cast<int>(std::ceil(reference_safe_distance_ / resolution));
-    const double check_distance =
-        std::max(1.0, path_follower_.lookaheadDistance() * 2.0);
+    const double check_distance = reference_obstacle_slowdown_distance_;
 
     unsigned int index = reference_path_manager_.currentPathIndex();
     index = std::min(index, static_cast<unsigned int>(path.poses.size() - 1));
@@ -867,6 +870,7 @@ namespace jgl_dwa_local_planner
       }
       if (costmapPointBlocked(costmap, mx, my, radius_cells))
       {
+        obstacle_distance = walked;
         return true;
       }
     }
@@ -878,10 +882,6 @@ namespace jgl_dwa_local_planner
     if (!fixed_route_mode_.load())
     {
       return false;
-    }
-    if (reference_path_manager_.hasValidPath())
-    {
-      return referencePathBlocked(reference_path_manager_.referencePath());
     }
     if (linePath.size() < 2 || costmap_ros_ == NULL ||
         costmap_ros_->getCostmap() == NULL)
@@ -1034,30 +1034,34 @@ namespace jgl_dwa_local_planner
                         direct_goal_distance);
     }
 
-    if (referencePathBlocked(reference_path))
+    double reference_obstacle_distance =
+        std::numeric_limits<double>::infinity();
+    const bool reference_obstacle_ahead =
+        referencePathObstacleDistance(reference_path,
+                                      reference_obstacle_distance);
+    if (reference_obstacle_ahead)
     {
-      // A zero Twist centres Ranger's wheels.  Keep the software filter in the
-      // same state so clearing the obstacle ramps steering from zero instead
-      // of immediately replaying the pre-stop curvature.
-      path_follower_.reset();
       if (reference_obstacle_start_.isZero())
       {
         reference_obstacle_start_ = ros::Time::now();
-        ROS_WARN("JGL reference path: obstacle on path, enter WAIT_OBSTACLE.");
+        ROS_WARN("JGL reference path: obstacle %.3f m ahead on path, enter staged slowdown.",
+                 reference_obstacle_distance);
       }
 
-      stopCmd(cmd_vel);
-      if ((ros::Time::now() - reference_obstacle_start_).toSec() < obstacle_wait_time_)
+      if ((ros::Time::now() - reference_obstacle_start_).toSec() >=
+          obstacle_wait_time_)
       {
-        return true;
+        stopCmd(cmd_vel);
+        hard_failure = true;
+        ROS_WARN_THROTTLE(1.0,
+                          "JGL reference path: obstacle wait timeout, keep stopped and let topology replan.");
+        return false;
       }
-
-      hard_failure = true;
-      ROS_WARN_THROTTLE(1.0,
-                        "JGL reference path: obstacle wait timeout, keep stopped and let topology replan.");
-      return false;
     }
-    reference_obstacle_start_ = ros::Time(0);
+    else
+    {
+      reference_obstacle_start_ = ros::Time(0);
+    }
 
     unsigned int new_index = reference_path_manager_.currentPathIndex();
     double curvature = 0.0;
@@ -1069,6 +1073,28 @@ namespace jgl_dwa_local_planner
     }
     reference_path_manager_.advanceCurrentPathIndex(new_index);
     cmd_vel.linear.y = 0.0;
+
+    if (reference_obstacle_ahead)
+    {
+      const double obstacle_scale = referenceObstacleSpeedScale(
+          reference_obstacle_distance,
+          reference_obstacle_slowdown_distance_,
+          reference_obstacle_stop_distance_);
+      cmd_vel.linear.x *= obstacle_scale;
+      cmd_vel.linear.y *= obstacle_scale;
+      cmd_vel.angular.z *= obstacle_scale;
+      if (obstacle_scale <= 0.0)
+      {
+        // A zero Twist centres Ranger's wheels. Keep the curvature filter in
+        // the same state so obstacle clearing starts steering from zero.
+        path_follower_.reset();
+        stopCmd(cmd_vel);
+      }
+      ROS_WARN_THROTTLE(
+          0.5,
+          "JGL reference path: obstacle distance=%.3f m, candidate speed scale=%.2f.",
+          reference_obstacle_distance, obstacle_scale);
+    }
 
     if (referenceMiddleGoalReachedByProgress(&goal_path_index,
                                              &remaining_to_goal_on_reference,
@@ -1127,6 +1153,10 @@ namespace jgl_dwa_local_planner
         private_nh.param("reference_fallback_boundary_distance",
                          reference_fallback_boundary_distance_, 0.15);
         private_nh.param("obstacle_wait_time", obstacle_wait_time_, 10.0);
+        private_nh.param("obstacle_slowdown_distance",
+                         reference_obstacle_slowdown_distance_, 1.0);
+        private_nh.param("obstacle_stop_distance",
+                         reference_obstacle_stop_distance_, 0.5);
         private_nh.param("path_deviation_replan_threshold",
                          path_deviation_replan_threshold_, 0.60);
         double terminal_yaw_tolerance = 0.04;
@@ -1153,6 +1183,11 @@ namespace jgl_dwa_local_planner
         reference_fallback_boundary_distance_ =
             std::max(0.02, reference_fallback_boundary_distance_);
         obstacle_wait_time_ = std::max(0.0, obstacle_wait_time_);
+        reference_obstacle_stop_distance_ =
+            std::max(0.0, reference_obstacle_stop_distance_);
+        reference_obstacle_slowdown_distance_ =
+            std::max(reference_obstacle_stop_distance_ + 0.01,
+                     reference_obstacle_slowdown_distance_);
         path_deviation_replan_threshold_ =
             std::max(0.05, path_deviation_replan_threshold_);
         //private_nh.param("back_distance", back_distance, 2.5);
@@ -1866,15 +1901,6 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseS
       publishGlobalPlan(transformed_plan);
       consumeReferencePathJob();
       maybeStartReferencePathJob();
-      if (fixedRouteBlocked())
-      {
-        path_follower_.reset();
-        stopCmd(cmd_vel);
-        ROS_WARN_THROTTLE(
-            1.0,
-            "Fixed route: obstacle detected on the locked path; wait in place until it clears.");
-        return true;
-      }
       bool reference_hard_failure = false;
       if (computeReferenceVelocityCommands(cmd_vel, reference_hard_failure))
       {
@@ -1884,6 +1910,18 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseS
       {
         stopCmd(cmd_vel);
         return false;
+      }
+      // Only the legacy straight-line fallback keeps the original hard-stop
+      // check. Active reference paths were already handled above with staged
+      // slowdown, so the two policies cannot mask each other.
+      if (fixedRouteBlocked())
+      {
+        path_follower_.reset();
+        stopCmd(cmd_vel);
+        ROS_WARN_THROTTLE(
+            1.0,
+            "Fixed route: obstacle detected on the locked legacy path; wait in place until it clears.");
+        return true;
       }
       return lineComputeVelocityCommands(linePath, cmd_vel);
     }

@@ -59,6 +59,7 @@
 #include <jgl_dwa_local_planner/dwa_planner.h>
 
 #include <jgl_dwa_local_planner/path_follower.h>
+#include <jgl_dwa_local_planner/reference_obstacle_policy.h>
 #include <jgl_dwa_local_planner/reference_path_manager.h>
 #include <jgl_dwa_local_planner/speedPlan.h>
 #include <jgl_dwa_local_planner/terminal_yaw_controller.h>
@@ -239,7 +240,8 @@ namespace jgl_dwa_local_planner
       const char *referencePathModeName(TrajectoryGenerator::PathMode mode) const;
       bool computeReferenceVelocityCommands(geometry_msgs::Twist &cmd_vel,
                                             bool &hard_failure);
-      bool referencePathBlocked(const nav_msgs::Path &path);
+      bool referencePathObstacleDistance(const nav_msgs::Path &path,
+                                         double &obstacle_distance);
       bool fixedRouteBlocked();
       void fixedRouteModeCallback(const std_msgs::Bool::ConstPtr &mode);
       bool costmapPointBlocked(costmap_2d::Costmap2D *costmap,
@@ -295,6 +297,8 @@ namespace jgl_dwa_local_planner
       double reference_safe_distance_;
       double reference_fallback_boundary_distance_;
       double obstacle_wait_time_;
+      double reference_obstacle_slowdown_distance_;
+      double reference_obstacle_stop_distance_;
       double path_deviation_replan_threshold_;
       std::atomic<bool> fixed_route_mode_;
       ros::Time reference_obstacle_start_;

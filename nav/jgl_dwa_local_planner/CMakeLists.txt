@@ -76,6 +76,8 @@ if(CATKIN_ENABLE_TESTING)
   endif()
   catkin_add_gtest(terminal_yaw_controller_test
     test/terminal_yaw_controller_test.cpp)
+  catkin_add_gtest(reference_obstacle_policy_test
+    test/reference_obstacle_policy_test.cpp)
 endif()
 
 install(TARGETS jgl_dwa_local_planner

@@ -56,6 +56,12 @@ reference_curve_type: bspline
 `/anav/fixed_route_mode` 为 true 时，局部层遵守固定路线语义，堵塞后停车等待，不由
 全局规划器自行生成偏离拓扑的 DWA 绕行。
 
+运行时在 B 样条上发现障碍后，控制器按照到首个阻塞采样点的路径弧长分级限制候选
+速度：`obstacle_slowdown_distance` 外保持全速，进入该距离后依次限制为 75%、50%、
+25%，到 `obstacle_stop_distance` 时请求停车。线速度和角速度同比例缩放以保持曲率。
+该逻辑用于提前减速、等待和超时重规划；最终速度仍由 `collision_monitor` 按完整
+footprint 和制动轨迹裁决。
+
 全局规划配置中的 `enable_dwa_obstacle_avoidance: false` 与这一所有权划分有关：
 AutoNAV 负责拓扑重规划，局部层不应静默改变业务路线。
 
