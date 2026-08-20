@@ -69,6 +69,13 @@ DWAPlannerROS:
 # Goal Tolerance Parameters
   yaw_goal_tolerance: 0.025  # 0.05
   xy_goal_tolerance: 0.03 # 0.10
+  # Fixed-route endpoints use a gentler final-yaw controller and require
+  # consecutive in-tolerance samples before move_base reports success.
+  terminal_yaw_tolerance: 0.04
+  terminal_yaw_kp: 1.2
+  terminal_yaw_max_speed: 0.25
+  terminal_yaw_min_speed: 0.06
+  terminal_yaw_stable_cycles: 3
   # latch_xy_goal_tolerance: false
 
 # Forward Simulation Parameters

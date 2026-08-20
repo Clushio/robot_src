@@ -2762,24 +2762,6 @@ private:
             if (getCurrentRobotPose(current_pose))
             {
                 const double target_distance = distanceToNode(current_pose, target_index);
-                // Loop demonstrations care about reaching the fixed endpoint,
-                // but must not get stuck trying to trim a tiny final-yaw error.
-                // This check runs only after the goal has actually been sent, so
-                // a nearby first endpoint is still executed before the GUI moves
-                // on to the other station.
-                if (fixed_route && final_goal &&
-                    target_distance <= fixed_route_final_xy_tolerance_)
-                {
-                    global_ac->cancelGoal();
-                    stopRobot();
-                    ROS_INFO("Fixed route final P%d reached by XY distance %.3f m; "
-                             "accept endpoint without final-yaw oscillation.",
-                             target_index, target_distance);
-                    current_pose_index = target_index;
-                    active_next_index_ = -1;
-                    publishTopologyMarkers();
-                    return GOAL_REACHED;
-                }
                 const double pass_through_distance =
                     x2bot_teleop::goal_advance_policy::PassThroughDistance(
                         precise_controller_handoff,

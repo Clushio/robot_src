@@ -61,6 +61,7 @@
 #include <jgl_dwa_local_planner/path_follower.h>
 #include <jgl_dwa_local_planner/reference_path_manager.h>
 #include <jgl_dwa_local_planner/speedPlan.h>
+#include <jgl_dwa_local_planner/terminal_yaw_controller.h>
 #include <jgl_dwa_local_planner/pursuit.h>
 #include <jgl_dwa_local_planner/trajectory_generator.h>
 #include <tf/tf.h>
@@ -137,8 +138,6 @@ namespace jgl_dwa_local_planner
        */
       bool isGoalReached();
 
-      bool mygoalReachPanduan();
-      bool mygoalReachPanduan_angle();
       geometry_msgs::PoseStamped Qtar;
 
       void  computeRelativePosition(const geometry_msgs::PoseStamped& p, const geometry_msgs::PoseStamped& q);
@@ -317,6 +316,7 @@ namespace jgl_dwa_local_planner
       TrajectoryGenerator trajectory_generator_;
       ReferencePathManager reference_path_manager_;
       PathFollower path_follower_;
+      TerminalYawController terminal_yaw_controller_;
       double goal_yaw_err;                              //到达目标点的角度误差
       double yaw_goal_tolerance;                        //允许到达目标点的角度误差
       double xy_goal_tolerance;                         //允许到达目标点的距离误差

@@ -713,6 +713,7 @@ namespace jgl_dwa_local_planner
     status = 1;
     state4counter = 0;
     state5counter = 0;
+    terminal_yaw_controller_.reset();
     reference_goal_reached_ = false;
     legacy_line_forced_goal_index_ = current_topology_goal_index_;
   }
@@ -1128,6 +1129,26 @@ namespace jgl_dwa_local_planner
         private_nh.param("obstacle_wait_time", obstacle_wait_time_, 10.0);
         private_nh.param("path_deviation_replan_threshold",
                          path_deviation_replan_threshold_, 0.60);
+        double terminal_yaw_tolerance = 0.04;
+        double terminal_yaw_kp = 1.2;
+        double terminal_yaw_max_speed = 0.25;
+        double terminal_yaw_min_speed = 0.06;
+        int terminal_yaw_stable_cycles = 3;
+        private_nh.param("terminal_yaw_tolerance",
+                         terminal_yaw_tolerance, terminal_yaw_tolerance);
+        private_nh.param("terminal_yaw_kp",
+                         terminal_yaw_kp, terminal_yaw_kp);
+        private_nh.param("terminal_yaw_max_speed",
+                         terminal_yaw_max_speed, terminal_yaw_max_speed);
+        private_nh.param("terminal_yaw_min_speed",
+                         terminal_yaw_min_speed, terminal_yaw_min_speed);
+        private_nh.param("terminal_yaw_stable_cycles",
+                         terminal_yaw_stable_cycles,
+                         terminal_yaw_stable_cycles);
+        terminal_yaw_controller_.configure(
+            terminal_yaw_tolerance, terminal_yaw_kp,
+            terminal_yaw_max_speed, terminal_yaw_min_speed,
+            terminal_yaw_stable_cycles);
         reference_safe_distance_ = std::max(0.0, reference_safe_distance_);
         reference_fallback_boundary_distance_ =
             std::max(0.02, reference_fallback_boundary_distance_);
@@ -1220,6 +1241,7 @@ namespace jgl_dwa_local_planner
       //每次传进来的goal和上次传进来的goal不一样或者第一次传进来goal时，将控制状态设置为1
       if(linePath.size()==0){
         status=1;
+        terminal_yaw_controller_.reset();
         reference_goal_reached_ = false;
         legacy_line_forced_goal_index_ = -1;
       }else {
@@ -1227,6 +1249,7 @@ namespace jgl_dwa_local_planner
         if(!comparePose(linePath.back(),orig_global_plan.back()))
         {
           status=1;
+          terminal_yaw_controller_.reset();
           reference_goal_reached_ = false;
           legacy_line_forced_goal_index_ = -1;
         }
@@ -1262,6 +1285,7 @@ namespace jgl_dwa_local_planner
       reference_obstacle_start_ = ros::Time(0);
       reference_goal_reached_ = false;
       legacy_line_forced_goal_index_ = -1;
+      terminal_yaw_controller_.reset();
     }
     //when we get a new plan, we also want to clear any latch we may have on goal tolerances
     latchedStopRotateController_.resetLatching();
@@ -1269,37 +1293,6 @@ namespace jgl_dwa_local_planner
     ROS_INFO("Got new plan");
   
     return dp_->setPlan(orig_global_plan);
-}
-
-//jiaodu panduan 
- bool DWAPlannerROS::mygoalReachPanduan_angle()
- {
-  if(fabs(goal_yaw_err) < angle_err_H)
-  {
-    return true;
-  }
-  else
-  {
-    return false;
-  }
- }
-
-//speed panduan
-bool DWAPlannerROS::mygoalReachPanduan()
-{ 
-   computeRelativePosition(current_pose_,linePath.back());
-
-   int targetType = linePath.back().pose.position.z;
-   std::cout<<"current target type: "<<targetType<<std::endl;
-
-   const double xy_error = hypot(Qtar.pose.position.x, Qtar.pose.position.y);
-   if((xy_error < xdis)&&(fabs(goal_yaw_err) < angle_err_H))
-   {
-      return true;
-   }
-   else{
-      return false;
-   }
 }
 
  bool DWAPlannerROS::lineComputeVelocityCommands_modJGL(std::vector<geometry_msgs::PoseStamped> linePath, geometry_msgs::Twist &cmd_vel)
@@ -1375,22 +1368,10 @@ bool DWAPlannerROS::isGoalReached()
                      direct_goal_distance);
             return true;
         }
-        //if (comDistance(current_pose_,linePath.back()) < xy_goal_tolerance &&fabs(goal_yaw_err) < yaw_goal_tolerance) 
-        //mode by jgl 20241121
-        if(mygoalReachPanduan())
-        {
-
-            ROS_INFO("Goal reached");
-            std::stringstream ss1;
-            ss1<<"goal: x="<<linePath.back().pose.position.x<<" y="<<linePath.back().pose.position.y<<std::endl;
-            ss1<<"stop cmd at: x="<<current_pose_.pose.position.x<<" y="<<current_pose_.pose.position.y<<std::endl;
-            ss1 << "distance to goal:" << comDistance(current_pose_,linePath.back()) <<std::endl;
-            ss1 <<"Qx err = "<<Qtar.pose.position.x<<" Qy err = "<<Qtar.pose.position.y<<std::endl;
-            ss1<<"_______________________________"<<std::endl;
-            logToFile(ss1.str(),logfilename);
-            return true; 
-        }
-        else if (status ==3) {
+        // Line goals are completed only by the terminal state machine.  A
+        // one-cycle XY/yaw match is not enough because it may be encoder/TF
+        // noise while the chassis is still settling.
+        if (status ==3) {
 
             ROS_INFO("Goal reached by rotation");
             std::stringstream ss1;
@@ -1667,11 +1648,8 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseS
   }
  // ROS_INFO_STREAM( "self rotation:" << goal_yaw_err );
 
-  // 到达判断必须使用本控制周期刚计算出的 yaw 误差。
-  if(mygoalReachPanduan())
-  {
-    status = 3;
-  }
+  double terminal_yaw_command = 0.0;
+  bool terminal_yaw_updated = false;
   //std::cout<<"QX="
 
   double angle_line = atan2(linePath.back().pose.position.y - linePath[0].pose.position.y, linePath.back().pose.position.x - linePath[0].pose.position.x);
@@ -1718,6 +1696,7 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseS
   if((status==0 || status==1) && xy_error<=terminal_capture_distance){
     status = 5;
     state5counter = 8;
+    terminal_yaw_controller_.reset();
     ROS_INFO("Terminal position captured at %.3f m; switch to final-yaw preparation.",
              xy_error);
   }else if(status==1 && xy_error<=terminal_no_realign_distance){
@@ -1731,9 +1710,15 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseS
            fabs(angle_err)>angleerr_staChange2){
     status=1;
   }
-  else if(status==2&&mygoalReachPanduan_angle())
+  else if(status==2)
   {
-    status=3;
+    terminal_yaw_updated = true;
+    if (terminal_yaw_controller_.update(goal_yaw_err,
+                                        &terminal_yaw_command))
+    {
+      status=3;
+      ROS_INFO("Terminal yaw stable; goal completed.");
+    }
   }
   else if((status==4) &&(state4counter<=0) ){
     status = 0;
@@ -1807,7 +1792,9 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseS
   else if(status==2)//终点时旋转方向到终点朝向一定角度范围内
   {
     state.v=0;
-    w=0.25*goal_yaw_err/(fabs(goal_yaw_err)+0.000001);
+    // The first cycle after the preparation hold intentionally stays at zero;
+    // subsequent cycles use the proportional, bounded terminal controller.
+    w=terminal_yaw_updated ? terminal_yaw_command : 0.0;
   }
   else if(status==3)
   {

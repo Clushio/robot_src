@@ -118,6 +118,7 @@ AUTONAV_DEFAULTS = {
     'waypoint_reached_distance': 0.20,
     'controller_handoff_distance': 0.08,
     'fixed_route_final_xy_tolerance': 0.03,
+    'loop_endpoint_dwell_time': 2.0,
 }
 RVIZ_RECORD_POSE_TOPIC = '/anav/record_pose'
 RVIZ_RECORD_MARKER_TOPIC = '/anav/record_markers'
@@ -1032,6 +1033,7 @@ class MyWindow(QWidget):
                         'waypoint_reached_distance',
                         'controller_handoff_distance',
                         'fixed_route_final_xy_tolerance',
+                        'loop_endpoint_dwell_time',
                     ):
                         handle.write(f'{key}: {settings[key]:.6g}\n')
                     handle.write(
@@ -1290,6 +1292,8 @@ class MyWindow(QWidget):
                    0.01, 2.0, 3, 0.01, ' m')
         add_number('fixed_route_final_xy_tolerance', '固定路线终点 XY 容差',
                    0.005, 1.0, 3, 0.005, ' m')
+        add_number('loop_endpoint_dwell_time', '循环端点驻留时间',
+                   0.0, 60.0, 1, 0.5, ' s')
         self.block_bidirectional_checkbox = QCheckBox(
             '同时临时禁用反向拓扑边'
         )
@@ -1937,6 +1941,13 @@ class MyWindow(QWidget):
         self.loop_generation += 1
         generation = self.loop_generation
         self.loop_stop_event = threading.Event()
+        loop_endpoint_dwell_time = max(
+            0.0,
+            float(self.nav_parameter_widgets[
+                'loop_endpoint_dwell_time'
+            ].value()),
+        )
+        self.loop_endpoint_dwell_time = loop_endpoint_dwell_time
         self.set_loop_controls_running(True)
         self.loop_count_label.setText('已完成单程：0')
         self.loop_state_label.setText(
@@ -1950,7 +1961,7 @@ class MyWindow(QWidget):
         self.loop_thread = threading.Thread(
             target=self.run_loop_navigation,
             args=(generation, targets, self.loop_stop_event,
-                  self.loop_pending_run_mode),
+                  self.loop_pending_run_mode, loop_endpoint_dwell_time),
             daemon=True,
         )
         self.loop_thread.start()
@@ -1984,7 +1995,8 @@ class MyWindow(QWidget):
             success = False
         return success, detail or ('已到达' if success else '导航服务未返回成功')
 
-    def run_loop_navigation(self, generation, targets, stop_event, run_mode):
+    def run_loop_navigation(self, generation, targets, stop_event, run_mode,
+                            endpoint_dwell_time):
         current_id = self.currentID
         completed = 0
         target_offset = 0
@@ -2009,6 +2021,11 @@ class MyWindow(QWidget):
             self.loop_update_requested.emit(
                 generation, 'arrived', target['name'], completed, detail
             )
+            # Keep the completed endpoint stationary before issuing the next
+            # leg. Event.wait makes the dwell immediately cancellable by the
+            # loop stop button instead of blocking shutdown with sleep().
+            if stop_event.wait(max(0.0, endpoint_dwell_time)):
+                return
             target_offset = 1 - target_offset
 
     def on_loop_update(self, generation, state, target_name, completed, detail):
@@ -2021,7 +2038,8 @@ class MyWindow(QWidget):
             self.set_status(f'循环任务正在前往：{target_name}', 'info')
         elif state == 'arrived':
             self.loop_state_label.setText(
-                f'已到达：{target_name}，准备前往另一端。'
+                f'已到达：{target_name}，驻留 '
+                f'{self.loop_endpoint_dwell_time:.1f} 秒后前往另一端。'
             )
         elif state == 'failed':
             self.loop_running = False
