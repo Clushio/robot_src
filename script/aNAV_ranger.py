@@ -116,7 +116,6 @@ AUTONAV_DEFAULTS = {
     'goal_timeout': 120.0,
     'block_bidirectional': True,
     'waypoint_reached_distance': 0.20,
-    'controller_handoff_distance': 0.08,
     'fixed_route_final_xy_tolerance': 0.03,
     'loop_endpoint_dwell_time': 2.0,
 }
@@ -899,9 +898,6 @@ class MyWindow(QWidget):
         if (settings['blocked_cooldown_max'] <
                 settings['blocked_cooldown_initial']):
             raise ValueError('阻塞边最大禁用时间不能小于首次禁用时间')
-        if (settings['controller_handoff_distance'] >
-                settings['waypoint_reached_distance']):
-            raise ValueError('控制模式交接距离不能大于中间拓扑点到达距离')
         return settings
 
     def set_nav_parameter_widgets(self, settings):
@@ -956,9 +952,6 @@ class MyWindow(QWidget):
                 request.waypoint_reached_distance = (
                     settings['waypoint_reached_distance']
                 )
-                request.controller_handoff_distance = (
-                    settings['controller_handoff_distance']
-                )
                 request.fixed_route_final_xy_tolerance = (
                     settings['fixed_route_final_xy_tolerance']
                 )
@@ -975,8 +968,6 @@ class MyWindow(QWidget):
                     'block_bidirectional': response.block_bidirectional,
                     'waypoint_reached_distance':
                         response.waypoint_reached_distance,
-                    'controller_handoff_distance':
-                        response.controller_handoff_distance,
                     'fixed_route_final_xy_tolerance':
                         response.fixed_route_final_xy_tolerance,
                     '_navigation_active': response.navigation_active,
@@ -1037,7 +1028,6 @@ class MyWindow(QWidget):
                         'blocked_cooldown_max', 'blocked_backoff_factor',
                         'blocked_wait_timeout', 'goal_timeout',
                         'waypoint_reached_distance',
-                        'controller_handoff_distance',
                         'fixed_route_final_xy_tolerance',
                         'loop_endpoint_dwell_time',
                     ):
@@ -1321,9 +1311,6 @@ class MyWindow(QWidget):
                    0.1, 86400.0, 1, 5.0, ' s')
         add_number(arrival_layout, 'waypoint_reached_distance',
                    '中间拓扑点到达距离',
-                   0.01, 2.0, 3, 0.01, ' m')
-        add_number(arrival_layout, 'controller_handoff_distance',
-                   '控制模式交接距离',
                    0.01, 2.0, 3, 0.01, ' m')
         add_number(arrival_layout, 'loop_endpoint_dwell_time',
                    '循环端点驻留时间',

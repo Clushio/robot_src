@@ -25,7 +25,6 @@
 #include <visualization_msgs/MarkerArray.h>
 #include <x2bot_teleop/NavConfig.h>
 #include <x2bot_teleop/SetInt.h>
-#include <x2bot_teleop/goal_advance_policy.h>
 
 #include <algorithm>
 #include <atomic>
@@ -76,7 +75,6 @@ struct NavConfigValues {
     double goal_timeout;
     bool block_bidirectional;
     double waypoint_reached_distance;
-    double controller_handoff_distance;
     double fixed_route_final_xy_tolerance;
 };
 
@@ -142,7 +140,6 @@ public:
           progress_distance_(0.05),
           progress_yaw_(6.0 * M_PI / 180.0),
           waypoint_reached_distance_(0.20),
-          controller_handoff_distance_(0.08),
           fixed_route_final_xy_tolerance_(0.03),
           validate_pass_through_action_success_distance_(false),
           goal_timeout_(120.0),
@@ -183,9 +180,6 @@ public:
         private_nh.param("progress_yaw", progress_yaw_, progress_yaw_);
         private_nh.param("waypoint_reached_distance", waypoint_reached_distance_,
                          waypoint_reached_distance_);
-        private_nh.param("controller_handoff_distance",
-                         controller_handoff_distance_,
-                         controller_handoff_distance_);
         private_nh.param("fixed_route_final_xy_tolerance",
                          fixed_route_final_xy_tolerance_,
                          fixed_route_final_xy_tolerance_);
@@ -690,7 +684,6 @@ private:
     double progress_distance_;
     double progress_yaw_;
     double waypoint_reached_distance_;
-    double controller_handoff_distance_;
     double fixed_route_final_xy_tolerance_;
     bool validate_pass_through_action_success_distance_;
     double goal_timeout_;
@@ -931,7 +924,6 @@ private:
         config.goal_timeout = goal_timeout_;
         config.block_bidirectional = block_bidirectional_;
         config.waypoint_reached_distance = waypoint_reached_distance_;
-        config.controller_handoff_distance = controller_handoff_distance_;
         config.fixed_route_final_xy_tolerance = fixed_route_final_xy_tolerance_;
         return config;
     }
@@ -947,7 +939,6 @@ private:
             config.blocked_wait_timeout,
             config.goal_timeout,
             config.waypoint_reached_distance,
-            config.controller_handoff_distance,
             config.fixed_route_final_xy_tolerance};
         for (double value : values)
         {
@@ -997,13 +988,6 @@ private:
             reason = "中间点到达距离必须在 0.01 到 2.0 米之间";
             return false;
         }
-        if (config.controller_handoff_distance < 0.01 ||
-            config.controller_handoff_distance >
-                config.waypoint_reached_distance)
-        {
-            reason = "控制模式交接距离必须在 0.01 米到中间点到达距离之间";
-            return false;
-        }
         if (config.fixed_route_final_xy_tolerance < 0.005 ||
             config.fixed_route_final_xy_tolerance > 1.0)
         {
@@ -1024,7 +1008,6 @@ private:
         goal_timeout_ = config.goal_timeout;
         block_bidirectional_ = config.block_bidirectional;
         waypoint_reached_distance_ = config.waypoint_reached_distance;
-        controller_handoff_distance_ = config.controller_handoff_distance;
         fixed_route_final_xy_tolerance_ =
             config.fixed_route_final_xy_tolerance;
     }
@@ -1041,8 +1024,6 @@ private:
         response.goal_timeout = config.goal_timeout;
         response.block_bidirectional = config.block_bidirectional;
         response.waypoint_reached_distance = config.waypoint_reached_distance;
-        response.controller_handoff_distance =
-            config.controller_handoff_distance;
         response.fixed_route_final_xy_tolerance =
             config.fixed_route_final_xy_tolerance;
     }
@@ -1075,8 +1056,6 @@ private:
         config.goal_timeout = request.goal_timeout;
         config.block_bidirectional = request.block_bidirectional;
         config.waypoint_reached_distance = request.waypoint_reached_distance;
-        config.controller_handoff_distance =
-            request.controller_handoff_distance;
         config.fixed_route_final_xy_tolerance =
             request.fixed_route_final_xy_tolerance;
         std::string reason;
@@ -1165,8 +1144,6 @@ private:
                         parseBool(value, config.block_bidirectional);
                 else if (key == "waypoint_reached_distance")
                     config.waypoint_reached_distance = std::stod(value);
-                else if (key == "controller_handoff_distance")
-                    config.controller_handoff_distance = std::stod(value);
                 else if (key == "fixed_route_final_xy_tolerance")
                     config.fixed_route_final_xy_tolerance = std::stod(value);
             }
@@ -2510,7 +2487,6 @@ private:
 
     GoalMonitorResult sendGoalAndMonitor(int target_index, int previous_index,
                                          bool final_goal, int topology_path_index,
-                                         bool precise_controller_handoff,
                                          bool fixed_route = false)
     {
         const TargetPose &target_pose = target_poses[target_index];
@@ -2578,24 +2554,10 @@ private:
                     return GOAL_FAILED;
                 }
 
-                bool current_goal_passed =
+                const bool current_goal_passed =
                     referenceStatusMatches(topology_path_index,
                                            REFERENCE_PASSED,
                                            goal_start_time);
-                if (current_goal_passed && precise_controller_handoff)
-                {
-                    geometry_msgs::PoseStamped current_pose;
-                    const bool pose_valid = getCurrentRobotPose(current_pose);
-                    const double target_distance =
-                        pose_valid
-                            ? distanceToNode(current_pose, target_index)
-                            : std::numeric_limits<double>::infinity();
-                    current_goal_passed =
-                        x2bot_teleop::goal_advance_policy::
-                            ReferencePassedAllowsAdvance(
-                                true, pose_valid, target_distance,
-                                controller_handoff_distance_);
-                }
                 pause_reentry_requested_.store(false);
                 active_next_index_ = -1;
                 publishTopologyMarkers();
@@ -2648,36 +2610,15 @@ private:
                 if (state == actionlib::SimpleClientGoalState::SUCCEEDED)
                 {
                     geometry_msgs::PoseStamped current_pose;
-                    if (x2bot_teleop::goal_advance_policy::
-                            PassThroughActionSuccessNeedsValidation(
-                                final_goal, precise_controller_handoff,
-                                validate_pass_through_action_success_distance_))
+                    if (!final_goal &&
+                        validate_pass_through_action_success_distance_ &&
+                        getCurrentRobotPose(current_pose))
                     {
-                        if (!getCurrentRobotPose(current_pose))
-                        {
-                            ROS_WARN("Cannot validate pass-through P%d because map->base_link is unavailable. Retry same topology goal.",
-                                     target_index);
-                            global_ac->sendGoal(mb_goal);
-                            continue;
-                        }
                         const double target_distance = distanceToNode(current_pose, target_index);
-                        const double required_distance =
-                            x2bot_teleop::goal_advance_policy::
-                                PassThroughDistance(
-                                    precise_controller_handoff,
-                                    waypoint_reached_distance_,
-                                    controller_handoff_distance_);
-                        if (!x2bot_teleop::goal_advance_policy::
-                                 ValidatedActionSuccessAllowsAdvance(
-                                     true, target_distance,
-                                     required_distance))
+                        if (target_distance > waypoint_reached_distance_)
                         {
-                            ROS_WARN("move_base reported P%d reached, but base_link is %.2f m away (required %.2f m%s). Retry same topology goal.",
-                                     target_index, target_distance,
-                                     required_distance,
-                                     precise_controller_handoff
-                                         ? " for controller handoff"
-                                         : "");
+                            ROS_WARN("move_base reported P%d reached, but robot is %.2f m away. Retry same topology goal.",
+                                     target_index, target_distance);
                             global_ac->sendGoal(mb_goal);
                             continue;
                         }
@@ -2714,97 +2655,35 @@ private:
                 referenceStatusMatches(topology_path_index, REFERENCE_PASSED,
                                        goal_start_time))
             {
-                bool pose_valid = true;
-                double target_distance = 0.0;
-                if (precise_controller_handoff)
-                {
-                    geometry_msgs::PoseStamped current_pose;
-                    pose_valid = getCurrentRobotPose(current_pose);
-                    if (!pose_valid)
-                    {
-                        ROS_WARN_THROTTLE(
-                            1.0,
-                            "B-spline passed P%d, but map->base_link is unavailable; wait before controller handoff.",
-                            target_index);
-                    }
-                    else
-                    {
-                        target_distance = distanceToNode(current_pose, target_index);
-                        if (target_distance > controller_handoff_distance_)
-                        {
-                            ROS_INFO_THROTTLE(
-                                1.0,
-                                "B-spline passed controller handoff P%d early at %.3f m; continue current controller until base_link is within %.3f m.",
-                                target_index, target_distance,
-                                controller_handoff_distance_);
-                        }
-                    }
-                }
-                if (x2bot_teleop::goal_advance_policy::
-                        ReferencePassedAllowsAdvance(
-                            precise_controller_handoff, pose_valid,
-                            target_distance, controller_handoff_distance_))
-                {
-                    ROS_INFO("B-spline pass-through P%d reached at topology path index %d; "
-                             "send the next goal without cancelling or stopping%s.",
-                             target_index, topology_path_index,
-                             precise_controller_handoff
-                                 ? " after precise controller handoff gate"
-                                 : "");
-                    current_pose_index = target_index;
-                    active_next_index_ = -1;
-                    publishTopologyMarkers();
-                    return GOAL_REACHED;
-                }
+                ROS_INFO("B-spline pass-through P%d reached at topology path index %d; "
+                         "send the next goal without cancelling or stopping.",
+                         target_index, topology_path_index);
+                current_pose_index = target_index;
+                active_next_index_ = -1;
+                publishTopologyMarkers();
+                return GOAL_REACHED;
             }
 
             geometry_msgs::PoseStamped current_pose;
             if (getCurrentRobotPose(current_pose))
             {
                 const double target_distance = distanceToNode(current_pose, target_index);
-                const double pass_through_distance =
-                    x2bot_teleop::goal_advance_policy::PassThroughDistance(
-                        precise_controller_handoff,
-                        waypoint_reached_distance_,
-                        controller_handoff_distance_);
-                if (!final_goal && target_distance <= pass_through_distance)
+                if (!final_goal && target_distance <= waypoint_reached_distance_)
                 {
                     const bool bspline_tracking =
                         referenceTrackingOrPassed(topology_path_index, goal_start_time);
-                    // While B-spline tracking is active, its REFERENCE_PASSED
-                    // status owns normal waypoint progression. This keeps the
-                    // generic 0.20 m fallback from bypassing the tighter
-                    // B-spline-to-legacy fallback boundary. The two explicit
-                    // start/end controller handoffs instead use the precise
-                    // base_link distance gate above.
-                    if (!x2bot_teleop::goal_advance_policy::
-                             DistanceAllowsAdvance(
-                                 final_goal, precise_controller_handoff,
-                                 bspline_tracking, target_distance,
-                                 waypoint_reached_distance_,
-                                 controller_handoff_distance_))
+                    ROS_INFO("Pass-through waypoint P%d reached by XY distance %.2f m%s.",
+                             target_index, target_distance,
+                             bspline_tracking ?
+                                 "; keep the B-spline action live for seamless preemption" : "");
+                    if (!bspline_tracking)
                     {
-                        ROS_DEBUG_THROTTLE(
-                            1.0,
-                            "B-spline P%d is within run_nav XY fallback distance, but REFERENCE_PASSED has not arrived; keep the current controller.",
-                            target_index);
+                        global_ac->cancelGoal();
                     }
-                    else
-                    {
-                        ROS_INFO("Pass-through waypoint P%d reached by XY distance %.2f m%s.",
-                                 target_index, target_distance,
-                                 precise_controller_handoff
-                                     ? "; precise controller handoff"
-                                     : "");
-                        if (!bspline_tracking)
-                        {
-                            global_ac->cancelGoal();
-                        }
-                        current_pose_index = target_index;
-                        active_next_index_ = -1;
-                        publishTopologyMarkers();
-                        return GOAL_REACHED;
-                    }
+                    current_pose_index = target_index;
+                    active_next_index_ = -1;
+                    publishTopologyMarkers();
+                    return GOAL_REACHED;
                 }
                 if (final_goal && target_distance <= waypoint_reached_distance_)
                 {
@@ -2888,15 +2767,12 @@ private:
 
             const int previous_index = (i == 0) ? -1 : path_indices[i - 1];
             const bool final_goal = next_index == target_index;
-            const bool precise_controller_handoff =
-                x2bot_teleop::goal_advance_policy::
-                    IsPreciseControllerHandoff(i, path_indices.size());
             selectTopologySafetyPhase(start_segment_active, final_goal);
             while (ros::ok())
             {
                 const GoalMonitorResult result = sendGoalAndMonitor(
                     next_index, previous_index, final_goal,
-                    static_cast<int>(i), precise_controller_handoff, true);
+                    static_cast<int>(i), true);
                 if (result == GOAL_REACHED ||
                     result == GOAL_PAUSED_AFTER_PASS)
                 {
@@ -2983,14 +2859,10 @@ private:
 
                 const int previous_index = (i == 0) ? -1 : path_indices[i - 1];
                 const bool final_goal = next_index == target_index;
-                const bool precise_controller_handoff =
-                    x2bot_teleop::goal_advance_policy::
-                        IsPreciseControllerHandoff(i, path_indices.size());
                 selectTopologySafetyPhase(start_segment_active, final_goal);
                 const GoalMonitorResult goal_result =
                     sendGoalAndMonitor(next_index, previous_index, final_goal,
-                                       static_cast<int>(i),
-                                       precise_controller_handoff, false);
+                                       static_cast<int>(i), false);
                 if (goal_result == GOAL_REACHED)
                 {
                     if (start_segment_active &&

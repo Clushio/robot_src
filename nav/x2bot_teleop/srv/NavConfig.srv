@@ -7,7 +7,6 @@ float64 blocked_wait_timeout
 float64 goal_timeout
 bool block_bidirectional
 float64 waypoint_reached_distance
-float64 controller_handoff_distance
 float64 fixed_route_final_xy_tolerance
 ---
 bool success
@@ -21,5 +20,4 @@ float64 blocked_wait_timeout
 float64 goal_timeout
 bool block_bidirectional
 float64 waypoint_reached_distance
-float64 controller_handoff_distance
 float64 fixed_route_final_xy_tolerance
