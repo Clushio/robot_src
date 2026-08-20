@@ -880,10 +880,13 @@ class MyWindow(QWidget):
         return settings
 
     def collect_nav_settings(self):
-        settings = {
+        # Start with persisted values so compatibility-only parameters that
+        # are intentionally hidden from the compact UI are preserved.
+        settings = dict(self.autonav_settings)
+        settings.update({
             key: float(editor.value())
             for key, editor in self.nav_parameter_widgets.items()
-        }
+        })
         settings['block_bidirectional'] = (
             self.block_bidirectional_checkbox.isChecked()
         )
@@ -999,6 +1002,9 @@ class MyWindow(QWidget):
     def on_nav_config_received(self, settings, message, success):
         self.set_nav_config_buttons_enabled(True)
         if settings.get('_update_widgets'):
+            for key, value in settings.items():
+                if key in AUTONAV_DEFAULTS:
+                    self.autonav_settings[key] = value
             self.set_nav_parameter_widgets(settings)
         active_text = (
             '；当前有任务运行' if settings.get('_navigation_active') else ''
@@ -1261,47 +1267,74 @@ class MyWindow(QWidget):
         layout.addWidget(strategy)
 
         parameters = QGroupBox('2  堵塞、重规划与到达判定')
-        parameter_layout = QFormLayout(parameters)
+        parameter_layout = QVBoxLayout(parameters)
+        parameter_columns = QHBoxLayout()
+        parameter_columns.setSpacing(16)
+
+        blockage_group = QGroupBox('堵塞与重规划')
+        blockage_layout = QFormLayout(blockage_group)
+        arrival_group = QGroupBox('到达与循环')
+        arrival_layout = QFormLayout(arrival_group)
+
+        for form_layout in (blockage_layout, arrival_layout):
+            form_layout.setFieldGrowthPolicy(
+                QFormLayout.FieldsStayAtSizeHint
+            )
+            form_layout.setFormAlignment(Qt.AlignTop)
+            form_layout.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            form_layout.setHorizontalSpacing(12)
+            form_layout.setVerticalSpacing(6)
+
+        parameter_columns.addWidget(blockage_group, 1)
+        parameter_columns.addWidget(arrival_group, 1)
+        parameter_layout.addLayout(parameter_columns)
         self.nav_parameter_widgets = {}
 
-        def add_number(key, label, minimum, maximum, decimals, step, suffix):
+        def add_number(target_layout, key, label, minimum, maximum,
+                       decimals, step, suffix):
             editor = QDoubleSpinBox()
             editor.setRange(minimum, maximum)
             editor.setDecimals(decimals)
             editor.setSingleStep(step)
             editor.setSuffix(suffix)
             editor.setValue(float(self.autonav_settings[key]))
+            editor.setFixedWidth(125)
+            editor.setAlignment(Qt.AlignRight)
             self.nav_parameter_widgets[key] = editor
-            parameter_layout.addRow(label, editor)
+            target_layout.addRow(label, editor)
 
-        add_number('blocked_timeout', '无有效运动判堵时间',
+        add_number(blockage_layout, 'blocked_timeout', '无有效运动判堵时间',
                    0.1, 3600.0, 1, 1.0, ' s')
-        add_number('blocked_cooldown_initial', '阻塞边首次禁用时间',
+        add_number(blockage_layout, 'blocked_cooldown_initial',
+                   '阻塞边首次禁用时间',
                    0.1, 3600.0, 1, 1.0, ' s')
-        add_number('blocked_cooldown_max', '阻塞边最大禁用时间',
+        add_number(blockage_layout, 'blocked_cooldown_max',
+                   '阻塞边最大禁用时间',
                    0.1, 86400.0, 1, 5.0, ' s')
-        add_number('blocked_backoff_factor', '重复堵塞退避倍数',
+        add_number(blockage_layout, 'blocked_backoff_factor',
+                   '重复堵塞退避倍数',
                    1.0, 10.0, 2, 0.1, ' ×')
-        add_number('blocked_wait_timeout', '无替代路线最长等待',
+        add_number(blockage_layout, 'blocked_wait_timeout',
+                   '无替代路线最长等待',
                    0.0, 86400.0, 1, 5.0, ' s')
-        add_number('goal_timeout', '单个导航目标超时',
+        add_number(arrival_layout, 'goal_timeout', '单个导航目标超时',
                    0.1, 86400.0, 1, 5.0, ' s')
-        add_number('waypoint_reached_distance', '中间拓扑点到达距离',
+        add_number(arrival_layout, 'waypoint_reached_distance',
+                   '中间拓扑点到达距离',
                    0.01, 2.0, 3, 0.01, ' m')
-        add_number('controller_handoff_distance', '控制模式交接距离',
+        add_number(arrival_layout, 'controller_handoff_distance',
+                   '控制模式交接距离',
                    0.01, 2.0, 3, 0.01, ' m')
-        add_number('fixed_route_final_xy_tolerance', '固定路线终点 XY 容差',
-                   0.005, 1.0, 3, 0.005, ' m')
-        add_number('loop_endpoint_dwell_time', '循环端点驻留时间',
+        add_number(arrival_layout, 'loop_endpoint_dwell_time',
+                   '循环端点驻留时间',
                    0.0, 60.0, 1, 0.5, ' s')
         self.block_bidirectional_checkbox = QCheckBox(
-            '同时临时禁用反向拓扑边'
+            '阻塞时同时临时禁用反向拓扑边'
         )
         self.block_bidirectional_checkbox.setChecked(
             bool(self.autonav_settings['block_bidirectional'])
         )
-        parameter_layout.addRow('双向边堵塞处理',
-                                self.block_bidirectional_checkbox)
+        parameter_layout.addWidget(self.block_bidirectional_checkbox)
         layout.addWidget(parameters)
 
         actions = QGroupBox('3  应用与保存')
