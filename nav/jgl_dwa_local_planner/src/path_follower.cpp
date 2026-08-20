@@ -67,7 +67,9 @@ bool PathFollower::computeCommand(const nav_msgs::Path &path,
                                   unsigned int current_index,
                                   geometry_msgs::Twist &cmd_vel,
                                   unsigned int &new_index,
-                                  double &curvature)
+                                  double &curvature,
+                                  bool terminal_goal,
+                                  double terminal_xy_tolerance)
 {
   cmd_vel = geometry_msgs::Twist();
   curvature = 0.0;
@@ -78,11 +80,23 @@ bool PathFollower::computeCommand(const nav_msgs::Path &path,
     return false;
   }
 
+  const unsigned int last_index =
+      static_cast<unsigned int>(path.poses.size() - 1);
   new_index = advanceIndex(path, current_pose, current_index);
-  if (new_index >= path.poses.size() - 1)
+  if (new_index >= last_index)
   {
-    cmd_vel.linear.y = 0.0;
-    return true;
+    const double distance_to_end = poseDistance(current_pose, path.poses.back());
+    const double terminal_tolerance = std::max(0.0, terminal_xy_tolerance);
+    if (!terminal_goal || distance_to_end <= terminal_tolerance)
+    {
+      cmd_vel.linear.y = 0.0;
+      return true;
+    }
+
+    // Reaching the last sampled-path index is not the same as physically
+    // reaching the terminal topology point. Keep the final segment available
+    // to pure pursuit until base_link is inside the terminal XY tolerance.
+    new_index = last_index - 1;
   }
 
   // Interpolate the target at the exact arc-length lookahead.  Selecting the
@@ -101,7 +115,12 @@ bool PathFollower::computeCommand(const nav_msgs::Path &path,
   velocity = clamp(velocity, v_min_, v_max_);
 
   const double remain = remainingDistance(path, current_pose, new_index);
-  if (end_slow_distance_ > 1e-6 && remain < end_slow_distance_)
+  // The terminal reference waypoint is a controller handoff point, not a
+  // stopping goal. Keep normal curvature-limited B-spline speed until the
+  // real base_link position enters its XY tolerance; the next controller then
+  // takes over immediately. Ordinary path endings retain the existing ramp.
+  if (!terminal_goal &&
+      end_slow_distance_ > 1e-6 && remain < end_slow_distance_)
   {
     const double scale = clamp(remain / end_slow_distance_, 0.0, 1.0);
     velocity = std::max(v_min_, velocity * scale);

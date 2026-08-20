@@ -30,13 +30,15 @@ public:
 
   int pathVersion() const;
   unsigned int currentPathIndex() const;
-  void advanceCurrentPathIndex(unsigned int index);
+  void advanceCurrentPathIndex(unsigned int index,
+                               bool hold_before_path_end = false);
 
   bool needRegenerate() const;
   void markRegenerateAttempt();
 
   int goalIndex(const geometry_msgs::PoseStamped &goal) const;
   bool isMiddleGoal(const geometry_msgs::PoseStamped &goal, int *goal_index) const;
+  bool isTerminalReferenceGoal(int goal_index) const;
   bool referenceProgressReached(const geometry_msgs::PoseStamped &goal,
                                 const geometry_msgs::PoseStamped &current_pose,
                                 double pass_distance,

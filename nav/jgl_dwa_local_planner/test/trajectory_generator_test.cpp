@@ -6,6 +6,7 @@
 #include <vector>
 
 #include <jgl_dwa_local_planner/path_follower.h>
+#include <jgl_dwa_local_planner/reference_path_manager.h>
 #include <jgl_dwa_local_planner/trajectory_generator.h>
 
 #include <tf2/LinearMath/Quaternion.h>
@@ -224,6 +225,127 @@ TEST(PathFollowerAckermannOnly, CommandNeverUsesCrabOrReverse)
   EXPECT_EQ(0.0, cmd_vel.linear.y);
   EXPECT_LE(std::fabs(curvature), 1.9 + 1e-9);
   EXPECT_NEAR(cmd_vel.linear.x * curvature, cmd_vel.angular.z, 1e-9);
+}
+
+TEST(PathFollowerTerminalGoal, LastIndexKeepsDrivingUntilRealGoalTolerance)
+{
+  ros::Time::init();
+  jgl_dwa_local_planner::PathFollower follower;
+
+  nav_msgs::Path path;
+  path.header.frame_id = "map";
+  path.poses.push_back(makePose(0.0, 0.0));
+  path.poses.push_back(makePose(0.1, 0.0));
+  path.poses.push_back(makePose(0.2, 0.0));
+
+  geometry_msgs::Twist cmd_vel;
+  unsigned int new_index = 2;
+  double curvature = 0.0;
+  ASSERT_TRUE(follower.computeCommand(path, makePose(0.1, 0.0), 2,
+                                      cmd_vel, new_index, curvature,
+                                      true, 0.08));
+
+  // A terminal reference point is a seamless handoff point. It must keep the
+  // normal straight-line tracking speed instead of applying end slowdown.
+  EXPECT_NEAR(0.20, cmd_vel.linear.x, 1e-9);
+  EXPECT_EQ(0.0, cmd_vel.linear.y);
+  EXPECT_EQ(1U, new_index);
+}
+
+TEST(PathFollowerTerminalGoal, StopsOnlyInsideRealGoalTolerance)
+{
+  ros::Time::init();
+  jgl_dwa_local_planner::PathFollower follower;
+
+  nav_msgs::Path path;
+  path.header.frame_id = "map";
+  path.poses.push_back(makePose(0.0, 0.0));
+  path.poses.push_back(makePose(0.1, 0.0));
+  path.poses.push_back(makePose(0.2, 0.0));
+
+  geometry_msgs::Twist cmd_vel;
+  unsigned int new_index = 2;
+  double curvature = 0.0;
+  ASSERT_TRUE(follower.computeCommand(path, makePose(0.13, 0.0), 2,
+                                      cmd_vel, new_index, curvature,
+                                      true, 0.08));
+
+  EXPECT_EQ(0.0, cmd_vel.linear.x);
+  EXPECT_EQ(0.0, cmd_vel.linear.y);
+  EXPECT_EQ(0.0, cmd_vel.angular.z);
+}
+
+TEST(PathFollowerTerminalGoal, OrdinaryPassThroughStillStopsAtLastIndex)
+{
+  ros::Time::init();
+  jgl_dwa_local_planner::PathFollower follower;
+
+  nav_msgs::Path path;
+  path.header.frame_id = "map";
+  path.poses.push_back(makePose(0.0, 0.0));
+  path.poses.push_back(makePose(0.1, 0.0));
+  path.poses.push_back(makePose(0.2, 0.0));
+
+  geometry_msgs::Twist cmd_vel;
+  unsigned int new_index = 2;
+  double curvature = 0.0;
+  ASSERT_TRUE(follower.computeCommand(path, makePose(0.1, 0.0), 2,
+                                      cmd_vel, new_index, curvature));
+
+  EXPECT_EQ(0.0, cmd_vel.linear.x);
+  EXPECT_EQ(0.0, cmd_vel.angular.z);
+}
+
+TEST(PathFollowerTerminalGoal, SimulatedLastSegmentRunsIntoTolerance)
+{
+  ros::Time::init();
+  jgl_dwa_local_planner::PathFollower follower;
+
+  nav_msgs::Path path;
+  path.header.frame_id = "map";
+  path.poses.push_back(makePose(0.0, 0.0));
+  path.poses.push_back(makePose(0.1, 0.0));
+  path.poses.push_back(makePose(0.2, 0.0));
+
+  geometry_msgs::PoseStamped pose = makePose(0.08, 0.0);
+  bool stopped = false;
+  for (int cycle = 0; cycle < 100; ++cycle)
+  {
+    geometry_msgs::Twist cmd_vel;
+    unsigned int new_index = 2;
+    double curvature = 0.0;
+    ASSERT_TRUE(follower.computeCommand(path, pose, 2,
+                                        cmd_vel, new_index, curvature,
+                                        true, 0.08));
+    if (cmd_vel.linear.x == 0.0)
+    {
+      stopped = true;
+      break;
+    }
+    pose.pose.position.x += cmd_vel.linear.x * 0.1;
+  }
+
+  EXPECT_TRUE(stopped);
+  EXPECT_LE(std::fabs(path.poses.back().pose.position.x -
+                      pose.pose.position.x),
+            0.08 + 1e-9);
+}
+
+TEST(ReferencePathManagerTerminalGoal, HoldsIndexOnLastSegmentUntilReached)
+{
+  jgl_dwa_local_planner::ReferencePathManager manager;
+  nav_msgs::Path path;
+  path.header.frame_id = "map";
+  path.poses.push_back(makePose(0.0, 0.0));
+  path.poses.push_back(makePose(0.1, 0.0));
+  path.poses.push_back(makePose(0.2, 0.0));
+  manager.setReferencePath(path);
+
+  manager.advanceCurrentPathIndex(2);
+  ASSERT_EQ(2U, manager.currentPathIndex());
+
+  manager.advanceCurrentPathIndex(2, true);
+  EXPECT_EQ(1U, manager.currentPathIndex());
 }
 
 TEST(PathFollowerAntiShake, LookaheadTargetIsInterpolatedAlongPath)

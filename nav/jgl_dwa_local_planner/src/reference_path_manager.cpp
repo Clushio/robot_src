@@ -126,7 +126,8 @@ unsigned int ReferencePathManager::currentPathIndex() const
   return current_path_index_;
 }
 
-void ReferencePathManager::advanceCurrentPathIndex(unsigned int index)
+void ReferencePathManager::advanceCurrentPathIndex(unsigned int index,
+                                                   bool hold_before_path_end)
 {
   boost::mutex::scoped_lock lock(mutex_);
   if (!have_reference_path_ || reference_path_.poses.empty())
@@ -134,8 +135,12 @@ void ReferencePathManager::advanceCurrentPathIndex(unsigned int index)
     current_path_index_ = 0;
     return;
   }
-  const unsigned int max_index =
+  unsigned int max_index =
       static_cast<unsigned int>(reference_path_.poses.size() - 1);
+  if (hold_before_path_end && max_index > 0)
+  {
+    --max_index;
+  }
   current_path_index_ = std::min(max_index, std::max(current_path_index_, index));
 }
 
@@ -200,6 +205,13 @@ bool ReferencePathManager::isMiddleGoal(const geometry_msgs::PoseStamped &goal,
 
   boost::mutex::scoped_lock lock(mutex_);
   return index > 1 && index < static_cast<int>(topo_waypoints_.size()) - 1;
+}
+
+bool ReferencePathManager::isTerminalReferenceGoal(int goal_index) const
+{
+  boost::mutex::scoped_lock lock(mutex_);
+  return topo_waypoints_.size() >= 4 &&
+         goal_index == static_cast<int>(topo_waypoints_.size()) - 2;
 }
 
 bool ReferencePathManager::referenceProgressReached(

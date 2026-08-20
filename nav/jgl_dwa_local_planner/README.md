@@ -50,6 +50,14 @@ reference_curve_type: bspline
 这组参数存在联动。增大平滑会降低抖动，但也可能造成转弯响应滞后和路径偏差。修改后
 需要同时看曲率、轮组转角、路径误差和障碍净空。
 
+B 样条中间拓扑点和末端使用独立到达语义：中间点按
+`reference_middle_pass_distance` 的路径进度连续通过；倒数第二个拓扑点是 B 样条
+末端，只有 `map->base_link` 的真实距离进入 `reference_terminal_xy_tolerance` 后才
+发布通过状态。到达最后一个路径采样索引但尚未进入末端容差时，控制器继续跟踪最后
+一段，不把“索引走完”误认为“车体到点”。该末端是无停车交接点，因此不应用
+`end_slow_distance` 的路径末端减速；曲率限速、障碍物分级减速和 Collision Monitor
+安全缩放仍然有效。
+
 ## 堵塞和模式
 
 局部规划器发布 `/bspline_status` 给 AutoNAV。AutoNAV 决定是否封锁拓扑边和重新选路。

@@ -2672,18 +2672,28 @@ private:
                 {
                     const bool bspline_tracking =
                         referenceTrackingOrPassed(topology_path_index, goal_start_time);
-                    ROS_INFO("Pass-through waypoint P%d reached by XY distance %.2f m%s.",
-                             target_index, target_distance,
-                             bspline_tracking ?
-                                 "; keep the B-spline action live for seamless preemption" : "");
-                    if (!bspline_tracking)
+                    // A live B-spline reference owns its waypoint-completion
+                    // policy.  In particular, its terminal reference waypoint
+                    // must run into reference_terminal_xy_tolerance instead of
+                    // being preempted by this legacy 0.20 m fallback.
+                    if (bspline_tracking)
                     {
-                        global_ac->cancelGoal();
+                        ROS_DEBUG_THROTTLE(
+                            1.0,
+                            "Ignore legacy XY arrival for B-spline waypoint P%d "
+                            "at %.3f m; wait for REFERENCE_PASSED.",
+                            target_index, target_distance);
                     }
-                    current_pose_index = target_index;
-                    active_next_index_ = -1;
-                    publishTopologyMarkers();
-                    return GOAL_REACHED;
+                    else
+                    {
+                        ROS_INFO("Pass-through waypoint P%d reached by XY distance %.2f m.",
+                                 target_index, target_distance);
+                        global_ac->cancelGoal();
+                        current_pose_index = target_index;
+                        active_next_index_ = -1;
+                        publishTopologyMarkers();
+                        return GOAL_REACHED;
+                    }
                 }
                 if (final_goal && target_distance <= waypoint_reached_distance_)
                 {

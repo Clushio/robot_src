@@ -139,6 +139,8 @@ namespace jgl_dwa_local_planner
     enable_bspline_reference_path_ = false;
     reference_safe_distance_ = 0.25;
     reference_fallback_boundary_distance_ = 0.15;
+    reference_middle_pass_distance_ = 0.25;
+    reference_terminal_xy_tolerance_ = 0.08;
     obstacle_wait_time_ = 10.0;
     reference_obstacle_slowdown_distance_ = 1.0;
     reference_obstacle_stop_distance_ = 0.7;
@@ -721,12 +723,14 @@ namespace jgl_dwa_local_planner
   }
 
   bool DWAPlannerROS::syncReferencePathIndex(double *distance_to_reference,
-                                             unsigned int *nearest_index)
+                                             unsigned int *nearest_index,
+                                             bool hold_before_path_end)
   {
     unsigned int nearest = reference_path_manager_.currentPathIndex();
     const double distance = reference_path_manager_.distanceToReference(current_pose_,
                                                                        &nearest);
-    reference_path_manager_.advanceCurrentPathIndex(nearest);
+    reference_path_manager_.advanceCurrentPathIndex(nearest,
+                                                    hold_before_path_end);
     if (distance_to_reference != NULL)
     {
       *distance_to_reference = distance;
@@ -738,7 +742,7 @@ namespace jgl_dwa_local_planner
     return distance <= path_deviation_replan_threshold_;
   }
 
-  bool DWAPlannerROS::referenceMiddleGoalReachedByProgress(
+  bool DWAPlannerROS::referenceGoalReached(
       unsigned int *goal_path_index,
       double *remaining_reference_distance,
       double *goal_distance)
@@ -754,13 +758,42 @@ namespace jgl_dwa_local_planner
 
     publishReferenceStatus(REFERENCE_ACTIVE);
 
+    const bool terminal_goal =
+        reference_path_manager_.isTerminalReferenceGoal(
+            current_topology_goal_index_);
+    if (terminal_goal)
+    {
+      const nav_msgs::Path reference_path =
+          reference_path_manager_.referencePath();
+      const double direct_goal_distance =
+          std::hypot(current_pose_.pose.position.x -
+                         linePath.back().pose.position.x,
+                     current_pose_.pose.position.y -
+                         linePath.back().pose.position.y);
+      if (goal_path_index != NULL)
+      {
+        *goal_path_index = reference_path.poses.empty()
+                               ? 0U
+                               : static_cast<unsigned int>(
+                                     reference_path.poses.size() - 1);
+      }
+      if (remaining_reference_distance != NULL)
+      {
+        *remaining_reference_distance = direct_goal_distance;
+      }
+      if (goal_distance != NULL)
+      {
+        *goal_distance = direct_goal_distance;
+      }
+      return direct_goal_distance <= reference_terminal_xy_tolerance_;
+    }
+
     unsigned int reached_goal_path_index = 0;
     double reached_remaining_reference_distance = 0.0;
     double reached_goal_distance = 0.0;
-    const double pass_distance =
-        std::max(static_cast<double>(xdis), 0.5 * path_follower_.lookaheadDistance());
     const bool reached = reference_path_manager_.referenceProgressReached(
-        linePath.back(), current_pose_, pass_distance, &reached_goal_path_index,
+        linePath.back(), current_pose_, reference_middle_pass_distance_,
+        &reached_goal_path_index,
         &reached_remaining_reference_distance, &reached_goal_distance);
 
     if (goal_path_index != NULL)
@@ -990,9 +1023,23 @@ namespace jgl_dwa_local_planner
 
     updateLineGoalRelativeState();
 
+    const bool terminal_reference_goal =
+        reference_path_manager_.isTerminalReferenceGoal(
+            current_topology_goal_index_);
+    const double terminal_goal_distance =
+        std::hypot(current_pose_.pose.position.x -
+                       linePath.back().pose.position.x,
+                   current_pose_.pose.position.y -
+                       linePath.back().pose.position.y);
+    const bool terminal_goal_unreached =
+        terminal_reference_goal &&
+        terminal_goal_distance > reference_terminal_xy_tolerance_;
+
     double distance_to_reference = 0.0;
     unsigned int nearest_reference_index = 0;
-    if (!syncReferencePathIndex(&distance_to_reference, &nearest_reference_index))
+    if (!syncReferencePathIndex(&distance_to_reference,
+                                &nearest_reference_index,
+                                terminal_goal_unreached))
     {
       stopCmd(cmd_vel);
       publishReferenceStatus(REFERENCE_PATH_DEVIATED);
@@ -1019,19 +1066,30 @@ namespace jgl_dwa_local_planner
     unsigned int goal_path_index = 0;
     double remaining_to_goal_on_reference = 0.0;
     double direct_goal_distance = 0.0;
-    if (referenceMiddleGoalReachedByProgress(&goal_path_index,
-                                             &remaining_to_goal_on_reference,
-                                             &direct_goal_distance))
+    if (referenceGoalReached(&goal_path_index,
+                             &remaining_to_goal_on_reference,
+                             &direct_goal_distance))
     {
       publishReferenceStatus(REFERENCE_PASSED);
-      ROS_INFO_THROTTLE(1.0,
-                        "JGL reference path: pass-through goal idx=%d reached; keep following without stopping "
-                        "(path_idx=%u target_path_idx=%u remain=%.3f direct_dist=%.3f).",
-                        current_topology_goal_index_,
-                        reference_path_manager_.currentPathIndex(),
-                        goal_path_index,
-                        remaining_to_goal_on_reference,
-                        direct_goal_distance);
+      if (terminal_reference_goal)
+      {
+        ROS_INFO_THROTTLE(
+            1.0,
+            "JGL reference path: terminal goal idx=%d reached by base_link XY distance %.3f <= %.3f.",
+            current_topology_goal_index_, direct_goal_distance,
+            reference_terminal_xy_tolerance_);
+      }
+      else
+      {
+        ROS_INFO_THROTTLE(1.0,
+                          "JGL reference path: pass-through goal idx=%d reached; keep following without stopping "
+                          "(path_idx=%u target_path_idx=%u remain=%.3f direct_dist=%.3f).",
+                          current_topology_goal_index_,
+                          reference_path_manager_.currentPathIndex(),
+                          goal_path_index,
+                          remaining_to_goal_on_reference,
+                          direct_goal_distance);
+      }
     }
 
     double reference_obstacle_distance =
@@ -1067,7 +1125,9 @@ namespace jgl_dwa_local_planner
     double curvature = 0.0;
     if (!path_follower_.computeCommand(reference_path, current_pose_,
                                        reference_path_manager_.currentPathIndex(),
-                                       cmd_vel, new_index, curvature))
+                                       cmd_vel, new_index, curvature,
+                                       terminal_reference_goal,
+                                       reference_terminal_xy_tolerance_))
     {
       return false;
     }
@@ -1096,9 +1156,9 @@ namespace jgl_dwa_local_planner
           reference_obstacle_distance, obstacle_scale);
     }
 
-    if (referenceMiddleGoalReachedByProgress(&goal_path_index,
-                                             &remaining_to_goal_on_reference,
-                                             &direct_goal_distance))
+    if (referenceGoalReached(&goal_path_index,
+                             &remaining_to_goal_on_reference,
+                             &direct_goal_distance))
     {
       publishReferenceStatus(REFERENCE_PASSED);
     }
@@ -1152,6 +1212,10 @@ namespace jgl_dwa_local_planner
         private_nh.param("safe_distance", reference_safe_distance_, 0.25);
         private_nh.param("reference_fallback_boundary_distance",
                          reference_fallback_boundary_distance_, 0.15);
+        private_nh.param("reference_middle_pass_distance",
+                         reference_middle_pass_distance_, 0.25);
+        private_nh.param("reference_terminal_xy_tolerance",
+                         reference_terminal_xy_tolerance_, 0.08);
         private_nh.param("obstacle_wait_time", obstacle_wait_time_, 10.0);
         private_nh.param("obstacle_slowdown_distance",
                          reference_obstacle_slowdown_distance_, 1.0);
@@ -1182,6 +1246,10 @@ namespace jgl_dwa_local_planner
         reference_safe_distance_ = std::max(0.0, reference_safe_distance_);
         reference_fallback_boundary_distance_ =
             std::max(0.02, reference_fallback_boundary_distance_);
+        reference_middle_pass_distance_ =
+            std::max(0.02, reference_middle_pass_distance_);
+        reference_terminal_xy_tolerance_ =
+            std::max(0.01, reference_terminal_xy_tolerance_);
         obstacle_wait_time_ = std::max(0.0, obstacle_wait_time_);
         reference_obstacle_stop_distance_ =
             std::max(0.0, reference_obstacle_stop_distance_);
@@ -1390,9 +1458,9 @@ bool DWAPlannerROS::isGoalReached()
         unsigned int goal_path_index = 0;
         double remaining_to_goal_on_reference = 0.0;
         double direct_goal_distance = 0.0;
-        if (referenceMiddleGoalReachedByProgress(&goal_path_index,
-                                                 &remaining_to_goal_on_reference,
-                                                 &direct_goal_distance))
+        if (referenceGoalReached(&goal_path_index,
+                                 &remaining_to_goal_on_reference,
+                                 &direct_goal_distance))
         {
             reference_goal_reached_ = true;
             ROS_INFO("Goal reached by reference path progress "

@@ -248,9 +248,9 @@ namespace jgl_dwa_local_planner
                                unsigned int mx, unsigned int my,
                                int radius_cells) const;
       void updateLineGoalRelativeState();
-      bool referenceMiddleGoalReachedByProgress(unsigned int *goal_path_index,
-                                                double *remaining_reference_distance,
-                                                double *goal_distance);
+      bool referenceGoalReached(unsigned int *goal_path_index,
+                                double *remaining_reference_distance,
+                                double *goal_distance);
       void publishReferencePathMarker(const nav_msgs::Path &path,
                                       TrajectoryGenerator::PathMode path_mode) const;
       bool referencePathCanFollowGoal(int goal_index) const;
@@ -259,7 +259,8 @@ namespace jgl_dwa_local_planner
                                         double *heading_error) const;
       void forceLegacyLineRotate(const char *reason);
       bool syncReferencePathIndex(double *distance_to_reference,
-                                  unsigned int *nearest_index);
+                                  unsigned int *nearest_index,
+                                  bool hold_before_path_end = false);
 
       tf2_ros::Buffer *tf_; ///< @brief Used for transforming point clouds
 
@@ -296,6 +297,8 @@ namespace jgl_dwa_local_planner
       bool enable_bspline_reference_path_;
       double reference_safe_distance_;
       double reference_fallback_boundary_distance_;
+      double reference_middle_pass_distance_;
+      double reference_terminal_xy_tolerance_;
       double obstacle_wait_time_;
       double reference_obstacle_slowdown_distance_;
       double reference_obstacle_stop_distance_;

@@ -22,7 +22,9 @@ public:
                       unsigned int current_index,
                       geometry_msgs::Twist &cmd_vel,
                       unsigned int &new_index,
-                      double &curvature);
+                      double &curvature,
+                      bool terminal_goal = false,
+                      double terminal_xy_tolerance = 0.0);
 
   // Shared by the reference-path follower and the legacy forward-tracking
   // state. Input and output are path curvature in 1/m.

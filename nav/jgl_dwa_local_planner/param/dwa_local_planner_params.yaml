@@ -29,9 +29,16 @@ DWAPlannerROS:
   # max_curvature used by path generation.
   tracking_max_curvature: 1.90
   reference_fallback_boundary_distance: 0.15
+  # Ordinary B-spline waypoints are progress markers and remain smooth
+  # pass-through points. The final B-spline waypoint is completed separately
+  # by the real map->base_link XY distance below.
+  reference_middle_pass_distance: 0.25
+  reference_terminal_xy_tolerance: 0.08
   lookahead_distance: 0.50
   v_min: 0.04
   v_max: 0.20
+  # Applied to ordinary path endings only. The terminal B-spline handoff point
+  # keeps normal curvature-limited speed until its 0.08 m XY tolerance.
   end_slow_distance: 0.80
   # Runtime B-spline obstacle handling.  Arc-length distance to the first
   # blocked reference-path sample selects 100/75/50/25/0% candidate speed.
