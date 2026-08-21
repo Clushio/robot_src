@@ -2756,6 +2756,36 @@ private:
         return GOAL_FAILED;
     }
 
+    std::size_t initialTopologyExecutionStart(
+        const std::vector<int> &path_indices)
+    {
+        // Never skip a one-node path: that node is the real final goal and
+        // must still complete the normal XY + yaw terminal state machine.
+        if (path_indices.size() <= 1 || !validIndex(path_indices.front()))
+        {
+            return 0;
+        }
+
+        geometry_msgs::PoseStamped current_pose;
+        if (!getCurrentRobotPose(current_pose))
+        {
+            return 0;
+        }
+        const double anchor_distance =
+            distanceToNode(current_pose, path_indices.front());
+        if (!std::isfinite(anchor_distance) || anchor_distance < 0.0 ||
+            anchor_distance > waypoint_reached_distance_)
+        {
+            return 0;
+        }
+
+        current_pose_index = path_indices.front();
+        ROS_INFO("Starting topology anchor P%d confirmed at %.3f m; "
+                 "begin motion with the next path node.",
+                 current_pose_index, anchor_distance);
+        return 1;
+    }
+
     bool runFixedTopologyMission(int target_index,
                                  const std::vector<int> &path_indices)
     {
@@ -2766,7 +2796,9 @@ private:
 
         bool start_segment_active = true;
 
-        for (std::size_t i = 0; i < path_indices.size(); ++i)
+        const std::size_t execution_start =
+            initialTopologyExecutionStart(path_indices);
+        for (std::size_t i = execution_start; i < path_indices.size(); ++i)
         {
             const int next_index = path_indices[i];
             if (!validIndex(next_index))
@@ -2809,8 +2841,8 @@ private:
                           next_index);
                 return false;
             }
-            // i=0 acquires/confirms P0. Keep the terminal profile through the
-            // complete P0->P1 departure edge, then expand back to 0.15 m.
+            // Keep the terminal profile through the complete first departure
+            // edge, then expand back to the normal padding.
             if (i >= 1)
             {
                 start_segment_active = false;
@@ -2838,7 +2870,8 @@ private:
         int start_index = path_indices.empty() ? nearestPoseIndex() : path_indices.front();
         const int mission_start_index = start_index;
         bool start_segment_active = true;
-        std::size_t execution_start = 0;
+        std::size_t execution_start =
+            initialTopologyExecutionStart(path_indices);
         int replan_count = 0;
         const int max_replans = std::max(3, static_cast<int>(target_poses.size()) * 2);
 

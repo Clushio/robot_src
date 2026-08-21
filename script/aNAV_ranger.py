@@ -21,6 +21,7 @@ import os
 import signal
 
 import rospy
+import tf2_ros
 from sensor_msgs.msg import Joy
 from nav_msgs.msg import Odometry
 from std_msgs.msg import String
@@ -30,6 +31,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 from tagReader import SerialTagReader
 from fault_center import DiagnosticInbox, FaultCenterDialog
+from loop_start_policy import select_loop_start
 import threading
 
 
@@ -121,6 +123,7 @@ AUTONAV_DEFAULTS = {
 }
 RVIZ_RECORD_POSE_TOPIC = '/anav/record_pose'
 RVIZ_RECORD_MARKER_TOPIC = '/anav/record_markers'
+LOOP_START_POSE_TIMEOUT = 0.30
 
 
 class TerminalTabProcess:
@@ -260,6 +263,8 @@ class MyWindow(QWidget):
         self.joy_pub = None
         self.safety_pub = None
         self.finish_motion_proxy = None
+        self.tf_buffer = None
+        self.tf_listener = None
         self.task_status_sub = None
         self.localization_odom_sub = None
         self.base_odom_sub = None
@@ -312,6 +317,8 @@ class MyWindow(QWidget):
         if self.ros_available:
             try:
                 rospy.init_node('upmachine_publisher', anonymous=True, disable_signals=True)
+                self.tf_buffer = tf2_ros.Buffer(cache_time=rospy.Duration(5.0))
+                self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
                 self.joy_pub = rospy.Publisher('/joy', Joy, queue_size=10)
                 self.safety_pub = rospy.Publisher(
                     '/cmd_vel/safety', Twist, queue_size=1
@@ -1954,6 +1961,64 @@ class MyWindow(QWidget):
         if not self.loop_waiting_for_nav or not self.loop_pending_targets:
             return
         targets = self.loop_pending_targets
+        try:
+            if self.tf_buffer is None:
+                raise RuntimeError('TF buffer is unavailable')
+            base_transform = self.tf_buffer.lookup_transform(
+                'map', 'base_link', rospy.Time(0), rospy.Duration(0.20)
+            )
+            current_x = base_transform.transform.translation.x
+            current_y = base_transform.transform.translation.y
+            transform_stamp = base_transform.header.stamp
+            localization_age = (
+                (rospy.Time.now() - transform_stamp).to_sec()
+                if transform_stamp != rospy.Time() else math.inf
+            )
+        except (tf2_ros.LookupException,
+                tf2_ros.ConnectivityException,
+                tf2_ros.ExtrapolationException,
+                RuntimeError) as error:
+            self.loop_pending_targets = None
+            self.loop_waiting_for_nav = False
+            self.set_loop_controls_running(False)
+            message = (
+                'map→base_link TF 不可用，循环未启动：'
+                f'{error}'
+            )
+            self.loop_state_label.setText(message)
+            self.set_status(message, 'error')
+            return
+
+        near_distance = float(
+            self.nav_parameter_widgets['waypoint_reached_distance'].value()
+        )
+        try:
+            initial_target_offset, anchor_offset, distance_a, distance_b = (
+                select_loop_start(
+                    targets, current_x, current_y, localization_age,
+                    near_distance, LOOP_START_POSE_TIMEOUT
+                )
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            self.loop_pending_targets = None
+            self.loop_waiting_for_nav = False
+            self.set_loop_controls_running(False)
+            message = f'循环起点判断失败，循环未启动：{error}'
+            self.loop_state_label.setText(message)
+            self.set_status(message, 'error')
+            return
+
+        initial_current_id = self.currentID
+        start_description = f'首程前往 {targets[0]["name"]}'
+        if anchor_offset is not None:
+            anchor = targets[anchor_offset]
+            initial_current_id = anchor['request_id']
+            start_description = (
+                f'当前位置距 {anchor["name"]} '
+                f'{(distance_a, distance_b)[anchor_offset]:.2f} m，'
+                f'将其作为起始锚点；首程前往 '
+                f'{targets[initial_target_offset]["name"]}'
+            )
         self.loop_pending_targets = None
         self.loop_waiting_for_nav = False
         self.loop_running = True
@@ -1972,16 +2037,18 @@ class MyWindow(QWidget):
         self.loop_count_label.setText('已完成单程：0')
         self.loop_state_label.setText(
             f'循环已启动：{targets[0]["name"]} ↔ {targets[1]["name"]}；'
-            f'{"固定路线" if self.loop_pending_run_mode == 2 else "允许绕路"}'
+            f'{"固定路线" if self.loop_pending_run_mode == 2 else "允许绕路"}；'
+            f'{start_description}'
         )
         self.set_status(
-            f'循环已启动：{targets[0]["name"]} ↔ {targets[1]["name"]}。',
+            f'循环已启动：{start_description}。',
             'success',
         )
         self.loop_thread = threading.Thread(
             target=self.run_loop_navigation,
             args=(generation, targets, self.loop_stop_event,
-                  self.loop_pending_run_mode, loop_endpoint_dwell_time),
+                  self.loop_pending_run_mode, loop_endpoint_dwell_time,
+                  initial_target_offset, initial_current_id),
             daemon=True,
         )
         self.loop_thread.start()
@@ -2016,10 +2083,11 @@ class MyWindow(QWidget):
         return success, detail or ('已到达' if success else '导航服务未返回成功')
 
     def run_loop_navigation(self, generation, targets, stop_event, run_mode,
-                            endpoint_dwell_time):
-        current_id = self.currentID
+                            endpoint_dwell_time, initial_target_offset,
+                            initial_current_id):
+        current_id = initial_current_id
         completed = 0
-        target_offset = 0
+        target_offset = initial_target_offset
         while not stop_event.is_set():
             target = targets[target_offset]
             self.loop_update_requested.emit(
