@@ -260,6 +260,28 @@ class CollisionMonitorNodeTest(unittest.TestCase):
         self._set_command('nav', linear_x=0.20)
         self._wait_for_ok_output(0.20, 0.0, timeout=3.0)
 
+        # Direction limits constrain commands, not measured state. A small
+        # residual reverse velocity from chassis odometry must remain in the
+        # rollout initial state instead of being rejected as an unsupported
+        # navigation command.
+        with self._lock:
+            self._odom_linear_x = -0.036
+        self._set_command('nav', linear_x=0.10)
+        status, output = self._wait_for_ok_output(0.10, 0.0)
+        self.assertEqual('OK', status['state'])
+        self.assertAlmostEqual(-0.036,
+                               float(status['measured_linear_x']), places=3)
+        with self._lock:
+            self._odom_linear_x = 0.0
+
+        # Navigation still cannot request reverse motion.
+        self._set_command('nav', linear_x=-0.01)
+        status, output = self._wait_for_state(
+            'UNSUPPORTED_MOTION', 'UNSUPPORTED_COMMAND_DOF')
+        self.assertAlmostEqual(0.0, output.linear.x)
+        self._set_command('nav', linear_x=0.20)
+        self._wait_for_ok_output(0.20, 0.0)
+
         obstacle_map = self._make_map()
         self._set_cell(obstacle_map, 0.76, 0.0, 100)
         with self._lock:

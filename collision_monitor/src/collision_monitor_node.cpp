@@ -589,8 +589,7 @@ class CollisionMonitorNode {
     return true;
   }
 
-  bool SupportedMeasuredMotion(const MotionProfile& profile,
-                               const geometry_msgs::Twist& measured,
+  bool SupportedMeasuredMotion(const geometry_msgs::Twist& measured,
                                std::string& reason) const {
     if (!IsFinite(measured)) {
       reason = "NON_FINITE_MEASURED_MOTION";
@@ -602,13 +601,10 @@ class CollisionMonitorNode {
       reason = "UNSUPPORTED_MEASURED_DOF";
       return false;
     }
-    if ((!profile.allow_reverse &&
-         measured.linear.x < -transition_stopped_linear_) ||
-        (!profile.allow_lateral &&
-         std::abs(measured.linear.y) > transition_stopped_linear_)) {
-      reason = "UNSUPPORTED_MEASURED_DOF";
-      return false;
-    }
+    // Direction restrictions are command policy, not state validity.  A
+    // measured reverse or lateral velocity can be residual chassis motion and
+    // must remain in the initial state so its swept volume is checked.  The
+    // candidate command is still constrained by SupportedCommand().
     return true;
   }
 
@@ -827,8 +823,7 @@ class CollisionMonitorNode {
       profile = ProfileForSource(candidate_.source);
     }
 
-    if (!SupportedMeasuredMotion(*profile, odom_.twist.twist,
-                                 unsupported_reason)) {
+    if (!SupportedMeasuredMotion(odom_.twist.twist, unsupported_reason)) {
       ForceStoppedScale();
       state = "UNSUPPORTED_MOTION";
       reason = unsupported_reason;

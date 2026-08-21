@@ -145,6 +145,26 @@ TEST(CollisionCheckerTest, ZeroTargetStillChecksMeasuredStoppingMotion) {
   EXPECT_TRUE(result.collision);
 }
 
+TEST(CollisionCheckerTest, ReverseMeasuredVelocityChecksRearStoppingMotion) {
+  CollisionChecker checker = MakeChecker();
+  nav_msgs::OccupancyGrid static_map = MakeGrid(1200, 1200, 0.005);
+  nav_msgs::OccupancyGrid local_map = MakeGrid(1200, 1200, 0.005);
+  SetCell(static_map, -0.375, 0.0, 100);
+
+  MotionState initial;
+  EXPECT_FALSE(checker.poseCollides(initial.pose, static_map,
+                                    StaticPolicy()));
+  initial.linear_x = -0.04;
+  RolloutOptions options;
+  options.linear_decel = 0.5;
+  CollisionResult result = checker.simulate(
+      initial, initial.linear_x, 0.0, 0.0, 0.30, static_map, StaticPolicy(),
+      local_map, LocalPolicy(), options);
+  EXPECT_TRUE(result.collision);
+  EXPECT_TRUE(result.static_collision);
+  EXPECT_GT(result.collision_time, 0.0);
+}
+
 TEST(CollisionCheckerTest, ZeroTargetChecksMeasuredLateralStoppingMotion) {
   CollisionChecker checker = MakeChecker(0.08);
   nav_msgs::OccupancyGrid static_map = MakeGrid(600, 600, 0.01);
