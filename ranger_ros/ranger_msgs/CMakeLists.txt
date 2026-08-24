@@ -22,7 +22,11 @@ set(msg_file
 "msg/DriverState.msg"
 "msg/MotionState.msg"
 "msg/MotorState.msg"
+"msg/RangerLightCmd.msg"
+"msg/RsStatus.msg"
 "msg/SystemState.msg"
+"srv/TriggerParkMode.srv"
+"action/StopAndCenter.action"
 )
 
 rosidl_generate_interfaces(${PROJECT_NAME}
