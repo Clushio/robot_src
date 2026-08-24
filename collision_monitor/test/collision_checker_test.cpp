@@ -2,18 +2,16 @@
 #include <limits>
 #include <vector>
 
-#include <collision_monitor/collision_checker.h>
-#include <gtest/gtest.h>
-#include <tf2/LinearMath/Quaternion.h>
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include "collision_monitor/collision_checker.h"
+#include "gtest/gtest.h"
 
 namespace collision_monitor {
 namespace {
 
-nav_msgs::OccupancyGrid MakeGrid(unsigned int width = 120,
+nav_msgs::msg::OccupancyGrid MakeGrid(unsigned int width = 120,
                                  unsigned int height = 120,
                                  double resolution = 0.05) {
-  nav_msgs::OccupancyGrid grid;
+  nav_msgs::msg::OccupancyGrid grid;
   grid.header.frame_id = "map";
   grid.info.width = width;
   grid.info.height = height;
@@ -25,7 +23,7 @@ nav_msgs::OccupancyGrid MakeGrid(unsigned int width = 120,
   return grid;
 }
 
-void SetCell(nav_msgs::OccupancyGrid& grid, double x, double y, int value) {
+void SetCell(nav_msgs::msg::OccupancyGrid& grid, double x, double y, int value) {
   const int mx = static_cast<int>(
       std::floor((x - grid.info.origin.position.x) / grid.info.resolution));
   const int my = static_cast<int>(
@@ -38,7 +36,7 @@ void SetCell(nav_msgs::OccupancyGrid& grid, double x, double y, int value) {
 }
 
 CollisionChecker MakeChecker(double padding = 0.0) {
-  std::vector<geometry_msgs::Point> footprint(4);
+  std::vector<geometry_msgs::msg::Point> footprint(4);
   footprint[0].x = 0.36;
   footprint[0].y = 0.25;
   footprint[1].x = 0.36;
@@ -70,7 +68,7 @@ GridPolicy LocalPolicy() {
 
 TEST(CollisionCheckerTest, RectangleUsesPoseYaw) {
   CollisionChecker checker = MakeChecker();
-  nav_msgs::OccupancyGrid grid = MakeGrid(600, 600, 0.01);
+  nav_msgs::msg::OccupancyGrid grid = MakeGrid(600, 600, 0.01);
   SetCell(grid, 0.0, 0.34, 100);
 
   Pose2D pose;
@@ -81,10 +79,10 @@ TEST(CollisionCheckerTest, RectangleUsesPoseYaw) {
 
 TEST(CollisionCheckerTest, RotationSweepFindsCornerCollision) {
   CollisionChecker checker = MakeChecker();
-  nav_msgs::OccupancyGrid local_map = MakeGrid(600, 600, 0.01);
+  nav_msgs::msg::OccupancyGrid local_map = MakeGrid(600, 600, 0.01);
   RolloutOptions options;
   for (const double direction : {-1.0, 1.0}) {
-    nav_msgs::OccupancyGrid static_map = MakeGrid(600, 600, 0.01);
+    nav_msgs::msg::OccupancyGrid static_map = MakeGrid(600, 600, 0.01);
     SetCell(static_map, 0.24, direction * 0.34, 100);
 
     MotionState initial;
@@ -101,7 +99,7 @@ TEST(CollisionCheckerTest, RotationSweepFindsCornerCollision) {
 TEST(CollisionCheckerTest, PaddingExpandsCheckedFootprint) {
   CollisionChecker raw_checker = MakeChecker(0.0);
   CollisionChecker padded_checker = MakeChecker(0.05);
-  nav_msgs::OccupancyGrid grid = MakeGrid(600, 600, 0.01);
+  nav_msgs::msg::OccupancyGrid grid = MakeGrid(600, 600, 0.01);
   SetCell(grid, 0.395, 0.0, 100);
 
   Pose2D pose;
@@ -111,8 +109,8 @@ TEST(CollisionCheckerTest, PaddingExpandsCheckedFootprint) {
 
 TEST(CollisionCheckerTest, StraightAndArcRollouts) {
   CollisionChecker checker = MakeChecker();
-  nav_msgs::OccupancyGrid static_map = MakeGrid();
-  nav_msgs::OccupancyGrid local_map = MakeGrid();
+  nav_msgs::msg::OccupancyGrid static_map = MakeGrid();
+  nav_msgs::msg::OccupancyGrid local_map = MakeGrid();
   SetCell(local_map, 0.80, 0.0, 100);
 
   MotionState initial;
@@ -131,8 +129,8 @@ TEST(CollisionCheckerTest, StraightAndArcRollouts) {
 
 TEST(CollisionCheckerTest, ZeroTargetStillChecksMeasuredStoppingMotion) {
   CollisionChecker checker = MakeChecker();
-  nav_msgs::OccupancyGrid static_map = MakeGrid();
-  nav_msgs::OccupancyGrid local_map = MakeGrid();
+  nav_msgs::msg::OccupancyGrid static_map = MakeGrid();
+  nav_msgs::msg::OccupancyGrid local_map = MakeGrid();
   SetCell(static_map, 0.43, 0.0, 100);
 
   MotionState initial;
@@ -147,8 +145,8 @@ TEST(CollisionCheckerTest, ZeroTargetStillChecksMeasuredStoppingMotion) {
 
 TEST(CollisionCheckerTest, ReverseMeasuredVelocityChecksRearStoppingMotion) {
   CollisionChecker checker = MakeChecker();
-  nav_msgs::OccupancyGrid static_map = MakeGrid(1200, 1200, 0.005);
-  nav_msgs::OccupancyGrid local_map = MakeGrid(1200, 1200, 0.005);
+  nav_msgs::msg::OccupancyGrid static_map = MakeGrid(1200, 1200, 0.005);
+  nav_msgs::msg::OccupancyGrid local_map = MakeGrid(1200, 1200, 0.005);
   SetCell(static_map, -0.375, 0.0, 100);
 
   MotionState initial;
@@ -167,8 +165,8 @@ TEST(CollisionCheckerTest, ReverseMeasuredVelocityChecksRearStoppingMotion) {
 
 TEST(CollisionCheckerTest, ZeroTargetChecksMeasuredLateralStoppingMotion) {
   CollisionChecker checker = MakeChecker(0.08);
-  nav_msgs::OccupancyGrid static_map = MakeGrid(600, 600, 0.01);
-  nav_msgs::OccupancyGrid local_map = MakeGrid(600, 600, 0.01);
+  nav_msgs::msg::OccupancyGrid static_map = MakeGrid(600, 600, 0.01);
+  nav_msgs::msg::OccupancyGrid local_map = MakeGrid(600, 600, 0.01);
   SetCell(static_map, 0.0, 0.34, 100);
 
   MotionState initial;
@@ -184,11 +182,11 @@ TEST(CollisionCheckerTest, ZeroTargetChecksMeasuredLateralStoppingMotion) {
 
 TEST(CollisionCheckerTest, TagSupportsReverseAndLateralSweeps) {
   CollisionChecker checker = MakeChecker(0.08);
-  nav_msgs::OccupancyGrid empty_map = MakeGrid(600, 600, 0.01);
+  nav_msgs::msg::OccupancyGrid empty_map = MakeGrid(600, 600, 0.01);
   RolloutOptions options;
 
   for (const double direction : {-1.0, 1.0}) {
-    nav_msgs::OccupancyGrid lateral_map = empty_map;
+    nav_msgs::msg::OccupancyGrid lateral_map = empty_map;
     SetCell(lateral_map, 0.0, direction * 0.40, 100);
     MotionState initial;
     CollisionResult lateral = checker.simulate(
@@ -196,7 +194,7 @@ TEST(CollisionCheckerTest, TagSupportsReverseAndLateralSweeps) {
         StaticPolicy(), lateral_map, LocalPolicy(), options);
     EXPECT_TRUE(lateral.collision) << "lateral direction=" << direction;
 
-    nav_msgs::OccupancyGrid reverse_map = empty_map;
+    nav_msgs::msg::OccupancyGrid reverse_map = empty_map;
     SetCell(reverse_map, direction * 0.50, 0.0, 100);
     CollisionResult longitudinal = checker.simulate(
         initial, direction * 0.05, 0.0, 0.0, 2.0, empty_map,
@@ -208,8 +206,8 @@ TEST(CollisionCheckerTest, TagSupportsReverseAndLateralSweeps) {
 
 TEST(CollisionCheckerTest, CombinedTagTranslationAndYawUsesAllDofs) {
   CollisionChecker checker = MakeChecker(0.08);
-  nav_msgs::OccupancyGrid static_map = MakeGrid(600, 600, 0.01);
-  nav_msgs::OccupancyGrid local_map = MakeGrid(600, 600, 0.01);
+  nav_msgs::msg::OccupancyGrid static_map = MakeGrid(600, 600, 0.01);
+  nav_msgs::msg::OccupancyGrid local_map = MakeGrid(600, 600, 0.01);
   SetCell(local_map, 0.38, 0.38, 100);
 
   MotionState initial;
@@ -223,7 +221,7 @@ TEST(CollisionCheckerTest, CombinedTagTranslationAndYawUsesAllDofs) {
 TEST(CollisionCheckerTest, NavigationAndTagUseDifferentPadding) {
   CollisionChecker navigation_checker = MakeChecker(0.15);
   CollisionChecker tag_checker = MakeChecker(0.08);
-  nav_msgs::OccupancyGrid grid = MakeGrid(600, 600, 0.01);
+  nav_msgs::msg::OccupancyGrid grid = MakeGrid(600, 600, 0.01);
   SetCell(grid, 0.47, 0.0, 100);
 
   Pose2D pose;
@@ -233,7 +231,7 @@ TEST(CollisionCheckerTest, NavigationAndTagUseDifferentPadding) {
 
 TEST(CollisionCheckerTest, StaticUnknownBlocksButLocalUnknownDoesNot) {
   CollisionChecker checker = MakeChecker();
-  nav_msgs::OccupancyGrid grid = MakeGrid();
+  nav_msgs::msg::OccupancyGrid grid = MakeGrid();
   SetCell(grid, 0.0, 0.0, -1);
   Pose2D pose;
   EXPECT_TRUE(checker.poseCollides(pose, grid, StaticPolicy()));
@@ -242,7 +240,7 @@ TEST(CollisionCheckerTest, StaticUnknownBlocksButLocalUnknownDoesNot) {
 
 TEST(CollisionCheckerTest, OutsidePolicyDiffersByMapRole) {
   CollisionChecker checker = MakeChecker();
-  nav_msgs::OccupancyGrid grid = MakeGrid(20, 20, 0.05);
+  nav_msgs::msg::OccupancyGrid grid = MakeGrid(20, 20, 0.05);
   Pose2D pose;
   pose.x = 0.49;
   EXPECT_TRUE(checker.poseCollides(pose, grid, StaticPolicy()));
@@ -251,7 +249,7 @@ TEST(CollisionCheckerTest, OutsidePolicyDiffersByMapRole) {
 
 TEST(CollisionCheckerTest, NonFinitePoseOrMapMetadataFailsClosed) {
   CollisionChecker checker = MakeChecker();
-  nav_msgs::OccupancyGrid grid = MakeGrid();
+  nav_msgs::msg::OccupancyGrid grid = MakeGrid();
   Pose2D pose;
 
   pose.x = std::numeric_limits<double>::quiet_NaN();
@@ -265,8 +263,3 @@ TEST(CollisionCheckerTest, NonFinitePoseOrMapMetadataFailsClosed) {
 
 }  // namespace
 }  // namespace collision_monitor
-
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}

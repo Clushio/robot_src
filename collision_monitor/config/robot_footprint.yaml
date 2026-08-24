@@ -1,2 +1,5 @@
-# RANGER MINI 3.0: 720 mm long by 500 mm wide, centered on base_link.
-footprint: [[0.36, 0.25], [0.36, -0.25], [-0.36, -0.25], [-0.36, 0.25]]
+collision_monitor:
+  ros__parameters:
+    # ROS 2 parameters cannot represent nested numeric arrays. Nav2 accepts
+    # the standard footprint string and parses it into the same four points.
+    footprint: "[[0.36, 0.25], [0.36, -0.25], [-0.36, -0.25], [-0.36, 0.25]]"

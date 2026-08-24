@@ -112,7 +112,7 @@ OK = 0    WARN = 1    ERROR = 2
 - `WAITING_FOR_STATIONARY_HOLD`：已经停稳，正在等待保持时间。
 
 例如从 `nav` 切换到 `tag` 时，不能在车辆仍运动时直接把 padding
-从 0.15 m 缩小到 0.08 m。
+从 0.10 m 缩小到 0.06 m。
 
 节点会先使用导航的保守 footprint 检查停车轨迹。实测速度连续低于
 阈值 0.20 s 后，才启用新的 Tag profile。
@@ -347,11 +347,11 @@ OK = 0    WARN = 1    ERROR = 2
 
 | 输入 | 类型 | 用途 |
 | --- | --- | --- |
-| `/cmd_vel/candidate` | `ArbitratedCommand` | 候选速度和来源 |
-| `/odom` | `Odometry` | 实测初始速度 |
-| `/map` | `OccupancyGrid` | 静态障碍 |
-| local costmap | `OccupancyGrid` | 当前传感器障碍 |
-| `/anav/topology_safety_phase` | `std_msgs/UInt8` | 首段/中间段/末段心跳 |
+| `/cmd_vel/candidate` | `cmd_vel_arbiter/msg/ArbitratedCommand` | 候选速度和来源 |
+| `/odom` | `nav_msgs/msg/Odometry` | 实测初始速度 |
+| `/map` | `nav_msgs/msg/OccupancyGrid` | 静态障碍 |
+| local costmap | `nav_msgs/msg/OccupancyGrid` | 当前传感器障碍 |
+| `/anav/topology_safety_phase` | `std_msgs/msg/UInt8` | 首段/中间段/末段心跳 |
 | `map -> base_link` | TF2 | 当前真实位姿 |
 
 默认 local costmap 话题：
@@ -376,7 +376,7 @@ local costmap 的处理规则：
 
 ### 底盘速度 `/cmd_vel`
 
-消息类型为 `geometry_msgs/Twist`。
+消息类型为 `geometry_msgs/msg/Twist`。
 
 Collision Monitor 应是 `/cmd_vel` 的唯一发布者。
 
@@ -389,7 +389,7 @@ Collision Monitor 应是 `/cmd_vel` 的唯一发布者。
 
 ### 统一诊断 `/diagnostics`
 
-消息类型为 `diagnostic_msgs/DiagnosticArray`。
+消息类型为 `diagnostic_msgs/msg/DiagnosticArray`。
 
 其中包含一个名为 `/anav/collision_monitor` 的 `DiagnosticStatus`。
 
@@ -438,12 +438,12 @@ Collision Monitor 应是 `/cmd_vel` 的唯一发布者。
 查看完整诊断：
 
 ```bash
-rostopic echo /diagnostics
+ros2 topic echo /diagnostics
 ```
 
 ### RViz `/collision_monitor/markers`
 
-消息类型为 `visualization_msgs/MarkerArray`，坐标系为 `map`。
+消息类型为 `visualization_msgs/msg/MarkerArray`，坐标系为 `map`。
 
 | Marker namespace | 显示内容 |
 | --- | --- |
@@ -509,12 +509,13 @@ config/robot_footprint.yaml
 当前配置：
 
 ```yaml
-footprint:
-  - [ 0.36,  0.25]
-  - [ 0.36, -0.25]
-  - [-0.36, -0.25]
-  - [-0.36,  0.25]
+collision_monitor:
+  ros__parameters:
+    footprint: "[[0.36, 0.25], [0.36, -0.25], [-0.36, -0.25], [-0.36, 0.25]]"
 ```
+
+ROS 2 参数不支持嵌套数值数组，因此采用 Nav2 标准 footprint 字符串；
+解析后仍是同一组四个物理顶点。
 
 以 `base_link` 为中心，物理车体尺寸为：
 
@@ -526,16 +527,16 @@ footprint:
 
 | Profile | Padding | 最大 vx | 最大 vy | 最大 wz |
 | --- | ---: | ---: | ---: | ---: |
-| `nav` | 0.15 m | 0.20 m/s | 0 | 0.50 rad/s |
-| `nav_terminal` | 0.08 m | 0.20 m/s | 0 | 0.50 rad/s |
-| `tag` | 0.08 m | 0.05 m/s | 0.05 m/s | 0.15 rad/s |
+| `nav` | 0.10 m | 0.20 m/s | 0 | 0.50 rad/s |
+| `nav_terminal` | 0.06 m | 0.20 m/s | 0 | 0.50 rad/s |
+| `tag` | 0.06 m | 0.05 m/s | 0.05 m/s | 0.15 rad/s |
 | `teleop` | 0.10 m | 0.35 m/s | 0 | 1.10 rad/s |
 
 加 padding 后的近似外包尺寸：
 
-- `nav`：1.02 m × 0.80 m；
-- `nav_terminal`：0.88 m × 0.66 m；
-- `tag`：0.88 m × 0.66 m；
+- `nav`：0.92 m × 0.70 m；
+- `nav_terminal`：0.84 m × 0.62 m；
+- `tag`：0.84 m × 0.62 m；
 - `teleop`：0.92 m × 0.70 m。
 
 运动限制：
@@ -554,13 +555,13 @@ config/collision_monitor.yaml
 ## 构建与启动
 
 ```bash
-catkin_make
-source devel/setup.bash
-roslaunch collision_monitor collision_monitor.launch
+colcon build --packages-select collision_monitor
+source install/setup.bash
+ros2 launch collision_monitor collision_monitor.launch.py
 ```
 
 启动后确认 `/cmd_vel` 只有 Collision Monitor 一个发布者：
 
 ```bash
-rostopic info /cmd_vel
+ros2 topic info /cmd_vel --verbose
 ```

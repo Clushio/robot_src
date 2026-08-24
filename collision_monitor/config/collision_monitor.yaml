@@ -1,68 +1,62 @@
-candidate_topic: /cmd_vel/candidate
-output_topic: /cmd_vel
-odom_topic: /odom
-static_map_topic: /map
-local_map_topic: /mxb_move_base/local_costmap/costmap
-status_topic: /diagnostics
-marker_topic: /collision_monitor/markers
+collision_monitor:
+  ros__parameters:
+    candidate_topic: /cmd_vel/candidate
+    output_topic: /cmd_vel
+    odom_topic: /odom
+    static_map_topic: /map
+    local_map_topic: /mxb_move_base/local_costmap/costmap
+    status_topic: /diagnostics
+    marker_topic: /collision_monitor/markers
 
-global_frame: map
-base_frame: base_link
-navigation_source: nav
-tag_source: tag
-teleop_source: teleop
-topology_phase_topic: /anav/topology_safety_phase
+    global_frame: map
+    base_frame: base_link
+    navigation_source: nav
+    tag_source: tag
+    teleop_source: teleop
+    topology_phase_topic: /anav/topology_safety_phase
 
-monitor_rate: 50.0
-# Collision checks stay at 50 Hz; unchanged diagnostics heartbeat at 1 Hz.
-diagnostic_rate: 1.0
-candidate_timeout: 0.25
-odom_timeout: 0.20
-tf_timeout: 0.30
-local_map_timeout: 0.30
-topology_phase_timeout: 0.50
+    monitor_rate: 50.0
+    diagnostic_rate: 1.0
+    candidate_timeout: 0.25
+    odom_timeout: 0.20
+    tf_timeout: 0.30
+    local_map_timeout: 0.30
+    topology_phase_timeout: 0.50
 
-# The physical footprint is shared. Only the additional operating margin is
-# source-specific: navigation/teleop are conservative, tag is low-speed fine
-# positioning near a workstation.
-navigation_footprint_padding: 0.10
-navigation_terminal_footprint_padding: 0.06
-tag_footprint_padding: 0.06
-teleop_footprint_padding: 0.10
+    navigation_footprint_padding: 0.10
+    navigation_terminal_footprint_padding: 0.06
+    tag_footprint_padding: 0.06
+    teleop_footprint_padding: 0.10
 
-max_navigation_linear_x: 0.20
-max_navigation_angular_z: 0.50
-max_tag_linear_x: 0.05
-max_tag_linear_y: 0.05
-max_tag_angular_z: 0.15
-max_teleop_linear_x: 0.35
-max_teleop_angular_z: 1.10
-zero_epsilon: 0.0001
+    max_navigation_linear_x: 0.20
+    max_navigation_angular_z: 0.50
+    max_tag_linear_x: 0.05
+    max_tag_linear_y: 0.05
+    max_tag_angular_z: 0.15
+    max_teleop_linear_x: 0.35
+    max_teleop_angular_z: 1.10
+    zero_epsilon: 0.0001
 
-reaction_time: 0.30
-preview_time: 2.0
-clear_hold_time: 0.50
-# A source change is accepted only after measured chassis motion stays below
-# these thresholds for the hold time. This prevents nav->tag from shrinking
-# padding from 0.15 m to 0.08 m while the robot still has residual speed.
-source_transition_hold_time: 0.20
-transition_stopped_linear: 0.01
-transition_stopped_angular: 0.02
-linear_accel: 3.0
-angular_accel: 4.2
-# Conservative initial values. Replace these after measured stopping tests.
-linear_decel: 0.50
-angular_decel: 0.80
-max_dt: 0.02
-max_corner_step: 0.025
+    reaction_time: 0.30
+    preview_time: 2.0
+    clear_hold_time: 0.50
+    source_transition_hold_time: 0.20
+    transition_stopped_linear: 0.01
+    transition_stopped_angular: 0.02
+    linear_accel: 3.0
+    angular_accel: 4.2
+    linear_decel: 0.50
+    angular_decel: 0.80
+    max_dt: 0.02
+    max_corner_step: 0.025
 
-max_pose_jump_distance: 0.50
-max_pose_jump_yaw: 0.80
-pose_jump_hold_time: 0.50
+    max_pose_jump_distance: 0.50
+    max_pose_jump_yaw: 0.80
+    pose_jump_hold_time: 0.50
 
-static_occupied_threshold: 100
-static_unknown_is_obstacle: true
-static_outside_is_obstacle: true
-local_occupied_threshold: 100
-local_unknown_is_obstacle: false
-local_outside_is_obstacle: false
+    static_occupied_threshold: 100
+    static_unknown_is_obstacle: true
+    static_outside_is_obstacle: true
+    local_occupied_threshold: 100
+    local_unknown_is_obstacle: false
+    local_outside_is_obstacle: false

@@ -1,34 +1,86 @@
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdint>
 #include <cmath>
+#include <functional>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
-#include <cmd_vel_arbiter/ArbitratedCommand.h>
-#include <collision_monitor/collision_checker.h>
-#include <costmap_2d/footprint.h>
-#include <diagnostic_msgs/DiagnosticArray.h>
-#include <diagnostic_msgs/DiagnosticStatus.h>
-#include <diagnostic_msgs/KeyValue.h>
-#include <geometry_msgs/PolygonStamped.h>
-#include <geometry_msgs/TransformStamped.h>
-#include <geometry_msgs/Twist.h>
-#include <nav_msgs/OccupancyGrid.h>
-#include <nav_msgs/Odometry.h>
-#include <ros/ros.h>
-#include <std_msgs/UInt8.h>
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
-#include <tf2_ros/transform_listener.h>
-#include <tf2/utils.h>
-#include <visualization_msgs/Marker.h>
-#include <visualization_msgs/MarkerArray.h>
-#include <XmlRpcValue.h>
+#include "cmd_vel_arbiter/msg/arbitrated_command.hpp"
+#include "collision_monitor/collision_checker.h"
+#include "nav2_costmap_2d/footprint.hpp"
+#include "diagnostic_msgs/msg/diagnostic_array.hpp"
+#include "diagnostic_msgs/msg/diagnostic_status.hpp"
+#include "diagnostic_msgs/msg/key_value.hpp"
+#include "geometry_msgs/msg/polygon_stamped.hpp"
+#include "geometry_msgs/msg/transform_stamped.hpp"
+#include "geometry_msgs/msg/twist.hpp"
+#include "nav_msgs/msg/occupancy_grid.hpp"
+#include "nav_msgs/msg/odometry.hpp"
+#include "rclcpp/rclcpp.hpp"
+#include "std_msgs/msg/u_int8.hpp"
+#include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
+#include "tf2_ros/buffer.h"
+#include "tf2_ros/transform_listener.h"
+#include "tf2/time.hpp"
+#include "tf2/utils.hpp"
+#include "visualization_msgs/msg/marker.hpp"
+#include "visualization_msgs/msg/marker_array.hpp"
 
 namespace collision_monitor {
 namespace {
+
+using SteadyClock = std::chrono::steady_clock;
+
+class WallDuration {
+ public:
+  explicit WallDuration(double seconds = 0.0) : seconds_(seconds) {}
+  double toSec() const { return seconds_; }
+
+ private:
+  double seconds_;
+};
+
+class WallTime {
+ public:
+  WallTime() = default;
+
+  static WallTime now() {
+    WallTime result;
+    result.value_ = SteadyClock::now();
+    result.valid_ = true;
+    return result;
+  }
+
+  bool isZero() const { return !valid_; }
+
+  friend WallDuration operator-(const WallTime& lhs, const WallTime& rhs) {
+    return WallDuration(std::chrono::duration<double>(
+        lhs.value_ - rhs.value_).count());
+  }
+
+  friend WallTime operator+(const WallTime& time,
+                            const WallDuration& duration) {
+    WallTime result;
+    result.value_ = time.value_ +
+        std::chrono::duration_cast<SteadyClock::duration>(
+            std::chrono::duration<double>(duration.toSec()));
+    result.valid_ = time.valid_;
+    return result;
+  }
+
+  friend bool operator<(const WallTime& lhs, const WallTime& rhs) {
+    return lhs.value_ < rhs.value_;
+  }
+
+ private:
+  SteadyClock::time_point value_{};
+  bool valid_ = false;
+};
 
 enum TopologySafetyPhase : uint8_t {
   kTopologyPhaseNormal = 0,
@@ -49,13 +101,13 @@ const char* TopologyPhaseName(uint8_t phase) {
   }
 }
 
-bool IsFinite(const geometry_msgs::Twist& twist) {
+bool IsFinite(const geometry_msgs::msg::Twist& twist) {
   return std::isfinite(twist.linear.x) && std::isfinite(twist.linear.y) &&
          std::isfinite(twist.linear.z) && std::isfinite(twist.angular.x) &&
          std::isfinite(twist.angular.y) && std::isfinite(twist.angular.z);
 }
 
-bool IsZero(const geometry_msgs::Twist& twist, double epsilon) {
+bool IsZero(const geometry_msgs::msg::Twist& twist, double epsilon) {
   return std::abs(twist.linear.x) <= epsilon &&
          std::abs(twist.linear.y) <= epsilon &&
          std::abs(twist.linear.z) <= epsilon &&
@@ -68,9 +120,9 @@ double YawDifference(double a, double b) {
   return std::abs(std::atan2(std::sin(a - b), std::cos(a - b)));
 }
 
-void AddDiagnosticValue(diagnostic_msgs::DiagnosticStatus& status,
+void AddDiagnosticValue(diagnostic_msgs::msg::DiagnosticStatus& status,
                         const std::string& key, const std::string& value) {
-  diagnostic_msgs::KeyValue item;
+  diagnostic_msgs::msg::KeyValue item;
   item.key = key;
   item.value = value;
   status.values.push_back(item);
@@ -138,36 +190,49 @@ struct MotionProfile {
 
 }  // namespace
 
-class CollisionMonitorNode {
+class CollisionMonitorNode : public rclcpp::Node {
  public:
   CollisionMonitorNode()
-      : private_nh_("~"), tf_listener_(tf_buffer_) {
+      : Node("collision_monitor"),
+        tf_buffer_(get_clock()),
+        tf_listener_(tf_buffer_) {
     LoadParameters();
     LoadFootprint();
 
-    candidate_sub_ = nh_.subscribe(candidate_topic_, 1,
-                                   &CollisionMonitorNode::CandidateCallback,
-                                   this);
-    topology_phase_sub_ = nh_.subscribe(
+    candidate_sub_ = create_subscription<
+        cmd_vel_arbiter::msg::ArbitratedCommand>(
+        candidate_topic_, 1,
+        std::bind(&CollisionMonitorNode::CandidateCallback, this,
+                  std::placeholders::_1));
+    topology_phase_sub_ = create_subscription<std_msgs::msg::UInt8>(
         topology_phase_topic_, 1,
-        &CollisionMonitorNode::TopologyPhaseCallback, this);
-    odom_sub_ = nh_.subscribe(odom_topic_, 1,
-                              &CollisionMonitorNode::OdomCallback, this);
-    static_map_sub_ = nh_.subscribe(static_map_topic_, 1,
-                                    &CollisionMonitorNode::StaticMapCallback,
-                                    this);
-    local_map_sub_ = nh_.subscribe(local_map_topic_, 1,
-                                   &CollisionMonitorNode::LocalMapCallback,
-                                   this);
-    output_pub_ = nh_.advertise<geometry_msgs::Twist>(output_topic_, 1, false);
-    status_pub_ = nh_.advertise<diagnostic_msgs::DiagnosticArray>(
-        status_topic_, 1, false);
-    marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>(
-        marker_topic_, 1, false);
-    timer_ = nh_.createWallTimer(ros::WallDuration(1.0 / monitor_rate_),
-                                 &CollisionMonitorNode::TimerCallback, this);
+        std::bind(&CollisionMonitorNode::TopologyPhaseCallback, this,
+                  std::placeholders::_1));
+    odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
+        odom_topic_, 1,
+        std::bind(&CollisionMonitorNode::OdomCallback, this,
+                  std::placeholders::_1));
+    const rclcpp::QoS map_qos =
+        rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
+    static_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
+        static_map_topic_, map_qos,
+        std::bind(&CollisionMonitorNode::StaticMapCallback, this,
+                  std::placeholders::_1));
+    local_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
+        local_map_topic_, map_qos,
+        std::bind(&CollisionMonitorNode::LocalMapCallback, this,
+                  std::placeholders::_1));
+    output_pub_ = create_publisher<geometry_msgs::msg::Twist>(output_topic_, 1);
+    status_pub_ = create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
+        status_topic_, 1);
+    marker_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
+        marker_topic_, 1);
+    timer_ = create_wall_timer(
+        std::chrono::duration<double>(1.0 / monitor_rate_),
+        std::bind(&CollisionMonitorNode::TimerCallback, this));
 
-    ROS_INFO(
+    RCLCPP_INFO(
+        get_logger(),
         "collision_monitor: %s -> %s at %.1f Hz, frames=%s/%s, "
         "padding(nav/nav_terminal/tag/teleop)=%.3f/%.3f/%.3f/%.3f, "
         "topology_phase=%s",
@@ -179,14 +244,19 @@ class CollisionMonitorNode {
         topology_phase_topic_.c_str());
   }
 
-  ~CollisionMonitorNode() {
-    geometry_msgs::Twist zero;
+  ~CollisionMonitorNode() override {
+    geometry_msgs::msg::Twist zero;
     for (int i = 0; i < 3; ++i) {
-      output_pub_.publish(zero);
+      output_pub_->publish(zero);
     }
   }
 
  private:
+  template<typename T>
+  void Param(const std::string& name, T& value, const T& default_value) {
+    value = declare_parameter<T>(name, default_value);
+  }
+
   void LoadParameters() {
     navigation_profile_.name = "nav";
     navigation_profile_.allow_reverse = false;
@@ -201,55 +271,55 @@ class CollisionMonitorNode {
     teleop_profile_.allow_reverse = false;
     teleop_profile_.allow_lateral = false;
 
-    private_nh_.param("candidate_topic", candidate_topic_,
+    Param("candidate_topic", candidate_topic_,
                       std::string("/cmd_vel/candidate"));
-    private_nh_.param("output_topic", output_topic_, std::string("/cmd_vel"));
-    private_nh_.param("odom_topic", odom_topic_, std::string("/odom"));
-    private_nh_.param("static_map_topic", static_map_topic_,
+    Param("output_topic", output_topic_, std::string("/cmd_vel"));
+    Param("odom_topic", odom_topic_, std::string("/odom"));
+    Param("static_map_topic", static_map_topic_,
                       std::string("/map"));
-    private_nh_.param("local_map_topic", local_map_topic_,
+    Param("local_map_topic", local_map_topic_,
                       std::string("/mxb_move_base/local_costmap/costmap"));
-    private_nh_.param("status_topic", status_topic_,
+    Param("status_topic", status_topic_,
                       std::string("/diagnostics"));
-    private_nh_.param("marker_topic", marker_topic_,
+    Param("marker_topic", marker_topic_,
                       std::string("/collision_monitor/markers"));
-    private_nh_.param("global_frame", global_frame_, std::string("map"));
-    private_nh_.param("base_frame", base_frame_, std::string("base_link"));
-    private_nh_.param("teleop_source", teleop_source_,
+    Param("global_frame", global_frame_, std::string("map"));
+    Param("base_frame", base_frame_, std::string("base_link"));
+    Param("teleop_source", teleop_source_,
                       std::string("teleop"));
-    private_nh_.param("tag_source", tag_source_, std::string("tag"));
-    private_nh_.param("navigation_source", navigation_source_,
+    Param("tag_source", tag_source_, std::string("tag"));
+    Param("navigation_source", navigation_source_,
                       std::string("nav"));
-    private_nh_.param("topology_phase_topic", topology_phase_topic_,
+    Param("topology_phase_topic", topology_phase_topic_,
                       std::string("/anav/topology_safety_phase"));
 
-    private_nh_.param("monitor_rate", monitor_rate_, 50.0);
-    private_nh_.param("diagnostic_rate", diagnostic_rate_, 1.0);
-    private_nh_.param("candidate_timeout", candidate_timeout_, 0.25);
-    private_nh_.param("odom_timeout", odom_timeout_, 0.20);
-    private_nh_.param("tf_timeout", tf_timeout_, 0.30);
-    private_nh_.param("local_map_timeout", local_map_timeout_, 0.30);
-    private_nh_.param("topology_phase_timeout", topology_phase_timeout_,
+    Param("monitor_rate", monitor_rate_, 50.0);
+    Param("diagnostic_rate", diagnostic_rate_, 1.0);
+    Param("candidate_timeout", candidate_timeout_, 0.25);
+    Param("odom_timeout", odom_timeout_, 0.20);
+    Param("tf_timeout", tf_timeout_, 0.30);
+    Param("local_map_timeout", local_map_timeout_, 0.30);
+    Param("topology_phase_timeout", topology_phase_timeout_,
                       0.50);
     double legacy_padding = 0.15;
-    private_nh_.param("footprint_padding", legacy_padding, 0.15);
+    Param("footprint_padding", legacy_padding, 0.15);
     navigation_profile_.footprint_padding = legacy_padding;
     navigation_terminal_profile_.footprint_padding = 0.08;
     teleop_profile_.footprint_padding = legacy_padding;
     tag_profile_.footprint_padding = 0.08;
-    private_nh_.param("navigation_footprint_padding",
+    Param("navigation_footprint_padding",
                       navigation_profile_.footprint_padding, legacy_padding);
-    private_nh_.param("navigation_terminal_footprint_padding",
+    Param("navigation_terminal_footprint_padding",
                       navigation_terminal_profile_.footprint_padding, 0.08);
-    private_nh_.param("tag_footprint_padding",
+    Param("tag_footprint_padding",
                       tag_profile_.footprint_padding, 0.08);
-    private_nh_.param("teleop_footprint_padding",
+    Param("teleop_footprint_padding",
                       teleop_profile_.footprint_padding, legacy_padding);
 
-    private_nh_.param("max_navigation_linear_x",
+    Param("max_navigation_linear_x",
                       navigation_profile_.max_linear_x, 0.20);
     navigation_profile_.max_linear_y = 0.0;
-    private_nh_.param("max_navigation_angular_z",
+    Param("max_navigation_angular_z",
                       navigation_profile_.max_angular_z, 0.50);
     navigation_terminal_profile_.max_linear_x =
         navigation_profile_.max_linear_x;
@@ -257,47 +327,47 @@ class CollisionMonitorNode {
         navigation_profile_.max_linear_y;
     navigation_terminal_profile_.max_angular_z =
         navigation_profile_.max_angular_z;
-    private_nh_.param("max_tag_linear_x", tag_profile_.max_linear_x, 0.05);
-    private_nh_.param("max_tag_linear_y", tag_profile_.max_linear_y, 0.05);
-    private_nh_.param("max_tag_angular_z", tag_profile_.max_angular_z, 0.15);
-    private_nh_.param("max_teleop_linear_x", teleop_profile_.max_linear_x,
+    Param("max_tag_linear_x", tag_profile_.max_linear_x, 0.05);
+    Param("max_tag_linear_y", tag_profile_.max_linear_y, 0.05);
+    Param("max_tag_angular_z", tag_profile_.max_angular_z, 0.15);
+    Param("max_teleop_linear_x", teleop_profile_.max_linear_x,
                       0.35);
     teleop_profile_.max_linear_y = 0.0;
-    private_nh_.param("max_teleop_angular_z", teleop_profile_.max_angular_z,
+    Param("max_teleop_angular_z", teleop_profile_.max_angular_z,
                       1.10);
-    private_nh_.param("zero_epsilon", zero_epsilon_, 1e-4);
-    private_nh_.param("reaction_time", reaction_time_, 0.30);
-    private_nh_.param("preview_time", preview_time_, 2.0);
-    private_nh_.param("clear_hold_time", clear_hold_time_, 0.50);
-    private_nh_.param("source_transition_hold_time",
+    Param("zero_epsilon", zero_epsilon_, 1e-4);
+    Param("reaction_time", reaction_time_, 0.30);
+    Param("preview_time", preview_time_, 2.0);
+    Param("clear_hold_time", clear_hold_time_, 0.50);
+    Param("source_transition_hold_time",
                       source_transition_hold_time_, 0.20);
-    private_nh_.param("transition_stopped_linear",
+    Param("transition_stopped_linear",
                       transition_stopped_linear_, 0.01);
-    private_nh_.param("transition_stopped_angular",
+    Param("transition_stopped_angular",
                       transition_stopped_angular_, 0.02);
-    private_nh_.param("max_pose_jump_distance", max_pose_jump_distance_,
+    Param("max_pose_jump_distance", max_pose_jump_distance_,
                       0.50);
-    private_nh_.param("max_pose_jump_yaw", max_pose_jump_yaw_, 0.80);
-    private_nh_.param("pose_jump_hold_time", pose_jump_hold_time_, 0.50);
-    private_nh_.param("static_occupied_threshold",
+    Param("max_pose_jump_yaw", max_pose_jump_yaw_, 0.80);
+    Param("pose_jump_hold_time", pose_jump_hold_time_, 0.50);
+    Param("static_occupied_threshold",
                       static_policy_.occupied_threshold, 100);
-    private_nh_.param("local_occupied_threshold",
+    Param("local_occupied_threshold",
                       local_policy_.occupied_threshold, 100);
-    private_nh_.param("static_unknown_is_obstacle",
+    Param("static_unknown_is_obstacle",
                       static_policy_.unknown_is_obstacle, true);
-    private_nh_.param("local_unknown_is_obstacle",
+    Param("local_unknown_is_obstacle",
                       local_policy_.unknown_is_obstacle, false);
-    private_nh_.param("static_outside_is_obstacle",
+    Param("static_outside_is_obstacle",
                       static_policy_.outside_is_obstacle, true);
-    private_nh_.param("local_outside_is_obstacle",
+    Param("local_outside_is_obstacle",
                       local_policy_.outside_is_obstacle, false);
-    private_nh_.param("max_dt", rollout_options_.max_dt, 0.02);
-    private_nh_.param("max_corner_step", rollout_options_.max_corner_step,
+    Param("max_dt", rollout_options_.max_dt, 0.02);
+    Param("max_corner_step", rollout_options_.max_corner_step,
                       0.025);
-    private_nh_.param("linear_accel", rollout_options_.linear_accel, 3.0);
-    private_nh_.param("angular_accel", rollout_options_.angular_accel, 4.2);
-    private_nh_.param("linear_decel", rollout_options_.linear_decel, 0.50);
-    private_nh_.param("angular_decel", rollout_options_.angular_decel, 0.80);
+    Param("linear_accel", rollout_options_.linear_accel, 3.0);
+    Param("angular_accel", rollout_options_.angular_accel, 4.2);
+    Param("linear_decel", rollout_options_.linear_decel, 0.50);
+    Param("angular_decel", rollout_options_.angular_decel, 0.80);
 
     const auto finite_positive = [](double value) {
       return std::isfinite(value) && value > 0.0;
@@ -360,18 +430,21 @@ class CollisionMonitorNode {
   }
 
   void LoadFootprint() {
-    XmlRpc::XmlRpcValue footprint_xml;
-    if (!private_nh_.getParam("footprint", footprint_xml)) {
-      ROS_FATAL("collision_monitor: required private parameter ~footprint is missing");
+    const std::string footprint_string = declare_parameter<std::string>(
+        "footprint", "");
+    if (footprint_string.empty()) {
+      RCLCPP_FATAL(
+          get_logger(),
+          "collision_monitor: required parameter footprint is missing");
       throw std::runtime_error("missing footprint");
     }
-    std::vector<geometry_msgs::Point> footprint;
-    try {
-      footprint = costmap_2d::makeFootprintFromXMLRPC(
-          footprint_xml, private_nh_.resolveName("footprint"));
-    } catch (const std::exception& exception) {
-      ROS_FATAL("collision_monitor: invalid footprint: %s", exception.what());
-      throw;
+    std::vector<geometry_msgs::msg::Point> footprint;
+    if (!nav2_costmap_2d::makeFootprintFromString(
+            footprint_string, footprint)) {
+      RCLCPP_FATAL(
+          get_logger(), "collision_monitor: invalid footprint: %s",
+          footprint_string.c_str());
+      throw std::runtime_error("invalid footprint");
     }
     std::string error;
     MotionProfile* profiles[] = {
@@ -380,8 +453,9 @@ class CollisionMonitorNode {
     for (MotionProfile* profile : profiles) {
       if (!profile->checker.setFootprint(
               footprint, profile->footprint_padding, &error)) {
-        ROS_FATAL("collision_monitor: invalid %s footprint: %s",
-                  profile->name.c_str(), error.c_str());
+        RCLCPP_FATAL(
+            get_logger(), "collision_monitor: invalid %s footprint: %s",
+            profile->name.c_str(), error.c_str());
         throw std::runtime_error(error);
       }
     }
@@ -416,43 +490,44 @@ class CollisionMonitorNode {
   }
 
   void CandidateCallback(
-      const cmd_vel_arbiter::ArbitratedCommand::ConstPtr& message) {
+      const cmd_vel_arbiter::msg::ArbitratedCommand::ConstSharedPtr& message) {
     candidate_ = *message;
-    candidate_received_at_ = ros::WallTime::now();
+    candidate_received_at_ = WallTime::now();
     have_candidate_ = true;
   }
 
-  void TopologyPhaseCallback(const std_msgs::UInt8::ConstPtr& message) {
+  void TopologyPhaseCallback(const std_msgs::msg::UInt8::ConstSharedPtr& message) {
     topology_phase_ = message->data;
-    topology_phase_received_at_ = ros::WallTime::now();
+    topology_phase_received_at_ = WallTime::now();
     have_topology_phase_ = true;
     if (topology_phase_ > kTopologyPhaseFinalSegment) {
-      ROS_ERROR_THROTTLE(
-          1.0, "collision_monitor: invalid topology safety phase %u; "
-               "using conservative navigation padding",
+      RCLCPP_ERROR_THROTTLE(
+          get_logger(), *get_clock(), 1000,
+          "collision_monitor: invalid topology safety phase %u; "
+          "using conservative navigation padding",
           static_cast<unsigned int>(topology_phase_));
     }
   }
 
-  void OdomCallback(const nav_msgs::Odometry::ConstPtr& message) {
+  void OdomCallback(const nav_msgs::msg::Odometry::ConstSharedPtr& message) {
     odom_ = *message;
-    odom_received_at_ = ros::WallTime::now();
+    odom_received_at_ = WallTime::now();
     have_odom_ = true;
   }
 
-  void StaticMapCallback(const nav_msgs::OccupancyGrid::ConstPtr& message) {
+  void StaticMapCallback(const nav_msgs::msg::OccupancyGrid::ConstSharedPtr& message) {
     static_map_ = *message;
     have_static_map_ = true;
   }
 
-  void LocalMapCallback(const nav_msgs::OccupancyGrid::ConstPtr& message) {
+  void LocalMapCallback(const nav_msgs::msg::OccupancyGrid::ConstSharedPtr& message) {
     local_map_ = *message;
-    local_map_received_at_ = ros::WallTime::now();
+    local_map_received_at_ = WallTime::now();
     have_local_map_ = true;
   }
 
-  bool MapValid(const nav_msgs::OccupancyGrid& map) const {
-    const geometry_msgs::Quaternion& orientation = map.info.origin.orientation;
+  bool MapValid(const nav_msgs::msg::OccupancyGrid& map) const {
+    const geometry_msgs::msg::Quaternion& orientation = map.info.origin.orientation;
     const double quaternion_norm =
         orientation.x * orientation.x + orientation.y * orientation.y +
         orientation.z * orientation.z + orientation.w * orientation.w;
@@ -469,20 +544,23 @@ class CollisionMonitorNode {
   }
 
   bool GetRobotPose(Pose2D& pose, std::string& reason) {
-    geometry_msgs::TransformStamped transform;
+    geometry_msgs::msg::TransformStamped transform;
     try {
-      transform = tf_buffer_.lookupTransform(global_frame_, base_frame_,
-                                             ros::Time(0), ros::Duration(0.01));
+      transform = tf_buffer_.lookupTransform(
+          global_frame_, base_frame_, tf2::TimePointZero,
+          tf2::durationFromSec(0.01));
     } catch (const tf2::TransformException& exception) {
       reason = std::string("TF_UNAVAILABLE: ") + exception.what();
       return false;
     }
 
-    if (transform.header.stamp.isZero()) {
+    if (transform.header.stamp.sec == 0 &&
+        transform.header.stamp.nanosec == 0) {
       reason = "TF_HAS_ZERO_STAMP";
       return false;
     }
-    const double age = (ros::Time::now() - transform.header.stamp).toSec();
+    const double age =
+        (now() - rclcpp::Time(transform.header.stamp)).seconds();
     if (!std::isfinite(age) || age > tf_timeout_ || age < -0.10) {
       reason = "TF_STALE";
       return false;
@@ -490,7 +568,7 @@ class CollisionMonitorNode {
 
     pose.x = transform.transform.translation.x;
     pose.y = transform.transform.translation.y;
-    const geometry_msgs::Quaternion& orientation =
+    const geometry_msgs::msg::Quaternion& orientation =
         transform.transform.rotation;
     const double quaternion_norm =
         orientation.x * orientation.x + orientation.y * orientation.y +
@@ -504,27 +582,29 @@ class CollisionMonitorNode {
       return false;
     }
 
-    if (transform.header.stamp != last_tf_stamp_) {
+    const rclcpp::Time tf_stamp(transform.header.stamp);
+    if (tf_stamp != last_tf_stamp_) {
       if (have_last_pose_ &&
           (std::hypot(pose.x - last_pose_.x, pose.y - last_pose_.y) >
                max_pose_jump_distance_ ||
            YawDifference(pose.yaw, last_pose_.yaw) > max_pose_jump_yaw_)) {
         pose_jump_until_ =
-            ros::WallTime::now() + ros::WallDuration(pose_jump_hold_time_);
-        ROS_ERROR("collision_monitor: localization jump detected");
+            WallTime::now() + WallDuration(pose_jump_hold_time_);
+        RCLCPP_ERROR(
+            get_logger(), "collision_monitor: localization jump detected");
       }
       last_pose_ = pose;
-      last_tf_stamp_ = transform.header.stamp;
+      last_tf_stamp_ = tf_stamp;
       have_last_pose_ = true;
     }
-    if (!pose_jump_until_.isZero() && ros::WallTime::now() < pose_jump_until_) {
+    if (!pose_jump_until_.isZero() && WallTime::now() < pose_jump_until_) {
       reason = "TF_JUMP";
       return false;
     }
     return true;
   }
 
-  bool DataReady(const ros::WallTime& now, Pose2D& pose,
+  bool DataReady(const WallTime& now, Pose2D& pose,
                  std::string& reason) {
     if (!footprintReady()) {
       reason = "FOOTPRINT_NOT_READY";
@@ -559,7 +639,7 @@ class CollisionMonitorNode {
   }
 
   bool SupportedCommand(const MotionProfile& profile,
-                        const geometry_msgs::Twist& command,
+                        const geometry_msgs::msg::Twist& command,
                         std::string& reason) const {
     if (!IsFinite(command)) {
       reason = "NON_FINITE_COMMAND";
@@ -589,7 +669,7 @@ class CollisionMonitorNode {
     return true;
   }
 
-  bool SupportedMeasuredMotion(const geometry_msgs::Twist& measured,
+  bool SupportedMeasuredMotion(const geometry_msgs::msg::Twist& measured,
                                std::string& reason) const {
     if (!IsFinite(measured)) {
       reason = "NON_FINITE_MEASURED_MOTION";
@@ -608,7 +688,7 @@ class CollisionMonitorNode {
     return true;
   }
 
-  bool MeasuredStopped(const geometry_msgs::Twist& measured) const {
+  bool MeasuredStopped(const geometry_msgs::msg::Twist& measured) const {
     return std::hypot(measured.linear.x, measured.linear.y) <=
                transition_stopped_linear_ &&
            std::abs(measured.linear.z) <= transition_stopped_linear_ &&
@@ -617,13 +697,13 @@ class CollisionMonitorNode {
            std::abs(measured.angular.z) <= transition_stopped_angular_;
   }
 
-  bool TopologyPhaseFresh(const ros::WallTime& now) const {
+  bool TopologyPhaseFresh(const WallTime& now) const {
     return have_topology_phase_ &&
            (now - topology_phase_received_at_).toSec() <=
                topology_phase_timeout_;
   }
 
-  bool NavigationTerminalRequested(const ros::WallTime& now) const {
+  bool NavigationTerminalRequested(const WallTime& now) const {
     if (!TopologyPhaseFresh(now)) {
       return false;
     }
@@ -635,7 +715,7 @@ class CollisionMonitorNode {
   // and let the normal swept-volume check decide whether the command remains
   // safe with the newly selected footprint. Unlike a command-source change,
   // this does not require stopping the chassis first.
-  void UpdateNavigationTerminalProfile(const ros::WallTime& now) {
+  void UpdateNavigationTerminalProfile(const WallTime& now) {
     navigation_terminal_active_ = NavigationTerminalRequested(now);
   }
 
@@ -644,7 +724,7 @@ class CollisionMonitorNode {
   }
 
   bool SourceTransitionBlocks(const std::string& source,
-                              const ros::WallTime& now) {
+                              const WallTime& now) {
     if (source != navigation_source_) {
       ResetNavigationTerminalProfile();
     }
@@ -653,11 +733,11 @@ class CollisionMonitorNode {
     }
     if (pending_source_ != source) {
       pending_source_ = source;
-      transition_stopped_since_ = ros::WallTime();
+      transition_stopped_since_ = WallTime();
       ForceStoppedScale();
     }
     if (!MeasuredStopped(odom_.twist.twist)) {
-      transition_stopped_since_ = ros::WallTime();
+      transition_stopped_since_ = WallTime();
       return true;
     }
     if (transition_stopped_since_.isZero()) {
@@ -670,20 +750,20 @@ class CollisionMonitorNode {
     }
     active_source_ = source;
     pending_source_.clear();
-    transition_stopped_since_ = ros::WallTime();
+    transition_stopped_since_ = WallTime();
     ForceStoppedScale();
     return false;
   }
 
-  double ApplyScaleHysteresis(double desired, const ros::WallTime& now) {
+  double ApplyScaleHysteresis(double desired, const WallTime& now) {
     desired = std::max(0.0, std::min(1.0, desired));
     if (desired < applied_scale_ - 1e-9) {
       applied_scale_ = desired;
-      scale_increase_since_ = ros::WallTime();
+      scale_increase_since_ = WallTime();
       return applied_scale_;
     }
     if (desired <= applied_scale_ + 1e-9) {
-      scale_increase_since_ = ros::WallTime();
+      scale_increase_since_ = WallTime();
       return applied_scale_;
     }
     if (scale_increase_since_.isZero()) {
@@ -700,18 +780,18 @@ class CollisionMonitorNode {
         break;
       }
     }
-    scale_increase_since_ = ros::WallTime();
+    scale_increase_since_ = WallTime();
     return applied_scale_;
   }
 
   void ForceStoppedScale() {
     applied_scale_ = 0.0;
-    scale_increase_since_ = ros::WallTime();
+    scale_increase_since_ = WallTime();
   }
 
-  void TimerCallback(const ros::WallTimerEvent&) {
-    const ros::WallTime now = ros::WallTime::now();
-    geometry_msgs::Twist output;
+  void TimerCallback() {
+    const WallTime now = WallTime::now();
+    geometry_msgs::msg::Twist output;
     std::string state = "STOPPED";
     std::string reason;
     double scale = 0.0;
@@ -727,7 +807,7 @@ class CollisionMonitorNode {
       return;
     }
 
-    const geometry_msgs::Twist& command = candidate_.command;
+    const geometry_msgs::msg::Twist& command = candidate_.command;
     if (!IsFinite(command)) {
       ForceStoppedScale();
       reason = "CANDIDATE_NON_FINITE";
@@ -752,13 +832,13 @@ class CollisionMonitorNode {
         scale = 1.0;
         active_source_ = teleop_source_;
         pending_source_.clear();
-        transition_stopped_since_ = ros::WallTime();
+        transition_stopped_since_ = WallTime();
         ResetNavigationTerminalProfile();
         applied_scale_ = 1.0;
-        scale_increase_since_ = ros::WallTime();
-        ROS_WARN_THROTTLE(1.0,
-                          "collision_monitor: teleop bypass because %s",
-                          reason.c_str());
+        scale_increase_since_ = WallTime();
+        RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 1000,
+            "collision_monitor: teleop bypass because %s", reason.c_str());
       } else {
         ForceStoppedScale();
         state = "DATA_NOT_READY";
@@ -901,12 +981,12 @@ class CollisionMonitorNode {
             candidate_.source, profile);
   }
 
-  void Publish(const geometry_msgs::Twist& output, const std::string& state,
+  void Publish(const geometry_msgs::msg::Twist& output, const std::string& state,
                const std::string& reason, double scale,
                double collision_time, const CollisionResult& rollout,
                const std::string& source,
                const MotionProfile* profile_override = nullptr) {
-    output_pub_.publish(output);
+    output_pub_->publish(output);
     PublishStatus(state, reason, scale, collision_time, source, output,
                   profile_override);
     PublishMarkers(state, rollout, source, profile_override);
@@ -914,42 +994,43 @@ class CollisionMonitorNode {
     if (state == "EMERGENCY_STOP" || state == "COLLISION_STOP" ||
         state == "DATA_NOT_READY" || state == "UNSUPPORTED_MOTION" ||
         state == "PROFILE_TRANSITION") {
-      ROS_WARN_THROTTLE(1.0,
-                        "collision_monitor: state=%s source=%s reason=%s "
-                        "scale=%.2f ttc=%.3f",
-                        state.c_str(), source.c_str(), reason.c_str(), scale,
-                        collision_time);
+      RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 1000,
+          "collision_monitor: state=%s source=%s reason=%s "
+          "scale=%.2f ttc=%.3f",
+          state.c_str(), source.c_str(), reason.c_str(), scale,
+          collision_time);
     }
   }
 
   void PublishStatus(const std::string& state, const std::string& reason,
                      double scale, double collision_time,
                      const std::string& source,
-                     const geometry_msgs::Twist& output,
+                     const geometry_msgs::msg::Twist& output,
                      const MotionProfile* profile_override) {
-    const ros::WallTime now = ros::WallTime::now();
-    diagnostic_msgs::DiagnosticArray array;
-    array.header.stamp = ros::Time::now();
-    diagnostic_msgs::DiagnosticStatus status;
+    const WallTime now = WallTime::now();
+    diagnostic_msgs::msg::DiagnosticArray array;
+    array.header.stamp = this->now();
+    diagnostic_msgs::msg::DiagnosticStatus status;
     status.name = "/anav/collision_monitor";
     status.hardware_id = "ranger";
     status.message = state + ": " + reason;
     if (state == "OK" || state == "STOP_COMMAND" || state == "STOPPED") {
-      status.level = diagnostic_msgs::DiagnosticStatus::OK;
+      status.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
     } else if (state == "SLOWDOWN" || state == "MANUAL_BYPASS" ||
                state == "PROFILE_TRANSITION" ||
                state == "COLLISION_STOP") {
-      status.level = diagnostic_msgs::DiagnosticStatus::WARN;
+      status.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
     } else {
-      status.level = diagnostic_msgs::DiagnosticStatus::ERROR;
+      status.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
     }
     const std::string code = DiagnosticCode(state, reason);
     AddDiagnosticValue(status, "code", code);
     AddDiagnosticValue(status, "kind",
-                       status.level == diagnostic_msgs::DiagnosticStatus::OK
+                       status.level == diagnostic_msgs::msg::DiagnosticStatus::OK
                            ? "STATE" : "FAULT");
     AddDiagnosticValue(status, "active",
-                       status.level == diagnostic_msgs::DiagnosticStatus::OK
+                       status.level == diagnostic_msgs::msg::DiagnosticStatus::OK
                            ? "false" : "true");
     AddDiagnosticValue(status, "action", DiagnosticAction(code));
     AddDiagnosticValue(status, "state", state);
@@ -1001,7 +1082,7 @@ class CollisionMonitorNode {
     last_diagnostic_signature_ = signature;
     last_diagnostic_publish_ = now;
     array.status.push_back(status);
-    status_pub_.publish(array);
+    status_pub_->publish(array);
   }
 
   bool GetCurrentMarkerPose(const CollisionResult& rollout,
@@ -1012,9 +1093,10 @@ class CollisionMonitorNode {
     }
 
     try {
-      const geometry_msgs::TransformStamped transform =
-          tf_buffer_.lookupTransform(global_frame_, base_frame_, ros::Time(0),
-                                     ros::Duration(0.0));
+      const geometry_msgs::msg::TransformStamped transform =
+          tf_buffer_.lookupTransform(
+              global_frame_, base_frame_, tf2::TimePointZero,
+              tf2::durationFromSec(0.0));
       pose.x = transform.transform.translation.x;
       pose.y = transform.transform.translation.y;
       pose.yaw = tf2::getYaw(transform.transform.rotation);
@@ -1029,9 +1111,9 @@ class CollisionMonitorNode {
                       const CollisionResult& rollout,
                       const std::string& source,
                       const MotionProfile* profile_override) {
-    visualization_msgs::MarkerArray array;
-    visualization_msgs::Marker clear;
-    clear.action = visualization_msgs::Marker::DELETEALL;
+    visualization_msgs::msg::MarkerArray array;
+    visualization_msgs::msg::Marker clear;
+    clear.action = visualization_msgs::msg::Marker::DELETEALL;
     array.markers.push_back(clear);
 
     const MotionProfile* profile = profile_override;
@@ -1047,27 +1129,27 @@ class CollisionMonitorNode {
       profile = &navigation_profile_;
     }
 
-    const ros::Time stamp = ros::Time::now();
+    const rclcpp::Time stamp = this->now();
     Pose2D current_pose;
     if (GetCurrentMarkerPose(rollout, current_pose)) {
-      std::vector<geometry_msgs::Point> transformed;
-      costmap_2d::transformFootprint(
+      std::vector<geometry_msgs::msg::Point> transformed;
+      nav2_costmap_2d::transformFootprint(
           current_pose.x, current_pose.y, current_pose.yaw,
           profile->checker.footprint(), transformed);
 
-      visualization_msgs::Marker current;
+      visualization_msgs::msg::Marker current;
       current.header.frame_id = global_frame_;
       current.header.stamp = stamp;
       current.ns = "current_padded_footprint";
       current.id = 0;
-      current.type = visualization_msgs::Marker::LINE_STRIP;
-      current.action = visualization_msgs::Marker::ADD;
+      current.type = visualization_msgs::msg::Marker::LINE_STRIP;
+      current.action = visualization_msgs::msg::Marker::ADD;
       current.pose.orientation.w = 1.0;
       current.scale.x = 0.025;
       current.color.r = 1.0;
       current.color.g = 0.8;
       current.color.a = 0.95;
-      for (geometry_msgs::Point point : transformed) {
+      for (geometry_msgs::msg::Point point : transformed) {
         point.z = 0.06;
         current.points.push_back(point);
       }
@@ -1078,23 +1160,23 @@ class CollisionMonitorNode {
     }
 
     if (rollout.poses.empty()) {
-      marker_pub_.publish(array);
+      marker_pub_->publish(array);
       return;
     }
 
-    visualization_msgs::Marker path;
+    visualization_msgs::msg::Marker path;
     path.header.frame_id = global_frame_;
     path.header.stamp = stamp;
     path.ns = "predicted_path";
     path.id = 0;
-    path.type = visualization_msgs::Marker::LINE_STRIP;
-    path.action = visualization_msgs::Marker::ADD;
+    path.type = visualization_msgs::msg::Marker::LINE_STRIP;
+    path.action = visualization_msgs::msg::Marker::ADD;
     path.scale.x = 0.02;
     path.color.a = 0.9;
     path.color.g = state == "OK" ? 1.0 : 0.5;
     path.color.r = state == "OK" ? 0.0 : 1.0;
     for (const Pose2D& pose : rollout.poses) {
-      geometry_msgs::Point point;
+      geometry_msgs::msg::Point point;
       point.x = pose.x;
       point.y = pose.y;
       point.z = 0.03;
@@ -1102,25 +1184,25 @@ class CollisionMonitorNode {
     }
     array.markers.push_back(path);
 
-    visualization_msgs::Marker footprints;
+    visualization_msgs::msg::Marker footprints;
     footprints.header = path.header;
     footprints.ns = "predicted_footprints";
     footprints.id = 1;
-    footprints.type = visualization_msgs::Marker::LINE_LIST;
-    footprints.action = visualization_msgs::Marker::ADD;
+    footprints.type = visualization_msgs::msg::Marker::LINE_LIST;
+    footprints.action = visualization_msgs::msg::Marker::ADD;
     footprints.scale.x = 0.01;
     footprints.color.a = 0.45;
     footprints.color.b = 1.0;
     const std::size_t stride = std::max<std::size_t>(
         1, rollout.poses.size() / static_cast<std::size_t>(20));
     for (std::size_t i = 0; i < rollout.poses.size(); i += stride) {
-      std::vector<geometry_msgs::Point> transformed;
+      std::vector<geometry_msgs::msg::Point> transformed;
       const Pose2D& pose = rollout.poses[i];
-      costmap_2d::transformFootprint(pose.x, pose.y, pose.yaw,
+      nav2_costmap_2d::transformFootprint(pose.x, pose.y, pose.yaw,
                                      profile->checker.footprint(), transformed);
       for (std::size_t j = 0; j < transformed.size(); ++j) {
-        geometry_msgs::Point a = transformed[j];
-        geometry_msgs::Point b = transformed[(j + 1) % transformed.size()];
+        geometry_msgs::msg::Point a = transformed[j];
+        geometry_msgs::msg::Point b = transformed[(j + 1) % transformed.size()];
         a.z = 0.035;
         b.z = 0.035;
         footprints.points.push_back(a);
@@ -1130,12 +1212,12 @@ class CollisionMonitorNode {
     array.markers.push_back(footprints);
 
     if (rollout.collision) {
-      visualization_msgs::Marker collision;
+      visualization_msgs::msg::Marker collision;
       collision.header = path.header;
       collision.ns = "collision";
       collision.id = 2;
-      collision.type = visualization_msgs::Marker::SPHERE;
-      collision.action = visualization_msgs::Marker::ADD;
+      collision.type = visualization_msgs::msg::Marker::SPHERE;
+      collision.action = visualization_msgs::msg::Marker::ADD;
       collision.pose.position.x = rollout.collision_pose.x;
       collision.pose.position.y = rollout.collision_pose.y;
       collision.pose.position.z = 0.10;
@@ -1147,11 +1229,9 @@ class CollisionMonitorNode {
       collision.color.a = 0.9;
       array.markers.push_back(collision);
     }
-    marker_pub_.publish(array);
+    marker_pub_->publish(array);
   }
 
-  ros::NodeHandle nh_;
-  ros::NodeHandle private_nh_;
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
   MotionProfile navigation_profile_;
@@ -1162,24 +1242,25 @@ class CollisionMonitorNode {
   GridPolicy local_policy_;
   RolloutOptions rollout_options_;
 
-  ros::Subscriber candidate_sub_;
-  ros::Subscriber topology_phase_sub_;
-  ros::Subscriber odom_sub_;
-  ros::Subscriber static_map_sub_;
-  ros::Subscriber local_map_sub_;
-  ros::Publisher output_pub_;
-  ros::Publisher status_pub_;
-  ros::Publisher marker_pub_;
-  ros::WallTimer timer_;
+  rclcpp::Subscription<cmd_vel_arbiter::msg::ArbitratedCommand>::SharedPtr
+      candidate_sub_;
+  rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr topology_phase_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr static_map_sub_;
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr local_map_sub_;
+  rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr output_pub_;
+  rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr status_pub_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
+  rclcpp::TimerBase::SharedPtr timer_;
 
-  cmd_vel_arbiter::ArbitratedCommand candidate_;
-  nav_msgs::Odometry odom_;
-  nav_msgs::OccupancyGrid static_map_;
-  nav_msgs::OccupancyGrid local_map_;
-  ros::WallTime candidate_received_at_;
-  ros::WallTime odom_received_at_;
-  ros::WallTime local_map_received_at_;
-  ros::WallTime topology_phase_received_at_;
+  cmd_vel_arbiter::msg::ArbitratedCommand candidate_;
+  nav_msgs::msg::Odometry odom_;
+  nav_msgs::msg::OccupancyGrid static_map_;
+  nav_msgs::msg::OccupancyGrid local_map_;
+  WallTime candidate_received_at_;
+  WallTime odom_received_at_;
+  WallTime local_map_received_at_;
+  WallTime topology_phase_received_at_;
   bool have_candidate_ = false;
   bool have_odom_ = false;
   bool have_static_map_ = false;
@@ -1188,14 +1269,14 @@ class CollisionMonitorNode {
   uint8_t topology_phase_ = kTopologyPhaseNormal;
 
   Pose2D last_pose_;
-  ros::Time last_tf_stamp_;
-  ros::WallTime pose_jump_until_;
+  rclcpp::Time last_tf_stamp_{0, 0, RCL_ROS_TIME};
+  WallTime pose_jump_until_;
   bool have_last_pose_ = false;
   double applied_scale_ = 0.0;
-  ros::WallTime scale_increase_since_;
+  WallTime scale_increase_since_;
   std::string active_source_;
   std::string pending_source_;
-  ros::WallTime transition_stopped_since_;
+  WallTime transition_stopped_since_;
   bool navigation_terminal_active_ = false;
 
   std::string candidate_topic_;
@@ -1229,19 +1310,22 @@ class CollisionMonitorNode {
   double max_pose_jump_yaw_ = 0.80;
   double pose_jump_hold_time_ = 0.50;
   std::string last_diagnostic_signature_;
-  ros::WallTime last_diagnostic_publish_;
+  WallTime last_diagnostic_publish_;
 };
 
 }  // namespace collision_monitor
 
 int main(int argc, char** argv) {
-  ros::init(argc, argv, "collision_monitor");
+  rclcpp::init(argc, argv);
   try {
-    collision_monitor::CollisionMonitorNode node;
-    ros::spin();
+    rclcpp::spin(std::make_shared<collision_monitor::CollisionMonitorNode>());
   } catch (const std::exception& exception) {
-    ROS_FATAL("collision_monitor failed to start: %s", exception.what());
+    RCLCPP_FATAL(
+        rclcpp::get_logger("collision_monitor"),
+        "collision_monitor failed to start: %s", exception.what());
+    rclcpp::shutdown();
     return 1;
   }
+  rclcpp::shutdown();
   return 0;
 }

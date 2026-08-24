@@ -5,20 +5,73 @@ import threading
 import time
 import unittest
 
-import rospy
-import rostest
+import launch
+import launch_ros.actions
+import launch_testing.actions
+import pytest
+import rclpy
 import tf2_ros
 from cmd_vel_arbiter.msg import ArbitratedCommand
 from diagnostic_msgs.msg import DiagnosticArray
 from geometry_msgs.msg import TransformStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry
+from rclpy.executors import SingleThreadedExecutor
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import UInt8
 from visualization_msgs.msg import Marker, MarkerArray
+
+
+@pytest.mark.launch_test
+def generate_test_description():
+    monitor = launch_ros.actions.Node(
+        package='collision_monitor',
+        executable='collision_monitor_node',
+        name='collision_monitor_test_node',
+        output='screen',
+        parameters=[{
+            'candidate_topic': '/collision_monitor_test/candidate',
+            'output_topic': '/collision_monitor_test/output',
+            'odom_topic': '/collision_monitor_test/odom',
+            'static_map_topic': '/collision_monitor_test/static_map',
+            'local_map_topic': '/collision_monitor_test/local_map',
+            'topology_phase_topic': '/collision_monitor_test/topology_phase',
+            'status_topic': '/collision_monitor_test/status',
+            'marker_topic': '/collision_monitor_test/markers',
+            'global_frame': 'collision_test_map',
+            'base_frame': 'collision_test_base',
+            'monitor_rate': 50.0,
+            'candidate_timeout': 0.25,
+            'odom_timeout': 0.20,
+            'tf_timeout': 0.30,
+            'local_map_timeout': 0.30,
+            'topology_phase_timeout': 0.25,
+            'clear_hold_time': 0.15,
+            'source_transition_hold_time': 0.10,
+            'navigation_footprint_padding': 0.15,
+            'navigation_terminal_footprint_padding': 0.08,
+            'tag_footprint_padding': 0.08,
+            'teleop_footprint_padding': 0.15,
+            'footprint':
+                '[[0.36, 0.25], [0.36, -0.25], '
+                '[-0.36, -0.25], [-0.36, 0.25]]',
+        }])
+    return launch.LaunchDescription([
+        monitor,
+        launch_testing.actions.ReadyToTest(),
+    ])
 
 
 class CollisionMonitorNodeTest(unittest.TestCase):
 
     def setUp(self):
+        rclpy.init()
+        self._node = rclpy.create_node('collision_monitor_node_test')
+        self._executor = SingleThreadedExecutor()
+        self._executor.add_node(self._node)
+        self._spin_thread = threading.Thread(target=self._executor.spin)
+        self._spin_thread.daemon = True
+        self._spin_thread.start()
+
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._publish_odom = False
@@ -35,28 +88,32 @@ class CollisionMonitorNodeTest(unittest.TestCase):
         self._last_status = None
         self._last_markers = {}
 
-        self._candidate_pub = rospy.Publisher(
-            '/collision_monitor_test/candidate', ArbitratedCommand,
-            queue_size=1)
-        self._odom_pub = rospy.Publisher(
-            '/collision_monitor_test/odom', Odometry, queue_size=1)
-        self._static_pub = rospy.Publisher(
-            '/collision_monitor_test/static_map', OccupancyGrid,
-            queue_size=1, latch=True)
-        self._local_pub = rospy.Publisher(
-            '/collision_monitor_test/local_map', OccupancyGrid, queue_size=1)
-        self._phase_pub = rospy.Publisher(
-            '/collision_monitor_test/topology_phase', UInt8, queue_size=1)
-        self._output_sub = rospy.Subscriber(
-            '/collision_monitor_test/output', Twist, self._output_callback,
-            queue_size=1)
-        self._status_sub = rospy.Subscriber(
-            '/collision_monitor_test/status', DiagnosticArray,
-            self._status_callback, queue_size=1)
-        self._marker_sub = rospy.Subscriber(
-            '/collision_monitor_test/markers', MarkerArray,
-            self._marker_callback, queue_size=1)
-        self._tf_broadcaster = tf2_ros.TransformBroadcaster()
+        default_qos = QoSProfile(depth=1)
+        map_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self._candidate_pub = self._node.create_publisher(
+            ArbitratedCommand, '/collision_monitor_test/candidate',
+            default_qos)
+        self._odom_pub = self._node.create_publisher(
+            Odometry, '/collision_monitor_test/odom', default_qos)
+        self._static_pub = self._node.create_publisher(
+            OccupancyGrid, '/collision_monitor_test/static_map', map_qos)
+        self._local_pub = self._node.create_publisher(
+            OccupancyGrid, '/collision_monitor_test/local_map', map_qos)
+        self._phase_pub = self._node.create_publisher(
+            UInt8, '/collision_monitor_test/topology_phase', default_qos)
+        self._output_sub = self._node.create_subscription(
+            Twist, '/collision_monitor_test/output', self._output_callback,
+            default_qos)
+        self._status_sub = self._node.create_subscription(
+            DiagnosticArray, '/collision_monitor_test/status',
+            self._status_callback, default_qos)
+        self._marker_sub = self._node.create_subscription(
+            MarkerArray, '/collision_monitor_test/markers',
+            self._marker_callback, default_qos)
+        self._tf_broadcaster = tf2_ros.TransformBroadcaster(self._node)
 
         self._thread = threading.Thread(target=self._publish_loop)
         self._thread.daemon = True
@@ -66,6 +123,10 @@ class CollisionMonitorNodeTest(unittest.TestCase):
     def tearDown(self):
         self._stop.set()
         self._thread.join(1.0)
+        self._executor.shutdown()
+        self._spin_thread.join(1.0)
+        self._node.destroy_node()
+        rclpy.shutdown()
 
     @staticmethod
     def _make_map():
@@ -88,12 +149,12 @@ class CollisionMonitorNodeTest(unittest.TestCase):
 
     def _wait_for_connections(self):
         deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline and not rospy.is_shutdown():
-            if (self._candidate_pub.get_num_connections() and
-                    self._odom_pub.get_num_connections() and
-                    self._static_pub.get_num_connections() and
-                    self._local_pub.get_num_connections() and
-                    self._phase_pub.get_num_connections()):
+        while time.monotonic() < deadline and rclpy.ok():
+            if (self._candidate_pub.get_subscription_count() and
+                    self._odom_pub.get_subscription_count() and
+                    self._static_pub.get_subscription_count() and
+                    self._local_pub.get_subscription_count() and
+                    self._phase_pub.get_subscription_count()):
                 return
             time.sleep(0.02)
         self.fail('collision monitor subscriptions did not connect')
@@ -118,9 +179,8 @@ class CollisionMonitorNodeTest(unittest.TestCase):
             self._last_markers = markers
 
     def _publish_loop(self):
-        rate = rospy.Rate(30)
-        while not rospy.is_shutdown() and not self._stop.is_set():
-            stamp = rospy.Time.now()
+        while rclpy.ok() and not self._stop.is_set():
+            stamp = self._node.get_clock().now().to_msg()
             with self._lock:
                 candidate = copy.deepcopy(self._candidate)
                 publish_odom = self._publish_odom
@@ -157,7 +217,7 @@ class CollisionMonitorNodeTest(unittest.TestCase):
                 self._tf_broadcaster.sendTransform(transform)
             if publish_phase:
                 self._phase_pub.publish(UInt8(data=phase))
-            rate.sleep()
+            time.sleep(1.0 / 30.0)
 
     def _set_phase(self, phase, publish=True):
         with self._lock:
@@ -184,7 +244,7 @@ class CollisionMonitorNodeTest(unittest.TestCase):
             'EMERGENCY_STOP', 'COLLISION_STOP'
         }
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline and not rospy.is_shutdown():
+        while time.monotonic() < deadline and rclpy.ok():
             with self._lock:
                 status = copy.deepcopy(self._last_status)
                 output = copy.deepcopy(self._last_output)
@@ -207,7 +267,7 @@ class CollisionMonitorNodeTest(unittest.TestCase):
 
     def _wait_for_ok_output(self, linear_x, linear_y, timeout=3.0):
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline and not rospy.is_shutdown():
+        while time.monotonic() < deadline and rclpy.ok():
             with self._lock:
                 status = copy.deepcopy(self._last_status)
                 output = copy.deepcopy(self._last_output)
@@ -222,7 +282,7 @@ class CollisionMonitorNodeTest(unittest.TestCase):
 
     def _wait_for_marker(self, namespace, timeout=3.0):
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline and not rospy.is_shutdown():
+        while time.monotonic() < deadline and rclpy.ok():
             with self._lock:
                 marker = copy.deepcopy(self._last_markers.get(namespace))
             if marker is not None:
@@ -244,7 +304,7 @@ class CollisionMonitorNodeTest(unittest.TestCase):
         self.assertAlmostEqual(0.80, output.angular.z)
 
         static_map = self._make_map()
-        static_map.header.stamp = rospy.Time.now()
+        static_map.header.stamp = self._node.get_clock().now().to_msg()
         self._static_pub.publish(static_map)
         with self._lock:
             self._publish_odom = True
@@ -406,7 +466,7 @@ class CollisionMonitorNodeTest(unittest.TestCase):
         status, output = self._wait_for_state(
             'DATA_NOT_READY', 'STATIC_MAP_NOT_READY')
         self.assertAlmostEqual(0.0, output.linear.x)
-        static_map.header.stamp = rospy.Time.now()
+        static_map.header.stamp = self._node.get_clock().now().to_msg()
         self._static_pub.publish(static_map)
 
         self._set_command('tag', linear_y=0.03)
@@ -433,9 +493,3 @@ class CollisionMonitorNodeTest(unittest.TestCase):
                                places=3)
         self.assertAlmostEqual(0.40, max(p.y for p in current.points),
                                places=3)
-
-
-if __name__ == '__main__':
-    rospy.init_node('collision_monitor_node_test')
-    rostest.rosrun('collision_monitor', 'collision_monitor_node_test',
-                   CollisionMonitorNodeTest)

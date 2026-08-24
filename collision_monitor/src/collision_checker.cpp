@@ -1,11 +1,12 @@
-#include <collision_monitor/collision_checker.h>
+#include "collision_monitor/collision_checker.h"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
 
-#include <costmap_2d/footprint.h>
-#include <tf2/utils.h>
+#include "nav2_costmap_2d/footprint.hpp"
+#include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
+#include "tf2/utils.hpp"
 
 namespace collision_monitor {
 namespace {
@@ -68,7 +69,7 @@ bool PointInRect(double x, double y, double min_x, double min_y, double max_x,
 }
 
 bool PointInPolygon(double x, double y,
-                    const std::vector<geometry_msgs::Point>& polygon) {
+                    const std::vector<geometry_msgs::msg::Point>& polygon) {
   bool inside = false;
   for (std::size_t i = 0, j = polygon.size() - 1; i < polygon.size(); j = i++) {
     const double xi = polygon[i].x;
@@ -127,10 +128,10 @@ bool SegmentsIntersect(double ax, double ay, double bx, double by, double cx,
          (o4 == 0 && OnSegment(cx, cy, dx, dy, bx, by));
 }
 
-bool PolygonIntersectsCell(const std::vector<geometry_msgs::Point>& polygon,
+bool PolygonIntersectsCell(const std::vector<geometry_msgs::msg::Point>& polygon,
                            double min_x, double min_y, double max_x,
                            double max_y) {
-  for (const geometry_msgs::Point& point : polygon) {
+  for (const geometry_msgs::msg::Point& point : polygon) {
     if (PointInRect(point.x, point.y, min_x, min_y, max_x, max_y)) {
       return true;
     }
@@ -145,8 +146,8 @@ bool PolygonIntersectsCell(const std::vector<geometry_msgs::Point>& polygon,
   }
 
   for (std::size_t i = 0; i < polygon.size(); ++i) {
-    const geometry_msgs::Point& a = polygon[i];
-    const geometry_msgs::Point& b = polygon[(i + 1) % polygon.size()];
+    const geometry_msgs::msg::Point& a = polygon[i];
+    const geometry_msgs::msg::Point& b = polygon[(i + 1) % polygon.size()];
     for (int edge = 0; edge < 4; ++edge) {
       const double* c = corners[edge];
       const double* d = corners[(edge + 1) % 4];
@@ -170,7 +171,7 @@ bool IsBlocked(int value, const GridPolicy& policy) {
 CollisionChecker::CollisionChecker() = default;
 
 bool CollisionChecker::setFootprint(
-    const std::vector<geometry_msgs::Point>& footprint, double padding,
+    const std::vector<geometry_msgs::msg::Point>& footprint, double padding,
     std::string* error) {
   if (footprint.size() < 3) {
     if (error != nullptr) {
@@ -178,7 +179,7 @@ bool CollisionChecker::setFootprint(
     }
     return false;
   }
-  for (const geometry_msgs::Point& point : footprint) {
+  for (const geometry_msgs::msg::Point& point : footprint) {
     if (!std::isfinite(point.x) || !std::isfinite(point.y)) {
       if (error != nullptr) {
         *error = "footprint contains a non-finite point";
@@ -188,16 +189,16 @@ bool CollisionChecker::setFootprint(
   }
 
   footprint_ = footprint;
-  costmap_2d::padFootprint(footprint_, std::max(0.0, padding));
+  nav2_costmap_2d::padFootprint(footprint_, std::max(0.0, padding));
   circumscribed_radius_ = 0.0;
-  for (const geometry_msgs::Point& point : footprint_) {
+  for (const geometry_msgs::msg::Point& point : footprint_) {
     circumscribed_radius_ =
         std::max(circumscribed_radius_, std::hypot(point.x, point.y));
   }
   return true;
 }
 
-const std::vector<geometry_msgs::Point>& CollisionChecker::footprint() const {
+const std::vector<geometry_msgs::msg::Point>& CollisionChecker::footprint() const {
   return footprint_;
 }
 
@@ -206,9 +207,10 @@ double CollisionChecker::circumscribedRadius() const {
 }
 
 bool CollisionChecker::poseCollides(const Pose2D& pose,
-                                    const nav_msgs::OccupancyGrid& grid,
+                                    const nav_msgs::msg::OccupancyGrid& grid,
                                     const GridPolicy& policy) const {
-  const geometry_msgs::Quaternion& orientation = grid.info.origin.orientation;
+  const geometry_msgs::msg::Quaternion& orientation =
+      grid.info.origin.orientation;
   const double quaternion_norm =
       orientation.x * orientation.x + orientation.y * orientation.y +
       orientation.z * orientation.z + orientation.w * orientation.w;
@@ -226,30 +228,30 @@ bool CollisionChecker::poseCollides(const Pose2D& pose,
     return true;
   }
 
-  std::vector<geometry_msgs::Point> transformed;
-  costmap_2d::transformFootprint(pose.x, pose.y, pose.yaw, footprint_,
+  std::vector<geometry_msgs::msg::Point> transformed;
+  nav2_costmap_2d::transformFootprint(pose.x, pose.y, pose.yaw, footprint_,
                                  transformed);
   return footprintIntersectsGrid(transformed, grid, policy);
 }
 
 bool CollisionChecker::footprintIntersectsGrid(
-    const std::vector<geometry_msgs::Point>& world_footprint,
-    const nav_msgs::OccupancyGrid& grid, const GridPolicy& policy) const {
+    const std::vector<geometry_msgs::msg::Point>& world_footprint,
+    const nav_msgs::msg::OccupancyGrid& grid, const GridPolicy& policy) const {
   const double origin_yaw = tf2::getYaw(grid.info.origin.orientation);
   const double c = std::cos(origin_yaw);
   const double s = std::sin(origin_yaw);
   const double resolution = grid.info.resolution;
 
-  std::vector<geometry_msgs::Point> polygon;
+  std::vector<geometry_msgs::msg::Point> polygon;
   polygon.reserve(world_footprint.size());
   double min_x = std::numeric_limits<double>::infinity();
   double min_y = std::numeric_limits<double>::infinity();
   double max_x = -std::numeric_limits<double>::infinity();
   double max_y = -std::numeric_limits<double>::infinity();
-  for (const geometry_msgs::Point& world : world_footprint) {
+  for (const geometry_msgs::msg::Point& world : world_footprint) {
     const double dx = world.x - grid.info.origin.position.x;
     const double dy = world.y - grid.info.origin.position.y;
-    geometry_msgs::Point local;
+    geometry_msgs::msg::Point local;
     local.x = c * dx + s * dy;
     local.y = -s * dx + c * dy;
     polygon.push_back(local);
@@ -299,8 +301,8 @@ bool CollisionChecker::footprintIntersectsGrid(
 CollisionResult CollisionChecker::simulate(
     const MotionState& initial, double target_linear_x, double target_linear_y,
     double target_angular_z, double hold_time,
-    const nav_msgs::OccupancyGrid& static_map,
-    const GridPolicy& static_policy, const nav_msgs::OccupancyGrid& local_map,
+    const nav_msgs::msg::OccupancyGrid& static_map,
+    const GridPolicy& static_policy, const nav_msgs::msg::OccupancyGrid& local_map,
     const GridPolicy& local_policy, const RolloutOptions& options) const {
   CollisionResult result;
   MotionState state = initial;

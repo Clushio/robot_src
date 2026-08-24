@@ -1,8 +1,8 @@
 #ifndef COLLISION_MONITOR_COLLISION_CHECKER_H_
 #define COLLISION_MONITOR_COLLISION_CHECKER_H_
 
-#include <geometry_msgs/Point.h>
-#include <nav_msgs/OccupancyGrid.h>
+#include "geometry_msgs/msg/point.hpp"
+#include "nav_msgs/msg/occupancy_grid.hpp"
 
 #include <string>
 #include <vector>
@@ -52,12 +52,12 @@ class CollisionChecker {
  public:
   CollisionChecker();
 
-  bool setFootprint(const std::vector<geometry_msgs::Point>& footprint,
+  bool setFootprint(const std::vector<geometry_msgs::msg::Point>& footprint,
                     double padding, std::string* error = nullptr);
-  const std::vector<geometry_msgs::Point>& footprint() const;
+  const std::vector<geometry_msgs::msg::Point>& footprint() const;
   double circumscribedRadius() const;
 
-  bool poseCollides(const Pose2D& pose, const nav_msgs::OccupancyGrid& grid,
+  bool poseCollides(const Pose2D& pose, const nav_msgs::msg::OccupancyGrid& grid,
                     const GridPolicy& policy) const;
 
   CollisionResult simulate(const MotionState& initial,
@@ -65,19 +65,19 @@ class CollisionChecker {
                            double target_linear_y,
                            double target_angular_z,
                            double hold_time,
-                           const nav_msgs::OccupancyGrid& static_map,
+                           const nav_msgs::msg::OccupancyGrid& static_map,
                            const GridPolicy& static_policy,
-                           const nav_msgs::OccupancyGrid& local_map,
+                           const nav_msgs::msg::OccupancyGrid& local_map,
                            const GridPolicy& local_policy,
                            const RolloutOptions& options) const;
 
  private:
   bool footprintIntersectsGrid(
-      const std::vector<geometry_msgs::Point>& world_footprint,
-      const nav_msgs::OccupancyGrid& grid,
+      const std::vector<geometry_msgs::msg::Point>& world_footprint,
+      const nav_msgs::msg::OccupancyGrid& grid,
       const GridPolicy& policy) const;
 
-  std::vector<geometry_msgs::Point> footprint_;
+  std::vector<geometry_msgs::msg::Point> footprint_;
   double circumscribed_radius_ = 0.0;
 };
 

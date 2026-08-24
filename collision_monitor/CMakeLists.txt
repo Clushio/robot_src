@@ -1,15 +1,34 @@
-cmake_minimum_required(VERSION 3.0.2)
+cmake_minimum_required(VERSION 3.8)
 project(collision_monitor)
 
-add_compile_options(-std=c++11 -Wall -Wextra)
+if(NOT CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 17)
+endif()
 
-find_package(catkin REQUIRED COMPONENTS
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
+find_package(ament_cmake REQUIRED)
+find_package(cmd_vel_arbiter REQUIRED)
+find_package(diagnostic_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(nav2_costmap_2d REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(visualization_msgs REQUIRED)
+
+set(PACKAGE_DEPENDENCIES
   cmd_vel_arbiter
-  costmap_2d
   diagnostic_msgs
   geometry_msgs
+  nav2_costmap_2d
   nav_msgs
-  roscpp
+  rclcpp
   std_msgs
   tf2
   tf2_geometry_msgs
@@ -17,43 +36,47 @@ find_package(catkin REQUIRED COMPONENTS
   visualization_msgs
 )
 
-catkin_package(
-  INCLUDE_DIRS include
-  LIBRARIES collision_checker
-  CATKIN_DEPENDS cmd_vel_arbiter costmap_2d diagnostic_msgs geometry_msgs
-                 nav_msgs roscpp std_msgs tf2 tf2_geometry_msgs tf2_ros
-                 visualization_msgs
+add_library(collision_checker SHARED src/collision_checker.cpp)
+target_include_directories(collision_checker PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
 )
-
-include_directories(include ${catkin_INCLUDE_DIRS})
-
-add_library(collision_checker src/collision_checker.cpp)
-target_link_libraries(collision_checker ${catkin_LIBRARIES})
-add_dependencies(collision_checker ${catkin_EXPORTED_TARGETS})
+ament_target_dependencies(collision_checker
+  geometry_msgs nav2_costmap_2d nav_msgs tf2 tf2_geometry_msgs)
 
 add_executable(collision_monitor_node src/collision_monitor_node.cpp)
-target_link_libraries(collision_monitor_node collision_checker ${catkin_LIBRARIES})
-add_dependencies(collision_monitor_node ${catkin_EXPORTED_TARGETS})
-
-if(CATKIN_ENABLE_TESTING)
-  find_package(rostest REQUIRED)
-  catkin_add_gtest(collision_checker_test test/collision_checker_test.cpp)
-  if(TARGET collision_checker_test)
-    target_link_libraries(collision_checker_test collision_checker ${catkin_LIBRARIES})
-  endif()
-  add_rostest(test/collision_monitor_node.test)
-endif()
+target_include_directories(collision_monitor_node PRIVATE include)
+target_link_libraries(collision_monitor_node collision_checker)
+ament_target_dependencies(collision_monitor_node ${PACKAGE_DEPENDENCIES})
 
 install(TARGETS collision_checker collision_monitor_node
-  ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+  EXPORT collision_checkerTargets
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 
-install(DIRECTORY include/${PROJECT_NAME}/
-  DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
+install(DIRECTORY include/
+  DESTINATION include
 )
 
 install(DIRECTORY config launch
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+  DESTINATION share/${PROJECT_NAME}
+  PATTERN "__pycache__" EXCLUDE
+  PATTERN "*.pyc" EXCLUDE
 )
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  find_package(launch_testing_ament_cmake REQUIRED)
+  ament_add_gtest(collision_checker_test test/collision_checker_test.cpp)
+  target_link_libraries(collision_checker_test collision_checker)
+  ament_target_dependencies(collision_checker_test geometry_msgs nav_msgs)
+  add_launch_test(test/collision_monitor_node_test.py TIMEOUT 45)
+endif()
+
+ament_export_targets(collision_checkerTargets HAS_LIBRARY_TARGET)
+ament_export_dependencies(
+  geometry_msgs nav2_costmap_2d nav_msgs tf2 tf2_geometry_msgs)
+ament_export_include_directories(include)
+ament_package()
