@@ -164,7 +164,7 @@ if(BUILD_WITHOUT_ROS) # BUILD_WITHOUT_ROS
     include(CMakePackageConfigHelpers)
     write_basic_package_version_file(
         ugv_sdkConfigVersion.cmake
-        VERSION "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}"
+        VERSION "${PROJECT_VERSION}"
         COMPATIBILITY SameMajorVersion)
 
     install(EXPORT ugv_sdkTargets
