@@ -59,7 +59,9 @@ install(TARGETS ranger_base_node
   DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY launch
-  DESTINATION share/${PROJECT_NAME}/)
+  DESTINATION share/${PROJECT_NAME}/
+  PATTERN "__pycache__" EXCLUDE
+  PATTERN "*.pyc" EXCLUDE)
 
 # install(DIRECTORY ascent
 #   DESTINATION share/${PROJECT_NAME})

@@ -7,6 +7,15 @@
     <arg name="update_rate" default="50" />
     <arg name="odom_topic_name" default="odom" />
     <arg name="publish_odom_tf" default="false" />
+    <arg name="cmd_vel_timeout" default="0.25" />
+    <arg name="stop_velocity_threshold" default="0.01" />
+    <arg name="stop_wheel_speed_threshold" default="0.01" />
+    <arg name="steering_center_tolerance" default="0.01" />
+    <arg name="stop_wait_timeout" default="2.0" />
+    <arg name="mode_switch_timeout" default="2.0" />
+    <arg name="centering_timeout" default="3.0" />
+    <arg name="stop_stable_frames" default="3" />
+    <arg name="center_stable_frames" default="3" />
 
     <node name="ranger_base_node" pkg="ranger_base" exec="ranger_base_node" output="both">
         <param name="port_name"  value="$(var port_name)" />
@@ -16,5 +25,14 @@
         <param name="update_rate"  value="$(var update_rate)" />
         <param name="odom_topic_name"  value="$(var odom_topic_name)" />  
         <param name="publish_odom_tf"  value="$(var publish_odom_tf)" />
+        <param name="cmd_vel_timeout" value="$(var cmd_vel_timeout)" />
+        <param name="stop_velocity_threshold" value="$(var stop_velocity_threshold)" />
+        <param name="stop_wheel_speed_threshold" value="$(var stop_wheel_speed_threshold)" />
+        <param name="steering_center_tolerance" value="$(var steering_center_tolerance)" />
+        <param name="stop_wait_timeout" value="$(var stop_wait_timeout)" />
+        <param name="mode_switch_timeout" value="$(var mode_switch_timeout)" />
+        <param name="centering_timeout" value="$(var centering_timeout)" />
+        <param name="stop_stable_frames" value="$(var stop_stable_frames)" />
+        <param name="center_stable_frames" value="$(var center_stable_frames)" />
     </node>
 </launch>

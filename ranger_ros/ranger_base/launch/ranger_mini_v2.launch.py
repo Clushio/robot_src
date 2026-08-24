@@ -22,12 +22,10 @@ def generate_launch_description():
     odom_topic_arg = DeclareLaunchArgument('odom_topic_name', default_value='odom',
                                            description='Odometry topic name')
 
-    simulated_robot_arg = DeclareLaunchArgument('simulated_robot', default_value='false',
-                                                   description='Whether running with simulator')
     publish_odom_tf_arg = DeclareLaunchArgument('publish_odom_tf', default_value='false',
-                                                 description='Simulation control loop update rate')
+                                                 description='Publish odom to base TF')
     update_rate_arg = DeclareLaunchArgument('update_rate', default_value='50',
-                                                 description='Simulation control loop update rate')
+                                             description='Driver update rate')
     robot_model_arg = DeclareLaunchArgument('robot_model', default_value='ranger_mini_v2',
                                            description='robot motion model')
     cmd_vel_timeout_arg = DeclareLaunchArgument('cmd_vel_timeout', default_value='0.25')
@@ -53,7 +51,6 @@ def generate_launch_description():
                 'odom_frame': launch.substitutions.LaunchConfiguration('odom_frame'),
                 'base_frame': launch.substitutions.LaunchConfiguration('base_frame'),
                 'odom_topic_name': launch.substitutions.LaunchConfiguration('odom_topic_name'),
-                'simulated_robot': launch.substitutions.LaunchConfiguration('simulated_robot'),
                 'publish_odom_tf': launch.substitutions.LaunchConfiguration('publish_odom_tf'),
                 'update_rate': launch.substitutions.LaunchConfiguration('update_rate'),
                 'robot_model': launch.substitutions.LaunchConfiguration('robot_model'),
@@ -74,7 +71,6 @@ def generate_launch_description():
         odom_frame_arg,
         base_link_frame_arg,
         odom_topic_arg,
-        simulated_robot_arg,
         publish_odom_tf_arg,
         update_rate_arg,
         robot_model_arg,
