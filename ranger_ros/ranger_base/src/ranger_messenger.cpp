@@ -9,6 +9,8 @@
 
 #include "ranger_base/ranger_messenger.hpp"
 
+#include <limits>
+
 #include "ranger_base/kinematics_model.hpp"
 
 using namespace rclcpp;
@@ -228,24 +230,46 @@ void RangerROSMessenger::PublishStateToROS() {
 
     ranger_msgs::msg::ActuatorStateArray actuator_msg;
     actuator_msg.header.stamp = current_time_;
+
+    // Actuator IDs 0-3 are drive motors and IDs 4-7 are steering motors.
+    const float motor_speeds[8] = {
+        actuator_state.motor_speeds.speed_1,
+        actuator_state.motor_speeds.speed_2,
+        actuator_state.motor_speeds.speed_3,
+        actuator_state.motor_speeds.speed_4,
+        0.0F,
+        0.0F,
+        0.0F,
+        0.0F};
+    const float motor_angles[8] = {
+        0.0F,
+        0.0F,
+        0.0F,
+        0.0F,
+        actuator_state.motor_angles.angle_5,
+        actuator_state.motor_angles.angle_6,
+        actuator_state.motor_angles.angle_7,
+        actuator_state.motor_angles.angle_8};
+
     for (int i = 0; i < 8; i++) {
       ranger_msgs::msg::DriverState driver_state_msg;
       driver_state_msg.driver_voltage =
-          actuator_state.actuator_ls_state->driver_voltage;
+          actuator_state.actuator_ls_state[i].driver_voltage;
       driver_state_msg.driver_temperature =
-          actuator_state.actuator_ls_state->driver_temp;
+          actuator_state.actuator_ls_state[i].driver_temp;
       driver_state_msg.motor_temperature =
-          actuator_state.actuator_ls_state->motor_temp;
+          actuator_state.actuator_ls_state[i].motor_temp;
       driver_state_msg.driver_state =
-          actuator_state.actuator_ls_state->driver_state;
+          actuator_state.actuator_ls_state[i].driver_state;
 
       ranger_msgs::msg::MotorState motor_state_msg;
-      motor_state_msg.current = actuator_state.actuator_hs_state->current;
-      motor_state_msg.pulse_count = actuator_state.actuator_hs_state->pulse_count;
-      motor_state_msg.rpm = actuator_state.actuator_hs_state->rpm;
-      motor_state_msg.motor_angles = actuator_state.motor_angles.angle_5;
-      motor_state_msg.motor_speeds = actuator_state.motor_speeds.speed_1;
-      
+      motor_state_msg.current = actuator_state.actuator_hs_state[i].current;
+      motor_state_msg.pulse_count =
+          actuator_state.actuator_hs_state[i].pulse_count;
+      motor_state_msg.rpm = actuator_state.actuator_hs_state[i].rpm;
+      motor_state_msg.motor_angles = motor_angles[i];
+      motor_state_msg.motor_speeds = motor_speeds[i];
+
       ranger_msgs::msg::ActuatorState actuator_state_msg;
       actuator_state_msg.id = i;
       actuator_state_msg.driver = driver_state_msg;
@@ -266,7 +290,12 @@ void RangerROSMessenger::PublishStateToROS() {
     batt_msg.voltage = common_sensor_state.bms_basic_state.voltage;
     batt_msg.temperature = common_sensor_state.bms_basic_state.temperature;
     batt_msg.current = common_sensor_state.bms_basic_state.current;
-    batt_msg.percentage = common_sensor_state.bms_basic_state.battery_soc;
+    const uint8_t battery_soc =
+        common_sensor_state.bms_basic_state.battery_soc;
+    batt_msg.percentage =
+        battery_soc <= 100
+            ? static_cast<float>(battery_soc) / 100.0F
+            : std::numeric_limits<float>::quiet_NaN();
     batt_msg.charge = std::numeric_limits<float>::quiet_NaN();
     batt_msg.capacity = std::numeric_limits<float>::quiet_NaN();
     batt_msg.design_capacity = std::numeric_limits<float>::quiet_NaN();
@@ -276,7 +305,7 @@ void RangerROSMessenger::PublishStateToROS() {
         sensor_msgs::msg::BatteryState::POWER_SUPPLY_HEALTH_UNKNOWN;
     batt_msg.power_supply_technology =
         sensor_msgs::msg::BatteryState::POWER_SUPPLY_TECHNOLOGY_LION;
-    batt_msg.present = std::numeric_limits<uint8_t>::quiet_NaN();
+    batt_msg.present = true;
 
     battery_state_pub_->publish(batt_msg);
   }
