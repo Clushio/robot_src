@@ -23,7 +23,6 @@ class ScoutRobot : public RobotCommonInterface, public ScoutInterface {
   virtual ~ScoutRobot();
 
   bool Connect(std::string can_name) override;
-  void Connect(std::string uart_name, uint32_t baudrate) override;
 
   void EnableCommandedMode() override;
   std::string RequestVersion(int timeout_sec = 3) override;

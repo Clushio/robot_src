@@ -13,7 +13,7 @@ uint8 MOTION_MODE_SIDE_SLIP = 4
 
 ########################################
 
-Header header
+std_msgs/Header header
 
 # system state
 uint8 vehicle_state

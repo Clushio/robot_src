@@ -38,19 +38,17 @@ class DualAckermanModel {
   };
 
  public:
-  DualAckermanModel(double L, double W, control_type u) : L_(L), W_(W), u_(u){};
+  DualAckermanModel(double L, control_type u) : L_(L), u_(u){};
 
   // x1 = x, x2 = y, x3 = theta
   void operator()(const state_type& x, state_type& xd, double) {
-    xd[0] = u_.v * std::cos(x[2]);
-    xd[1] = u_.v * std::sin(x[2]);
-    if (u_.phi == 0) xd[2] == 0;
-    else xd[2] = u_.phi / std::abs(u_.phi) * 2 * u_.v / (L_ / std::abs(std::tan(u_.phi)) + W_);
+    xd[0] = u_.v * std::cos(u_.phi) * std::cos(x[2]);
+    xd[1] = u_.v * std::cos(u_.phi) * std::sin(x[2]);
+    xd[2] = 2 * u_.v * std::sin(u_.phi) / L_;
   }
 
  private:
   double L_;
-  double W_;
   control_type u_;
 };
 
@@ -89,7 +87,7 @@ class SpinningModel {
   SpinningModel(control_type u) : u_(u){};
 
   // x1 = x, x2 = y, x3 = theta
-  void operator()(const state_type& x, state_type& xd, double) {
+  void operator()(const state_type&, state_type& xd, double) {
     xd[0] = 0;
     xd[1] = 0;
     xd[2] = u_.w;

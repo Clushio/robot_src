@@ -17,7 +17,7 @@
 
 namespace westonrobot {
 struct BunkerCoreState {
-  AgxMsgTimeStamp time_stamp;
+  SdkTimePoint time_stamp;
 
   SystemStateMessage system_state;
   MotionStateMessage motion_state;
@@ -25,7 +25,7 @@ struct BunkerCoreState {
 };
 
 struct BunkerActuatorState {
-  AgxMsgTimeStamp time_stamp;
+  SdkTimePoint time_stamp;
 
   // actuator state
   ActuatorHSStateMessage actuator_hs_state[2];
@@ -34,6 +34,12 @@ struct BunkerActuatorState {
   ActuatorStateMessageV1 actuator_state[2];
 };
 
+struct BunkerCommonSensorState {
+  SdkTimePoint time_stamp;
+
+  BmsBasicMessage bms_basic_state;
+  BmsExtendedMessage bms_extended_state;
+};
 struct BunkerInterface {
   virtual ~BunkerInterface() = default;
 
@@ -42,6 +48,8 @@ struct BunkerInterface {
   // get robot state
   virtual BunkerCoreState GetRobotState() = 0;
   virtual BunkerActuatorState GetActuatorState() = 0;
+  virtual BunkerCommonSensorState GetCommonSensorState() = 0;
+
 };
 }  // namespace westonrobot
 

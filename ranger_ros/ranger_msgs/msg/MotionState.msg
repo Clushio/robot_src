@@ -6,9 +6,8 @@ uint8 MOTION_MODE_SIDE_SLIP = 4
 
 ########################################
 
-Header header
+std_msgs/Header header
 
 # motion state
 uint8 motion_mode
-
 

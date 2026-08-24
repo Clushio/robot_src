@@ -1,13 +1,14 @@
-# ROS Packages for Ranger Robot
+# ROS2 Packages for Ranger Robot
 
-This repository contains ROS support packages for the Ranger robot bases to provide a ROS interface to the robot.
+This repository contains ROS2 support packages for the Ranger robot bases to provide a ROS interface to the robot.
 
 ## Supported hardware
 
 * Ranger Mini V1.0
 <img src="./docs/ranger_mini_v1.png" width="350" />
 
-* Ranger Mini V2.0
+* Ranger Mini V2.0 and V3.0 
+
 <img src="./docs/ranger_mini_v2.png" width="350" />
 
 * Ranger
@@ -22,14 +23,14 @@ $ sudo apt install libasio-dev libboost-all-dev
 $ sudo apt install -y ros-$ROS_DISTRO-teleop-twist-keyboard
 ```
 
-2. Clone and build the packages in a catkin workspace
+2. Clone and build the packages in a workspace
 
-```bash
-$ cd ~/catkin_ws/src
+```
+$ cd ~/agilex_ws/src
 $ git clone https://github.com/agilexrobotics/ugv_sdk.git
-$ git clone https://github.com/agilexrobotics/ranger_ros.git
+$ git clone https://github.com/agilexrobotics/ranger_ros2.git
 $ cd ..
-$ catkin_make
+$ colcon build
 ```
 3. Setup CAN-To-USB adapter
 
@@ -38,14 +39,14 @@ $ catkin_make
     $ sudo modprobe gs_usb
     ```
     
-* first time use scout-ros package
+* first time use ranger-ros package
    ```
-   $ rosrun ranger_bringup setup_can2usb.bash
+   $ sudo bash /src/ranger_ros2/ranger_bringup/scripts/setup_can2usb.bash
    ```
    
-* if not the first time use scout-ros package(Run this command every time you turn off the power) 
+* if not the first time use ranger-ros package(Run this command every time you turn off the power) 
    ```
-   $ rosrun ranger_bringup bringup_can2usb.bash
+   $ sudo bash /src/ranger_ros2/ranger_bringup/scripts/bringup_can2usb.bash
    ```
    
 * Testing command
@@ -54,42 +55,49 @@ $ catkin_make
     $ candump can0
     ```
 
-4. Launch ROS nodes
+4. Launch ROS2 nodes
 
 * Start the base node for ranger
 
     ```shell
-    $ roslaunch ranger_bringup ranger.launch #for ranger
+    $ ros2 launch ranger_bringup ranger.launch.py #for ranger
     ```
 
 * Start the base node for ranger_mini_v1
 
     ```shell
-    $ roslaunch ranger_bringup ranger_mini_v1.launch #for ranger_mini 1.0
+    $ ros2 launch ranger_bringup ranger_mini_v1.launch.py #for ranger_mini 1.0
     ```
 
 * Start the base node for ranger_mini_v2
 
     ```bash
-    $ roslaunch ranger_bringup ranger_mini_v2.launch #for ranger_mini 2.0
+    $ ros2 launch ranger_bringup ranger_mini_v2.launch.py #for ranger_mini 2.0
     ```
-* Use keyboard to control ranger
-    ```bash
-    $ rosrun teleop_twist_keyboard teleop_twist_keyboard.py
-    ```
+    
+* Start the base node for ranger_mini_v3
 
+    ```bash
+    $ ros2 launch ranger_bringup ranger_mini_v3.launch.py #for ranger_mini 3.0
+    ```
+    
+* Use keyboard to control ranger
+
+    ```bash
+    $ ros2 run teleop_twist_keyboard teleop_twist_keyboard
+    ```
 
 ## ROS interface
 
 ### Parameters
 
 * can_device (string): **can0**
-* robot_model (string): **ranger**/ranger_mini_v1/ranger_mini_v2
+* robot_model (string): **ranger**/ranger_mini_v1/ranger_mini_v2/ranger_mini_v3
 * update_rate (int): **50**
 * base_frame (string): **base_link**
 * odom_frame (string): **odom**
 * publish_odom_tf (bool): **true**
-* odom_topic_name (string): **/odom**
+* odom_topic_name (string): **odom**
 
 ### Published topics
 
@@ -97,7 +105,7 @@ $ catkin_make
 * /motion_state (ranger_msgs::MotionState)
 * /actuator_state (ranger_msgs::ActuatorStateArray)
 * /odom (nav_msgs::Odometry)
-* /battery_state (ranger_msgs::BatteryState)
+* /battery_state (sensor_msgs::BatteryState)
 
 ### Subscribed topics
 

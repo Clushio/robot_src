@@ -36,6 +36,7 @@ class BunkerRobot : public RobotCommonInterface, public BunkerInterface {
   // get robot state
   BunkerCoreState GetRobotState() override;
   BunkerActuatorState GetActuatorState() override;
+  BunkerCommonSensorState GetCommonSensorState() override;
 
  private:
   RobotCommonInterface* robot_;

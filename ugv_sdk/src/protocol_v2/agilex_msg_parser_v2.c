@@ -158,9 +158,8 @@ bool DecodeCanFrameV2(const struct can_frame *rx_frame, AgxMessage *msg) {
           (int16_t)((uint16_t)(frame->rpm.low_byte) |
                     (uint16_t)(frame->rpm.high_byte) << 8);
       msg->body.actuator_hs_state_msg.current =
-          ((uint16_t)(frame->current.low_byte) |
-           (uint16_t)(frame->current.high_byte) << 8) *
-          0.1;
+          (int16_t)((uint16_t)(frame->current.low_byte) |
+                    (uint16_t)(frame->current.high_byte) << 8) * 0.1;
       msg->body.actuator_hs_state_msg.pulse_count =
           (int32_t)((uint32_t)(frame->pulse_count.lsb) |
                     (uint32_t)(frame->pulse_count.low_byte) << 8 |
@@ -277,14 +276,10 @@ bool DecodeCanFrameV2(const struct can_frame *rx_frame, AgxMessage *msg) {
     case CAN_MSG_BMS_EXTENDED_ID: {
       msg->type = AgxMsgBmsExtended;
       BmsExtendedFrame *frame = (BmsExtendedFrame *)(rx_frame->data);
-      msg->body.bms_extended_msg.protection_code1 = frame->protection_code1;
-      msg->body.bms_extended_msg.protection_code2 = frame->protection_code2;
-      msg->body.bms_extended_msg.protection_code3 = frame->protection_code3;
-      msg->body.bms_extended_msg.protection_code4 = frame->protection_code4;
-      msg->body.bms_extended_msg.battery_max_teperature =
-          frame->battery_max_teperature;
-      msg->body.bms_extended_msg.battery_min_teperature =
-          frame->battery_min_teperature;
+      msg->body.bms_extended_msg.alarm_status_1 = frame->alarm_status_1;
+      msg->body.bms_extended_msg.alarm_status_2 = frame->alarm_status_2;
+      msg->body.bms_extended_msg.warn_status_1 = frame->warn_status_1;
+      msg->body.bms_extended_msg.warn_status_2 = frame->warn_status_2;
       break;
     }
     /*************** query/config frame **************/
