@@ -20,13 +20,13 @@
 节点由 Ranger 底盘 launch 自动包含：
 
 ```bash
-roslaunch ranger_bringup ranger_mini_v2.launch
+ros2 launch ranger_bringup ranger_mini_v2.launch.py
 ```
 
 单独调试：
 
 ```bash
-roslaunch cmd_vel_arbiter cmd_vel_arbiter.launch
+ros2 launch cmd_vel_arbiter cmd_vel_arbiter.launch.py
 ```
 
 单独启动仲裁器不会使实车链路完整；还需要碰撞监控和底盘驱动。
@@ -61,7 +61,7 @@ roslaunch cmd_vel_arbiter cmd_vel_arbiter.launch
 
 ## 候选输出
 
-`/cmd_vel/candidate` 类型为 `cmd_vel_arbiter/ArbitratedCommand`，包含：
+`/cmd_vel/candidate` 类型为 `cmd_vel_arbiter/msg/ArbitratedCommand`，包含：
 
 - Header；
 - 被选择的 `source`；
@@ -78,7 +78,7 @@ roslaunch cmd_vel_arbiter cmd_vel_arbiter.launch
 /cmd_vel_arbiter/finish_motion
 ```
 
-类型：`cmd_vel_arbiter/FinishMotion`。调用方提供来源和结束原因，仲裁器会：
+类型：`cmd_vel_arbiter/srv/FinishMotion`。调用方提供来源和结束原因，仲裁器会：
 
 1. 暂时抑制该来源的排队/残留命令；
 2. 调用 `/stop_and_center` action；
@@ -151,16 +151,17 @@ safety + SOFTWARE_ESTOP
 GUI 激活软件急停后持续向 `/cmd_vel/safety` 发布零 Twist。由于 safety 优先级最高，
 其他业务来源不会被选择。
 
-限制：软件急停依赖 ROS master、GUI、仲裁器、碰撞监控、底盘节点和通信链路正常，
+限制：软件急停依赖 ROS 2 通信图、GUI、仲裁器、碰撞监控、底盘节点和通信链路正常，
 因此不能替代物理急停。
 
 ## 排障
 
 ```bash
-rostopic hz /cmd_vel/candidate
-rostopic echo /cmd_vel/candidate
-rostopic echo /cmd_vel/safety
-rosservice info /cmd_vel_arbiter/finish_motion
+ros2 topic hz /cmd_vel/candidate
+ros2 topic echo /cmd_vel/candidate
+ros2 topic echo /cmd_vel/safety
+ros2 service type /cmd_vel_arbiter/finish_motion
+ros2 action info /stop_and_center
 ```
 
 ### 候选速度一直为零
