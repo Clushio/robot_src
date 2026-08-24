@@ -1,6 +1,8 @@
-# This workspace uses ROS1 by default.
+# The ROS2 workspace must be buildable with a normal `colcon build` invocation.
+# Keep the ROS1 branch available for upstream compatibility, but require an
+# explicit override to select it in this ROS2-only source tree.
 if(NOT ROS_EDITION)
-  set(ROS_EDITION "ROS1" CACHE STRING "ROS edition: ROS1 or ROS2")
+  set(ROS_EDITION "ROS2" CACHE STRING "ROS edition: ROS1 or ROS2")
 endif()
 # judge which cmake codes to use 
 if(ROS_EDITION STREQUAL "ROS1")
@@ -232,6 +234,10 @@ else(ROS_EDITION STREQUAL "ROS2")
   find_package(builtin_interfaces REQUIRED)
   find_package(rosidl_default_generators REQUIRED)
 
+  if(NOT DISTRO_ROS AND DEFINED ENV{ROS_DISTRO})
+    set(DISTRO_ROS "$ENV{ROS_DISTRO}")
+  endif()
+
   # check apr
   find_package(PkgConfig)
   pkg_check_modules(APR apr-1)
@@ -321,6 +327,13 @@ else(ROS_EDITION STREQUAL "ROS2")
     EXECUTABLE ${PROJECT_NAME}_node
   )
 
+  # ROS2 launch discovery expects files below share/<package>/launch.  The
+  # upstream helper script copies launch_ROS2 to that name, but a colcon
+  # workspace does not run the helper script.
+  install(DIRECTORY launch_ROS2/
+    DESTINATION share/${PROJECT_NAME}/launch
+  )
+
   if(BUILD_TESTING)
     find_package(ament_lint_auto REQUIRED)
     # the following line skips the linter which checks for copyrights
@@ -334,7 +347,6 @@ else(ROS_EDITION STREQUAL "ROS2")
 
   ament_auto_package(INSTALL_TO_SHARE
     config
-    launch_ROS2
   )
 
 endif()
