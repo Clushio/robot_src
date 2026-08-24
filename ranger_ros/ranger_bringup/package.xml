@@ -3,16 +3,17 @@
 <package format="3">
   <name>ranger_bringup</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
-  <maintainer email="654186749@qq.com">agilex</maintainer>
-  <license>TODO: License declaration</license>
+  <description>Bring up the Ranger base with velocity arbitration and collision monitoring.</description>
+  <maintainer email="agilex@todo.todo">agilex</maintainer>
+  <license>BSD</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
+  <exec_depend>cmd_vel_arbiter</exec_depend>
+  <exec_depend>collision_monitor</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
   <exec_depend>ranger_base</exec_depend>
-
-  <test_depend>ament_lint_auto</test_depend>
-  <test_depend>ament_lint_common</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>
