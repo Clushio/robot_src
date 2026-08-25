@@ -1,248 +1,227 @@
-#include <ros/ros.h>
-#include <sensor_msgs/Joy.h>
-#include <tf/transform_listener.h>
-#include <fstream>
-#include <tf2_ros/buffer.h>
-#include <tf2_ros/transform_listener.h>
-#include <geometry_msgs/Quaternion.h>
-
-#include <geometry_msgs/TransformStamped.h>
-#include <iostream>
-#include <fstream>
 #include <chrono>
 #include <cstdlib>
+#include <ctime>
+#include <fstream>
 #include <iomanip>
+#include <iostream>
+#include <memory>
 #include <sstream>
+#include <string>
 
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/joy.hpp>
+#include <tf2/exceptions.h>
+#include <tf2/utils.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
 
-tf2_ros::Buffer tf_buffer_;
-	 std::ofstream file_;
-	 int id = 0;
-	 int workstation_id = 0;
-
- int idx=0;
- int idt=0;
-
- std::ofstream file_poseRecordTest;
-
- // 文件路径
-std::string filename_;
-    // 标志变量，用于指示文件是否已经打开
-bool file_opened = false;
-bool counters_initialized = false;
-
-void loadExistingPointCounters();
-
-std::stringstream time2filename()
+class JoyLocationSaver : public rclcpp::Node
 {
-     // 获取当前系统时间
-    auto now = std::chrono::system_clock::now();
-    std::time_t now_c = std::chrono::system_clock::to_time_t(now);
+public:
+  JoyLocationSaver()
+  : Node("joy_location_saver"),
+    tf_buffer_(get_clock()),
+    tf_listener_(tf_buffer_),
+    id_(0),
+    workstation_id_(0),
+    idx_(0),
+    idt_(0),
+    file_opened_(false),
+    counters_initialized_(false),
+    test_file_opened_(false)
+  {
+    filename_ = declare_parameter<std::string>("positions_file", defaultPositionFilename());
+    joy_sub_ = create_subscription<sensor_msgs::msg::Joy>(
+      "/joy", rclcpp::SensorDataQoS().keep_last(1),
+      std::bind(&JoyLocationSaver::joyCallback, this, std::placeholders::_1));
+  }
 
-    // 创建一个 stringstream 来格式化时间
-    std::stringstream ss;
-    ss << std::put_time(std::localtime(&now_c), "%Y%m%d_%H%M%S");
-    return ss;
+  ~JoyLocationSaver() override
+  {
+    file_.close();
+    test_file_.close();
+  }
 
-}
-
-bool file_1_openend = false;
-
-bool openPositionFile()
-{
-    if (!file_opened) {
-        if (!counters_initialized) {
-            loadExistingPointCounters();
-            counters_initialized = true;
-        }
-        file_.open(filename_, std::ios_base::out | std::ios_base::app);
-        if (!file_.is_open()) {
-            std::cerr << "Unable to open file: " << filename_ << std::endl;
-            return false;
-        }
-        file_opened = true;
-    }
-    return true;
-}
-
-std::string defaultPositionFilename()
-{
-    const char* home = std::getenv("HOME");
+private:
+  std::string defaultPositionFilename()
+  {
+    const char * home = std::getenv("HOME");
     if (home != nullptr && home[0] != '\0') {
-        std::string home_dir(home);
-        while (home_dir.size() > 1 && home_dir.back() == '/') {
-            home_dir.pop_back();
-        }
-        return home_dir + "/maps/robot_positions.txt";
+      std::string home_dir(home);
+      while (home_dir.size() > 1 && home_dir.back() == '/') {
+        home_dir.pop_back();
+      }
+      return home_dir + "/maps/robot_positions.txt";
     }
-    ROS_WARN("HOME is not set; using robot_positions.txt in the working directory.");
+    RCLCPP_WARN(get_logger(), "HOME is not set; using robot_positions.txt in the working directory.");
     return "robot_positions.txt";
-}
+  }
 
-void loadExistingPointCounters()
-{
+  static std::string timeToFilename()
+  {
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t now_c = std::chrono::system_clock::to_time_t(now);
+    std::stringstream stream;
+    stream << std::put_time(std::localtime(&now_c), "%Y%m%d_%H%M%S");
+    return stream.str();
+  }
+
+  void loadExistingPointCounters()
+  {
     std::ifstream input(filename_);
     std::string line;
     while (std::getline(input, line)) {
-        std::istringstream stream(line);
-        double x, y, z, roll, pitch, yaw;
-        if (!(stream >> x >> y >> z >> roll >> pitch >> yaw)) {
-            continue;
+      std::istringstream stream(line);
+      double x, y, z, roll, pitch, yaw;
+      if (!(stream >> x >> y >> z >> roll >> pitch >> yaw)) {
+        continue;
+      }
+      ++id_;
+      std::string label;
+      if (stream >> label && label.size() > 1 && label[0] == 'W') {
+        try {
+          workstation_id_ = std::max(workstation_id_, std::stoi(label.substr(1)));
+        } catch (const std::exception &) {
+          // Non-numeric labels do not participate in W1, W2... numbering.
         }
-        ++id;
-        std::string label;
-        if (stream >> label && label.size() > 1 && label[0] == 'W') {
-            try {
-                const int existing_id = std::stoi(label.substr(1));
-                if (existing_id > workstation_id) {
-                    workstation_id = existing_id;
-                }
-            }
-            catch (const std::exception&) {
-                // Non-numeric labels do not participate in W1, W2... numbering.
-            }
-        }
+      }
     }
-    ROS_INFO("Continue point recording at P%d; next workstation is W%d.",
-             id, workstation_id + 1);
-}
+    RCLCPP_INFO(
+      get_logger(), "Continue point recording at P%d; next workstation is W%d.",
+      id_, workstation_id_ + 1);
+  }
 
-bool lookupCurrentPose(double& x, double& y, double& z, double& roll, double& pitch, double& yaw)
-{
-    geometry_msgs::TransformStamped transform;
-    transform = tf_buffer_.lookupTransform("map", "base_link", ros::Time(0));
+  bool openPositionFile()
+  {
+    if (!file_opened_) {
+      if (!counters_initialized_) {
+        loadExistingPointCounters();
+        counters_initialized_ = true;
+      }
+      file_.open(filename_, std::ios_base::out | std::ios_base::app);
+      if (!file_.is_open()) {
+        RCLCPP_ERROR(get_logger(), "Unable to open file: %s", filename_.c_str());
+        return false;
+      }
+      file_opened_ = true;
+    }
+    return true;
+  }
 
+  bool lookupCurrentPose(
+    double & x, double & y, double & z,
+    double & roll, double & pitch, double & yaw)
+  {
+    const auto transform = tf_buffer_.lookupTransform("map", "base_link", tf2::TimePointZero);
     x = transform.transform.translation.x;
     y = transform.transform.translation.y;
-    // Topology navigation is planar.  map->base_link can contain accumulated
-    // height drift from the 3D localization, so never persist it as a waypoint
-    // height.  The navigation stack also reuses path z=1/2 as control markers.
     z = 0.0;
-
-    geometry_msgs::Quaternion quat = transform.transform.rotation;
-    tf::Quaternion tf_quat(quat.x, quat.y, quat.z, quat.w);
-    tf::Matrix3x3(tf_quat).getRPY(roll, pitch, yaw);
-
-    roll = 0;
-    pitch = 0;
+    roll = 0.0;
+    pitch = 0.0;
+    yaw = tf2::getYaw(transform.transform.rotation);
     return true;
-}
+  }
 
-void saveCurrentPose(const std::string& label)
-{
+  void saveCurrentPose(const std::string & label)
+  {
     if (!openPositionFile()) {
+      return;
+    }
+    try {
+      double x, y, z, roll, pitch, yaw;
+      lookupCurrentPose(x, y, z, roll, pitch, yaw);
+      ++id_;
+      std::cout << id_ << " save position at " << x << "," << y << "," << z << ","
+                << roll << "," << pitch << "," << yaw;
+      file_ << x << " " << y << " " << z << " " << roll << " " << pitch << " " << yaw;
+      if (!label.empty()) {
+        std::cout << " " << label;
+        file_ << " " << label;
+      }
+      std::cout << std::endl;
+      file_ << std::endl;
+    } catch (const tf2::TransformException & ex) {
+      RCLCPP_WARN(get_logger(), "Failed to lookup transform: %s", ex.what());
+    }
+  }
+
+  void saveTestPose()
+  {
+    if (!test_file_opened_) {
+      const std::string test_filename =
+        "/home/nav/maps/robot_positions_test" + timeToFilename() + ".txt";
+      test_file_.open(test_filename, std::ios_base::out);
+      if (!test_file_.is_open()) {
+        RCLCPP_ERROR(get_logger(), "Unable to open file: %s", test_filename.c_str());
         return;
+      }
+      test_file_opened_ = true;
     }
 
     try {
-        double x, y, z, roll, pitch, yaw;
-        lookupCurrentPose(x, y, z, roll, pitch, yaw);
-
-        id++;
-        std::cout << id << " save position at " << x << "," << y << "," << z << ","
-                  << roll << "," << pitch << "," << yaw;
-        file_ << x << " " << y << " " << z << " " << roll << " " << pitch << " " << yaw;
-        if (!label.empty()) {
-            std::cout << " " << label;
-            file_ << " " << label;
-        }
-        std::cout << std::endl;
-        file_ << std::endl;
+      double x, y, z, roll, pitch, yaw;
+      lookupCurrentPose(x, y, z, roll, pitch, yaw);
+      // Preserve the original test recorder's 3D z value.
+      const auto transform = tf_buffer_.lookupTransform("map", "base_link", tf2::TimePointZero);
+      z = transform.transform.translation.z;
+      ++idx_;
+      if (idx_ == 31) {
+        idx_ = 0;
+        ++idt_;
+      }
+      std::cout << idt_ << " robot is in position at " << x << "," << y << "," << z
+                << "," << roll << "," << pitch << "," << yaw << std::endl;
+      test_file_ << "poseID=" << idt_ << " " << x << " " << y << " " << z << " "
+                 << roll << " " << pitch << " " << yaw << std::endl;
+    } catch (const tf2::TransformException & ex) {
+      RCLCPP_WARN(get_logger(), "Failed to lookup transform: %s", ex.what());
     }
-    catch (tf::TransformException& ex)
-    {
-        ROS_WARN_STREAM("Failed to lookup transform: " << ex.what());
+  }
+
+  void joyCallback(const sensor_msgs::msg::Joy::ConstSharedPtr joy)
+  {
+    if (joy->buttons.size() <= 5) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "Joy message has %zu buttons; location saver requires buttons 2, 4 and 5.",
+        joy->buttons.size());
+      return;
     }
-}
-
-
-void joyCallback(const sensor_msgs::Joy::ConstPtr& joy_msg)
-	{
-	    if (joy_msg->buttons[2]) // 检查按钮 2 是否按下
-	    {
-            saveCurrentPose("");
-	    }
-
-	         if (joy_msg->buttons[4]) // 工位点
-	        {
-	            // Initialize counters from the existing file before choosing the
-	            // next W number. saveCurrentPose() will reuse the open stream.
-	            if (!openPositionFile()) {
-	                return;
-	            }
-	            workstation_id++;
-	            saveCurrentPose("W" + std::to_string(workstation_id));
-	        }
-
-	     if (joy_msg->buttons[5]) // 检查按钮 5 是否按下
-        {
-             // 如果文件还没有打开，则以新建模式打开文件
-            if (!file_1_openend) {
-                std::stringstream ss = time2filename();
-                std::string filename_1 = "/home/nav/maps/robot_positions_test"+ss.str() + ".txt";
-                file_poseRecordTest.open(filename_1, std::ios_base::out);
-                if (!file_poseRecordTest.is_open()) {
-                    std::cerr << "Unable to open file: " << filename_1 << std::endl;
-                    return ;
-                }
-                file_1_openend = true; // 设置标志变量，表示文件已打开
-            }
-            try
-            {
-                // 查询 map 到 baselink 的变换
-                geometry_msgs::TransformStamped transform;
-             //   tf_buffer_.waitForTransform("map", "baselink", ros::Time(0), ros::Duration(1.0));
-                transform = tf_buffer_.lookupTransform("map", "base_link", ros::Time(0));
-                //tf_listene
-                // 提取并保存位置数据
-                double x = transform.transform.translation.x;
-                double y = transform.transform.translation.y;
-                double z = transform.transform.translation.z;
-
-                // 提取并保存方向角四元数
-                geometry_msgs::Quaternion quat = transform.transform.rotation;
-                double roll, pitch, yaw;
-                tf::Quaternion tf_quat(quat.x, quat.y, quat.z, quat.w);
-                tf::Matrix3x3(tf_quat).getRPY(roll, pitch, yaw);
-
-                idx++;
-                roll = 0;
-                pitch = 0;
-                if (idx==31)
-                {
-                    idx = 0;
-                    idt++;
-                }
-                std::cout<<idt<<" robot is in  position at "<<x << "," << y << "," << z << "," << roll << "," << pitch << "," << yaw << std::endl;
-                file_poseRecordTest<<"poseID="<<idt<<" " << x << " " << y << " " << z << " " << roll << " " << pitch << " " << yaw << std::endl;
-            }
-            catch (tf::TransformException& ex)
-            {
-                ROS_WARN_STREAM("Failed to lookup transform: " << ex.what());
-            }
-        }
+    if (joy->buttons[2]) {
+      saveCurrentPose("");
     }
+    if (joy->buttons[4]) {
+      if (!openPositionFile()) {
+        return;
+      }
+      ++workstation_id_;
+      saveCurrentPose("W" + std::to_string(workstation_id_));
+    }
+    if (joy->buttons[5]) {
+      saveTestPose();
+    }
+  }
 
+  tf2_ros::Buffer tf_buffer_;
+  tf2_ros::TransformListener tf_listener_;
+  rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
+  std::ofstream file_;
+  std::ofstream test_file_;
+  int id_;
+  int workstation_id_;
+  int idx_;
+  int idt_;
+  std::string filename_;
+  bool file_opened_;
+  bool counters_initialized_;
+  bool test_file_opened_;
+};
 
-
-int main(int argc, char** argv)
+int main(int argc, char ** argv)
 {
-    ros::init(argc, argv, "joy_location_saver");
-   // ros::NodeHandle nh;
-    ros::NodeHandle nh_;
-    ros::NodeHandle private_nh("~");
-    private_nh.param<std::string>(
-        "positions_file", filename_, defaultPositionFilename());
-
-    tf2_ros::TransformListener tfListener(tf_buffer_);
-    ros::Subscriber joy_sub_ = nh_.subscribe("/joy", 1, &joyCallback);
-
-    //std::string filename_ = "/home/jgl20/map/robot_positions.txt";
-    //file_.open(filename_, std::ios_base::out);
-  //  JoyLocationSaver location_saver();
-    ros::spin();
-    file_.close();
-    file_poseRecordTest.close();
-
-    return 0;
+  rclcpp::init(argc, argv);
+  rclcpp::spin(std::make_shared<JoyLocationSaver>());
+  rclcpp::shutdown();
+  return 0;
 }

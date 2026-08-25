@@ -13,7 +13,7 @@
 
 | 程序 | 源码 | 作用 |
 |---|---|---|
-| `runnav` | `src/run_nav.cpp` | 读取点位/拓扑、拓扑选路、调用 MoveBase、堵塞恢复和任务状态 |
+| `runnav` | `src/run_nav.cpp` | 读取点位/拓扑、拓扑选路、调用 Nav2 NavigateToPose、堵塞恢复和任务状态 |
 | `saveLocation` | `src/save_Location.cpp` | 根据 `/joy` 指令把当前位姿写入点位文件 |
 | `TagCtl` | `src/TagCtl_srv.cpp` | 根据 `/tag_position` 和目标偏差发布 `/cmd_vel/tag` |
 | `x2bot_joy_PXN` | `src/x2bot_joy_PXN.cpp` | 把 PXN 手柄转换为 `/cmd_vel/teleop` |
@@ -61,20 +61,20 @@ x y z roll pitch yaw [label]
 请求字段：
 
 - `data`：目标节点 ID；负数表示工位 label。
-- `currentID`：调用方认为的当前节点；定位无法确定最近节点时作为回退。
+- `current_id`：调用方认为的当前节点；定位无法确定最近节点时作为回退（ROS2 字段名要求使用 snake_case）。
 - `run`：`0` 只规划，`1` 自动绕路执行，`2+` 固定路线执行。
 
 示例：
 
 ```bash
 # 只规划到 P3
-rosservice call /plan_path_and_go '{data: 3, currentID: 0, run: 0}'
+ros2 service call /plan_path_and_go x2bot_teleop/srv/SetInt '{data: 3, current_id: 0, run: 0}'
 
 # 自动绕路执行到 P3
-rosservice call /plan_path_and_go '{data: 3, currentID: 0, run: 1}'
+ros2 service call /plan_path_and_go x2bot_teleop/srv/SetInt '{data: 3, current_id: 0, run: 1}'
 
 # 固定路线执行到工位 W1
-rosservice call /plan_path_and_go '{data: -1, currentID: 0, run: 2}'
+ros2 service call /plan_path_and_go x2bot_teleop/srv/SetInt '{data: -1, current_id: 0, run: 2}'
 ```
 
 `runnav` 会优先通过定位选择最近的有效起点。服务返回成功不应只理解为“MoveBase
@@ -97,9 +97,9 @@ action 返回 SUCCEEDED”；代码还会检查真实到点距离，并在任务
 验证失败时拒绝隐式顺序连线。应重新运行：
 
 ```bash
-python3 ~/catkin_ws/src/script/build_topology.py --audit
-python3 ~/catkin_ws/src/script/build_topology.py
-rosservice call /anav/reload_topology
+python3 /workspace/src/script/build_topology.py --audit
+python3 /workspace/src/script/build_topology.py
+ros2 service call /anav/reload_topology std_srvs/srv/Trigger '{}'
 ```
 
 自动绕路模式会在持续无进展后临时封锁问题边，按指数退避设置冷却时间，并尝试其他
@@ -114,13 +114,13 @@ GUI 或 `~/maps/autonav_params.yaml` 管理。
 命令行入口：
 
 ```bash
-roslaunch robot_r 3settinglocation.launch
+ros2 launch x2bot_teleop x2bot_joy_PXN_setlocation.launch.py
 ```
 
 节点订阅 `/joy` 并把点位写入 `~/maps/robot_positions.txt`。日常更推荐 GUI：它支持
 实车采点、RViz 采点、手工修改、排序、删除、导入、备份和 marker 刷新。
 
-修改点位后必须重建拓扑。不要在 MoveBase 正在运行时使用 RViz 采点工具，以免目标
+修改点位后必须重建拓扑。不要在 Nav2 正在运行时使用 RViz 采点工具，以免目标
 事件被其他导航插件误解。
 
 ## Tag 精调
@@ -128,7 +128,7 @@ roslaunch robot_r 3settinglocation.launch
 `TagCtl` 订阅 `/tag_position`，提供 `/set_target_y` 服务并发布 `/cmd_vel/tag`。
 
 ```bash
-rosservice call /set_target_y \
+ros2 service call /set_target_y x2bot_teleop/srv/SetTagY \
   '{target_x: 0.0, target_y: 0.0, target_angle: 0.0}'
 ```
 
@@ -152,19 +152,29 @@ GUI 也使用 `/joy` 发送“记录点位、开始、暂停、继续”等兼�
 - 输出是 `/cmd_vel/teleop`，不是直接 `/cmd_vel`；
 - 遥控来源可能处于人工碰撞旁路。
 
+原 ROS1 中被注释的 `yocs_velocity_smoother` nodelet 没有 Humble 的直接等价实现，
+现提供可选的 `launch/velocity_smoother.launch.py`，以 Nav2 lifecycle
+`velocity_smoother` 保持输入 `/cmd_vel/teleop_raw`、输出 `/cmd_vel/teleop` 的行为。
+它仍不由手柄 launch 默认启用，避免改变原工程实际运行链路。
+
+## ROS2 行为映射
+
+- ROS1 `move_base` action 映射为标准 Nav2
+  `/navigate_to_pose`（`nav2_msgs/action/NavigateToPose`），可用
+  `navigate_action` 参数覆盖；拓扑选路、堵塞判断和到点复核算法未改变。
+- `SetInt.srv` 的 `currentID` 因 ROS2 接口字段规范改为 `current_id`。
+- TF 查询改用 TF2 buffer/listener；frame 仍为 `map` 和 `base_link`。
+- 固定路线状态不再写另一个节点的私有参数，而由 transient-local
+  `/anav/fixed_route_mode` 发布；消费端应订阅该主题。
+- 默认点位目录从 `$HOME/maps` 解析，launch 参数仍可覆盖。
+
 ## 编译和测试
 
 ```bash
-cd ~/catkin_ws
-source /opt/ros/noetic/setup.bash
-catkin_make -DCATKIN_WHITELIST_PACKAGES=x2bot_teleop
-source devel/setup.bash
-```
-
-恢复全工作区编译时不要遗留 whitelist：
-
-```bash
-catkin_make -DCATKIN_WHITELIST_PACKAGES=""
+cd /workspace
+source /opt/ros/humble/setup.bash
+colcon build --packages-select x2bot_teleop
+source install/setup.bash
 ```
 
 修改 `SetInt.srv`、`NavConfig.srv` 或 `SetTagY.srv` 后，需要重新编译所有直接依赖

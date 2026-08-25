@@ -1,30 +1,32 @@
-#include <actionlib/client/simple_action_client.h>
-#include <boost/bind.hpp>
-#include <cmd_vel_arbiter/FinishMotion.h>
-#include <diagnostic_msgs/DiagnosticArray.h>
-#include <diagnostic_msgs/DiagnosticStatus.h>
-#include <diagnostic_msgs/KeyValue.h>
-#include <geometry_msgs/PoseStamped.h>
-#include <geometry_msgs/Quaternion.h>
-#include <geometry_msgs/TransformStamped.h>
-#include <geometry_msgs/Twist.h>
-#include <geometry_msgs/Vector3Stamped.h>
-#include <move_base_msgs/MoveBaseAction.h>
-#include <nav_msgs/Path.h>
-#include <ros/callback_queue.h>
-#include <ros/ros.h>
-#include <sensor_msgs/Joy.h>
-#include <std_msgs/Bool.h>
-#include <std_msgs/String.h>
-#include <std_msgs/UInt8.h>
-#include <std_srvs/Trigger.h>
-#include <tf/transform_listener.h>
+#include <cmd_vel_arbiter/srv/finish_motion.hpp>
+#include <diagnostic_msgs/msg/diagnostic_array.hpp>
+#include <diagnostic_msgs/msg/diagnostic_status.hpp>
+#include <diagnostic_msgs/msg/key_value.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/point.hpp>
+#include <geometry_msgs/msg/quaternion.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <geometry_msgs/msg/twist.hpp>
+#include <geometry_msgs/msg/vector3_stamped.hpp>
+#include <nav2_msgs/action/navigate_to_pose.hpp>
+#include <nav_msgs/msg/path.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <rclcpp_action/rclcpp_action.hpp>
+#include <sensor_msgs/msg/joy.hpp>
+#include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/string.hpp>
+#include <std_msgs/msg/u_int8.hpp>
+#include <std_srvs/srv/trigger.hpp>
+#include <tf2/exceptions.h>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2/utils.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
-#include <visualization_msgs/Marker.h>
-#include <visualization_msgs/MarkerArray.h>
-#include <x2bot_teleop/NavConfig.h>
-#include <x2bot_teleop/SetInt.h>
+#include <visualization_msgs/msg/marker.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
+#include <x2bot_teleop/srv/nav_config.hpp>
+#include <x2bot_teleop/srv/set_int.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -33,6 +35,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -61,7 +64,7 @@ struct TopoEdge {
     bool trusted;
     bool bidirectional;
     bool configured_blocked;
-    ros::WallTime blocked_until;
+    std::chrono::steady_clock::time_point blocked_until;
     int failure_count;
     std::string source;
 };
@@ -78,7 +81,98 @@ struct NavConfigValues {
     double fixed_route_final_xy_tolerance;
 };
 
-typedef actionlib::SimpleActionClient<move_base_msgs::MoveBaseAction> MVClient;
+class MVGoalState
+{
+public:
+    explicit MVGoalState(rclcpp_action::ResultCode code) : code_(code) {}
+
+    bool succeeded() const { return code_ == rclcpp_action::ResultCode::SUCCEEDED; }
+
+    std::string toString() const
+    {
+        switch (code_)
+        {
+        case rclcpp_action::ResultCode::SUCCEEDED: return "SUCCEEDED";
+        case rclcpp_action::ResultCode::ABORTED: return "ABORTED";
+        case rclcpp_action::ResultCode::CANCELED: return "CANCELED";
+        default: return "UNKNOWN";
+        }
+    }
+
+private:
+    rclcpp_action::ResultCode code_;
+};
+
+class MVClient
+{
+public:
+    using Action = nav2_msgs::action::NavigateToPose;
+    using GoalHandle = rclcpp_action::ClientGoalHandle<Action>;
+
+    MVClient(rclcpp::Node *node, const std::string &name)
+        : client_(rclcpp_action::create_client<Action>(node, name)),
+          last_result_code_(rclcpp_action::ResultCode::UNKNOWN)
+    {
+    }
+
+    void waitForServer() { client_->wait_for_action_server(); }
+
+    void sendGoal(const Action::Goal &goal)
+    {
+        goal_handle_.reset();
+        result_future_ = {};
+        goal_future_ = client_->async_send_goal(goal);
+        last_result_code_ = rclcpp_action::ResultCode::UNKNOWN;
+    }
+
+    bool waitForResult(const rclcpp::Duration &timeout)
+    {
+        const auto wait_duration = std::chrono::nanoseconds(timeout.nanoseconds());
+        if (!goal_handle_)
+        {
+            if (!goal_future_.valid() || goal_future_.wait_for(wait_duration) != std::future_status::ready)
+            {
+                return false;
+            }
+            goal_handle_ = goal_future_.get();
+            if (!goal_handle_)
+            {
+                last_result_code_ = rclcpp_action::ResultCode::ABORTED;
+                return true;
+            }
+            result_future_ = client_->async_get_result(goal_handle_);
+        }
+        if (result_future_.wait_for(wait_duration) != std::future_status::ready)
+        {
+            return false;
+        }
+        last_result_code_ = result_future_.get().code;
+        return true;
+    }
+
+    MVGoalState getState() const { return MVGoalState(last_result_code_); }
+
+    void cancelGoal()
+    {
+        if (goal_handle_)
+        {
+            client_->async_cancel_goal(goal_handle_);
+        }
+        else
+        {
+            client_->async_cancel_all_goals();
+        }
+    }
+
+    void cancelAllGoals() { client_->async_cancel_all_goals(); }
+
+private:
+    rclcpp_action::Client<Action>::SharedPtr client_;
+    std::shared_future<GoalHandle::SharedPtr> goal_future_;
+    GoalHandle::SharedPtr goal_handle_;
+    std::shared_future<GoalHandle::WrappedResult> result_future_;
+    rclcpp_action::ResultCode last_result_code_;
+};
 
 namespace
 {
@@ -104,26 +198,24 @@ const char *topologySafetyPhaseName(uint8_t phase)
     }
 }
 
-void addDiagnosticValue(diagnostic_msgs::DiagnosticStatus &status,
+void addDiagnosticValue(diagnostic_msgs::msg::DiagnosticStatus &status,
                         const std::string &key, const std::string &value)
 {
-    diagnostic_msgs::KeyValue item;
+    diagnostic_msgs::msg::KeyValue item;
     item.key = key;
     item.value = value;
     status.values.push_back(item);
 }
 }
 
-class mynav
+class mynav : public rclcpp::Node
 {
 public:
     mynav()
-        : global_ac(nullptr),
-          nh_(),
+        : Node("target_pose_loader"),
+          global_ac(nullptr),
+          tf_buffer_(get_clock()),
           tf_listener_(tf_buffer_),
-          joy_spinner_(1, &joy_callback_queue_),
-          reference_status_spinner_(1, &reference_status_queue_),
-          safety_phase_spinner_(1, &safety_phase_callback_queue_),
           current_pose_index(0),
           numofpnts(0),
           current_pnt(0),
@@ -157,111 +249,126 @@ public:
           static_map_unknown_is_obstacle_(true),
           static_map_inflation_radius_(std::hypot(0.36, 0.25) + 0.15)
     {
-        ros::NodeHandle private_nh("~");
         maps_dir_ = defaultMapsDir();
-        private_nh.param("maps_dir", maps_dir_, maps_dir_);
+        maps_dir_ = declare_parameter<std::string>("maps_dir", maps_dir_);
         normalizeMapsDir();
-        ROS_INFO_STREAM("Topology navigation maps_dir: " << maps_dir_);
+        RCLCPP_INFO(get_logger(), "Topology navigation maps_dir: %s", maps_dir_.c_str());
         loadSavedNavConfig(joinPath(maps_dir_, "autonav_params.yaml"));
-        private_nh.param("blocked_timeout", blocked_timeout_, blocked_timeout_);
-        private_nh.param("blocked_cooldown_initial", blocked_cooldown_initial_,
-                         blocked_cooldown_initial_);
-        private_nh.param("blocked_cooldown_max", blocked_cooldown_max_,
-                         blocked_cooldown_max_);
-        private_nh.param("blocked_backoff_factor", blocked_backoff_factor_,
-                         blocked_backoff_factor_);
-        private_nh.param("blocked_wait_timeout", blocked_wait_timeout_,
-                         blocked_wait_timeout_);
+        blocked_timeout_ = declare_parameter<double>("blocked_timeout", blocked_timeout_);
+        blocked_cooldown_initial_ =
+            declare_parameter<double>("blocked_cooldown_initial", blocked_cooldown_initial_);
+        blocked_cooldown_max_ =
+            declare_parameter<double>("blocked_cooldown_max", blocked_cooldown_max_);
+        blocked_backoff_factor_ =
+            declare_parameter<double>("blocked_backoff_factor", blocked_backoff_factor_);
+        blocked_wait_timeout_ =
+            declare_parameter<double>("blocked_wait_timeout", blocked_wait_timeout_);
         blocked_cooldown_initial_ = std::max(0.1, blocked_cooldown_initial_);
         blocked_cooldown_max_ = std::max(blocked_cooldown_initial_, blocked_cooldown_max_);
         blocked_backoff_factor_ = std::max(1.0, blocked_backoff_factor_);
         blocked_wait_timeout_ = std::max(0.0, blocked_wait_timeout_);
-        private_nh.param("progress_distance", progress_distance_, progress_distance_);
-        private_nh.param("progress_yaw", progress_yaw_, progress_yaw_);
-        private_nh.param("waypoint_reached_distance", waypoint_reached_distance_,
-                         waypoint_reached_distance_);
-        private_nh.param("fixed_route_final_xy_tolerance",
-                         fixed_route_final_xy_tolerance_,
-                         fixed_route_final_xy_tolerance_);
-        private_nh.param("validate_pass_through_action_success_distance",
-                         validate_pass_through_action_success_distance_,
-                         validate_pass_through_action_success_distance_);
-        private_nh.param("goal_timeout", goal_timeout_, goal_timeout_);
-        private_nh.param("block_bidirectional", block_bidirectional_, block_bidirectional_);
-        private_nh.param("static_map_inflation_radius", static_map_inflation_radius_,
-                         static_map_inflation_radius_);
+        progress_distance_ = declare_parameter<double>("progress_distance", progress_distance_);
+        progress_yaw_ = declare_parameter<double>("progress_yaw", progress_yaw_);
+        waypoint_reached_distance_ =
+            declare_parameter<double>("waypoint_reached_distance", waypoint_reached_distance_);
+        fixed_route_final_xy_tolerance_ =
+            declare_parameter<double>("fixed_route_final_xy_tolerance", fixed_route_final_xy_tolerance_);
+        validate_pass_through_action_success_distance_ = declare_parameter<bool>(
+            "validate_pass_through_action_success_distance",
+            validate_pass_through_action_success_distance_);
+        goal_timeout_ = declare_parameter<double>("goal_timeout", goal_timeout_);
+        block_bidirectional_ = declare_parameter<bool>("block_bidirectional", block_bidirectional_);
+        static_map_inflation_radius_ =
+            declare_parameter<double>("static_map_inflation_radius", static_map_inflation_radius_);
 
         initializeGlobalAC();
-        std::string cmd_vel_topic;
-        private_nh.param("cmd_vel_topic", cmd_vel_topic,
-                         std::string("/cmd_vel/nav"));
-        vel_pub_ = nh_.advertise<geometry_msgs::Twist>(cmd_vel_topic, 1);
-        private_nh.param("topology_safety_phase_topic",
-                         topology_safety_phase_topic_,
-                         std::string("/anav/topology_safety_phase"));
-        private_nh.param("topology_safety_phase_rate",
-                         topology_safety_phase_rate_, 10.0);
+        const auto cmd_vel_topic = declare_parameter<std::string>("cmd_vel_topic", "/cmd_vel/nav");
+        vel_pub_ = create_publisher<geometry_msgs::msg::Twist>(cmd_vel_topic, 1);
+        topology_safety_phase_topic_ = declare_parameter<std::string>(
+            "topology_safety_phase_topic", "/anav/topology_safety_phase");
+        topology_safety_phase_rate_ =
+            declare_parameter<double>("topology_safety_phase_rate", 10.0);
         topology_safety_phase_rate_ =
             std::max(2.0, topology_safety_phase_rate_);
-        topology_safety_phase_pub_ = nh_.advertise<std_msgs::UInt8>(
-            topology_safety_phase_topic_, 1, false);
-        safety_phase_nh_.setCallbackQueue(&safety_phase_callback_queue_);
-        safety_phase_timer_ = safety_phase_nh_.createWallTimer(
-            ros::WallDuration(1.0 / topology_safety_phase_rate_),
-            &mynav::topologySafetyPhaseTimerCallback, this);
-        safety_phase_spinner_.start();
+        control_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+        reference_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+        plan_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+        finish_client_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+
+        topology_safety_phase_pub_ = create_publisher<std_msgs::msg::UInt8>(
+            topology_safety_phase_topic_, 1);
+        safety_phase_timer_ = create_wall_timer(
+            std::chrono::duration<double>(1.0 / topology_safety_phase_rate_),
+            std::bind(&mynav::topologySafetyPhaseTimerCallback, this));
         setTopologySafetyPhase(TOPOLOGY_SAFETY_NORMAL);
         fixed_route_mode_pub_ =
-            nh_.advertise<std_msgs::Bool>("/anav/fixed_route_mode", 1, true);
+            create_publisher<std_msgs::msg::Bool>(
+                "/anav/fixed_route_mode", rclcpp::QoS(1).transient_local());
+        declare_parameter<bool>("fixed_route_mode", false);
         publishFixedRouteMode(false);
         finish_motion_client_ =
-            nh_.serviceClient<cmd_vel_arbiter::FinishMotion>(
-                "/cmd_vel_arbiter/finish_motion");
-        ros::SubscribeOptions joy_options =
-            ros::SubscribeOptions::create<sensor_msgs::Joy>(
-                "joy", 10, boost::bind(&mynav::joyCallback, this, _1),
-                ros::VoidPtr(), &joy_callback_queue_);
-        joy_sub_ = nh_.subscribe(joy_options);
-        control_nh_.setCallbackQueue(&joy_callback_queue_);
-        cancel_navigation_service_ = control_nh_.advertiseService(
-            "/anav/cancel_navigation", &mynav::cancelNavigationCallback, this);
-        nav_config_service_ = control_nh_.advertiseService(
-            "/anav/nav_config", &mynav::navConfigCallback, this);
+            create_client<cmd_vel_arbiter::srv::FinishMotion>(
+                "/cmd_vel_arbiter/finish_motion", rmw_qos_profile_services_default,
+                finish_client_callback_group_);
+        rclcpp::SubscriptionOptions joy_options;
+        joy_options.callback_group = control_callback_group_;
+        joy_sub_ = create_subscription<sensor_msgs::msg::Joy>(
+            "joy", rclcpp::SensorDataQoS().keep_last(10),
+            std::bind(&mynav::joyCallback, this, std::placeholders::_1), joy_options);
+        cancel_navigation_service_ = create_service<std_srvs::srv::Trigger>(
+            "/anav/cancel_navigation",
+            std::bind(&mynav::cancelNavigationCallback, this, std::placeholders::_1, std::placeholders::_2),
+            rmw_qos_profile_services_default, control_callback_group_);
+        nav_config_service_ = create_service<x2bot_teleop::srv::NavConfig>(
+            "/anav/nav_config",
+            std::bind(&mynav::navConfigCallback, this, std::placeholders::_1, std::placeholders::_2),
+            rmw_qos_profile_services_default, control_callback_group_);
         // Reload mutates the graph and therefore runs on the main callback
         // queue, serialized with planning and marker publication.
-        reload_topology_service_ = nh_.advertiseService(
-            "/anav/reload_topology", &mynav::reloadTopologyCallback, this);
-        joy_spinner_.start();
-        marker_pub = nh_.advertise<visualization_msgs::Marker>("visualization_marker", 1);
-        marker_array_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("topology_markers", 1, true);
-        path_pub_ = nh_.advertise<nav_msgs::Path>("topology_plan", 1, true);
-        task_status_pub_ = nh_.advertise<std_msgs::String>("/anav/task_status", 10, true);
+        reload_topology_service_ = create_service<std_srvs::srv::Trigger>(
+            "/anav/reload_topology",
+            std::bind(&mynav::reloadTopologyCallback, this, std::placeholders::_1, std::placeholders::_2),
+            rmw_qos_profile_services_default, plan_callback_group_);
+        marker_pub = create_publisher<visualization_msgs::msg::Marker>("visualization_marker", 1);
+        marker_array_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
+            "topology_markers", rclcpp::QoS(1).transient_local());
+        path_pub_ = create_publisher<nav_msgs::msg::Path>(
+            "topology_plan", rclcpp::QoS(1).transient_local());
+        task_status_pub_ = create_publisher<std_msgs::msg::String>(
+            "/anav/task_status", rclcpp::QoS(10).transient_local());
         diagnostics_pub_ =
-            nh_.advertise<diagnostic_msgs::DiagnosticArray>("/diagnostics", 10, true);
-        ros::SubscribeOptions status_options =
-            ros::SubscribeOptions::create<geometry_msgs::Vector3Stamped>(
-                "/bspline_status", 1,
-                boost::bind(&mynav::referenceStatusCallback, this, _1),
-                ros::VoidPtr(), &reference_status_queue_);
-        reference_status_sub_ = nh_.subscribe(status_options);
-        reference_status_spinner_.start();
+            create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
+                "/diagnostics", rclcpp::QoS(10).transient_local());
+        rclcpp::SubscriptionOptions status_options;
+        status_options.callback_group = reference_callback_group_;
+        reference_status_sub_ = create_subscription<geometry_msgs::msg::Vector3Stamped>(
+            "/bspline_status", 1,
+            std::bind(&mynav::referenceStatusCallback, this, std::placeholders::_1),
+            status_options);
 
-        plan_path_service = nh_.advertiseService("plan_path_and_go", &mynav::planPathCallback, this);
-        ROS_INFO("Topology navigation service /plan_path_and_go started.");
+        plan_path_service = create_service<x2bot_teleop::srv::SetInt>(
+            "plan_path_and_go",
+            std::bind(&mynav::planPathCallback, this, std::placeholders::_1, std::placeholders::_2),
+            rmw_qos_profile_services_default, plan_callback_group_);
+        RCLCPP_INFO(get_logger(), "Topology navigation service /plan_path_and_go started.");
     }
 
     ~mynav()
     {
         setTopologySafetyPhase(TOPOLOGY_SAFETY_NORMAL);
-        safety_phase_timer_.stop();
-        safety_phase_spinner_.stop();
-        joy_spinner_.stop();
-        reference_status_spinner_.stop();
+        safety_phase_timer_->cancel();
         if (runth_ && runth_->joinable())
         {
             runth_->join();
         }
         delete global_ac;
+    }
+
+    void startMarkerPublishing()
+    {
+        marker_timer_ = create_wall_timer(
+            std::chrono::milliseconds(50),
+            std::bind(&mynav::publishNavPointsMarkers, this));
     }
 
     void publishDiagnostic(uint8_t level, const std::string &code,
@@ -270,9 +377,9 @@ public:
                            const std::string &action,
                            bool active)
     {
-        diagnostic_msgs::DiagnosticArray array;
-        array.header.stamp = ros::Time::now();
-        diagnostic_msgs::DiagnosticStatus status;
+        diagnostic_msgs::msg::DiagnosticArray array;
+        array.header.stamp = now();
+        diagnostic_msgs::msg::DiagnosticStatus status;
         status.level = level;
         status.name = "/anav/navigation";
         status.hardware_id = "ranger";
@@ -283,14 +390,21 @@ public:
         addDiagnosticValue(status, "detail", detail);
         addDiagnosticValue(status, "action", action);
         array.status.push_back(status);
-        diagnostics_pub_.publish(array);
+        diagnostics_pub_->publish(array);
     }
 
-    bool planPathCallback(x2bot_teleop::SetInt::Request &req,
-                          x2bot_teleop::SetInt::Response &res)
+    void planPathCallback(
+        const std::shared_ptr<x2bot_teleop::srv::SetInt::Request> req,
+        std::shared_ptr<x2bot_teleop::srv::SetInt::Response> res)
+    {
+        planPathImpl(*req, *res);
+    }
+
+    bool planPathImpl(x2bot_teleop::srv::SetInt::Request &req,
+                      x2bot_teleop::srv::SetInt::Response &res)
     {
         const int target_index = resolvePoseIndex(req.data);
-        const int requested_current = resolvePoseIndex(req.currentID);
+        const int requested_current = resolvePoseIndex(req.current_id);
         const bool exec_path = req.run > 0;
         const bool fixed_route = req.run >= 2;
         const std::string target_name = requestedTargetName(req.data);
@@ -309,7 +423,7 @@ public:
             res.success = false;
             res.message = "目标点序号无效";
             publishTaskStatus("failed", req.data, target_name, res.message);
-            ROS_ERROR("Invalid target index request: %d", req.data);
+            RCLCPP_ERROR(get_logger(), "Invalid target index request: %d", req.data);
             return true;
         }
 
@@ -323,7 +437,7 @@ public:
             res.success = false;
             res.message = "当前点序号无效";
             publishTaskStatus("failed", req.data, target_name, res.message);
-            ROS_ERROR("Invalid current index request: %d", req.currentID);
+            RCLCPP_ERROR(get_logger(), "Invalid current index request: %d", req.current_id);
             return true;
         }
 
@@ -345,14 +459,14 @@ public:
             res.message = "无法找到从 P" + std::to_string(start_index) +
                           " 到 P" + std::to_string(target_index) + " 的拓扑路径";
             publishTaskStatus("failed", req.data, target_name, res.message);
-            ROS_ERROR_STREAM(res.message);
+            RCLCPP_ERROR_STREAM(get_logger(), res.message);
             stopRobot();
             return true;
         }
 
         publishTopologyPath(path_indices);
         res.message = formatPathMessage("plan ok:", path_indices);
-        ROS_INFO_STREAM(res.message);
+        RCLCPP_INFO_STREAM(get_logger(), res.message);
 
         if (exec_path)
         {
@@ -371,10 +485,10 @@ public:
             publishFixedRouteMode(false);
             const bool canceled = cancel_requested_.exchange(false);
             const bool centered = notifyMotionFinished(
-                ok ? cmd_vel_arbiter::FinishMotionRequest::TASK_FINISHED
+                ok ? cmd_vel_arbiter::srv::FinishMotion::Request::TASK_FINISHED
                    : (canceled
-                          ? cmd_vel_arbiter::FinishMotionRequest::TASK_CANCELED
-                          : cmd_vel_arbiter::FinishMotionRequest::TASK_FAILED));
+                          ? cmd_vel_arbiter::srv::FinishMotion::Request::TASK_CANCELED
+                          : cmd_vel_arbiter::srv::FinishMotion::Request::TASK_FAILED));
             setTopologySafetyPhase(TOPOLOGY_SAFETY_NORMAL);
             res.success = ok;
             if (ok)
@@ -416,22 +530,22 @@ public:
 
     void publishNavPointsMarkers()
     {
-        visualization_msgs::Marker marker = makeMarker("nav_points", 0, visualization_msgs::Marker::SPHERE_LIST);
+        visualization_msgs::msg::Marker marker = makeMarker("nav_points", 0, visualization_msgs::msg::Marker::SPHERE_LIST);
         marker.header.frame_id = "map";
-        marker.header.stamp = ros::Time::now();
+        marker.header.stamp = now();
         setMarkerScale(marker, 0.28);
         setMarkerColor(marker, 1.0, 0.82, 0.05, 0.85);
 
         for (const auto &pose : target_poses)
         {
-            geometry_msgs::Point p;
+            geometry_msgs::msg::Point p;
             p.x = pose.x;
             p.y = pose.y;
             p.z = pose.z;
             marker.points.push_back(p);
         }
 
-        marker_pub.publish(marker);
+        marker_pub->publish(marker);
         publishTopologyMarkers();
     }
 
@@ -442,7 +556,7 @@ public:
         std::ifstream infile(positions_file);
         if (!infile.is_open())
         {
-            ROS_ERROR_STREAM("Failed to open " << positions_file);
+            RCLCPP_ERROR_STREAM(get_logger(), "Failed to open " << positions_file);
             return false;
         }
 
@@ -463,23 +577,23 @@ public:
                 if (!pose.label.empty())
                 {
                     workstation_indices[pose.label] = index;
-                    ROS_INFO_STREAM(pose.label << " maps to point " << index);
+                    RCLCPP_INFO_STREAM(get_logger(), pose.label << " maps to point " << index);
                 }
                 target_poses.push_back(pose);
             }
             catch (const std::exception &e)
             {
-                ROS_ERROR_STREAM("Error parsing target pose: " << e.what());
+                RCLCPP_ERROR_STREAM(get_logger(), "Error parsing target pose: " << e.what());
             }
         }
 
         numofpnts = target_poses.size();
         if (!fingerprintFiles({positions_file}, loaded_positions_fingerprint_))
         {
-            ROS_ERROR_STREAM("Failed to fingerprint " << positions_file);
+            RCLCPP_ERROR_STREAM(get_logger(), "Failed to fingerprint " << positions_file);
             return false;
         }
-        ROS_INFO("Loaded %d navigation points.", numofpnts);
+        RCLCPP_INFO(get_logger(), "Loaded %d navigation points.", numofpnts);
         publishNavPointsMarkers();
         return numofpnts > 0;
     }
@@ -490,11 +604,11 @@ public:
         graph.clear();
         if (loadTopologyYaml(joinPath(maps_dir_, "topology.yaml")))
         {
-            ROS_INFO_STREAM("Loaded topology.yaml with " << edgeCount() << " directed edges.");
+            RCLCPP_INFO_STREAM(get_logger(), "Loaded topology.yaml with " << edgeCount() << " directed edges.");
             return true;
         }
         graph = previous_graph;
-        ROS_ERROR("topology.yaml is missing, stale, or unsafe; refusing implicit sequential fallback.");
+        RCLCPP_ERROR(get_logger(), "topology.yaml is missing, stale, or unsafe; refusing implicit sequential fallback.");
         return false;
     }
 
@@ -505,7 +619,7 @@ public:
         std::ifstream yaml_file(map_yaml);
         if (!yaml_file.is_open())
         {
-            ROS_WARN_STREAM("Static map yaml not found: " << map_yaml);
+            RCLCPP_WARN_STREAM(get_logger(), "Static map yaml not found: " << map_yaml);
             return false;
         }
 
@@ -561,7 +675,7 @@ public:
             const std::string fallback = map_dir + basename;
             if (fileExists(fallback))
             {
-                ROS_WARN_STREAM("Map image path " << pgm_file << " not found, use " << fallback);
+                RCLCPP_WARN_STREAM(get_logger(), "Map image path " << pgm_file << " not found, use " << fallback);
                 pgm_file = fallback;
             }
         }
@@ -570,7 +684,7 @@ public:
         int max_value = 255;
         if (!readPgm(pgm_file, static_map_width_, static_map_height_, max_value, pixels))
         {
-            ROS_WARN_STREAM("Failed to read static map image: " << pgm_file);
+            RCLCPP_WARN_STREAM(get_logger(), "Failed to read static map image: " << pgm_file);
             return false;
         }
         static_map_image_path_ = pgm_file;
@@ -613,12 +727,12 @@ public:
         if (!fingerprintFiles({static_map_yaml_path_, static_map_image_path_},
                               loaded_static_map_fingerprint_))
         {
-            ROS_ERROR("Failed to fingerprint the loaded static map.");
+            RCLCPP_ERROR(get_logger(), "Failed to fingerprint the loaded static map.");
             return false;
         }
 
         static_map_loaded_ = true;
-        ROS_INFO("Loaded static map for topology connect check: %dx%d, resolution %.3f, inflation %.3f m, unknown=%d.",
+        RCLCPP_INFO(get_logger(), "Loaded static map for topology connect check: %dx%d, resolution %.3f, inflation %.3f m, unknown=%d.",
                  static_map_width_, static_map_height_, static_map_resolution_,
                  static_map_inflation_radius_, unknown_cells);
         return true;
@@ -628,41 +742,37 @@ private:
     MVClient *global_ac;
     std::unique_ptr<std::thread> runth_;
 
-    ros::NodeHandle nh_;
-    ros::NodeHandle control_nh_;
     tf2_ros::Buffer tf_buffer_;
     tf2_ros::TransformListener tf_listener_;
-    ros::Publisher vel_pub_;
-    ros::Publisher fixed_route_mode_pub_;
-    ros::CallbackQueue joy_callback_queue_;
-    ros::AsyncSpinner joy_spinner_;
-    ros::Subscriber joy_sub_;
-    ros::Publisher marker_pub;
-    ros::Publisher marker_array_pub_;
-    ros::Publisher path_pub_;
-    ros::Publisher task_status_pub_;
-    ros::Publisher diagnostics_pub_;
-    ros::CallbackQueue reference_status_queue_;
-    ros::AsyncSpinner reference_status_spinner_;
-    ros::Subscriber reference_status_sub_;
-    ros::NodeHandle safety_phase_nh_;
-    ros::CallbackQueue safety_phase_callback_queue_;
-    ros::AsyncSpinner safety_phase_spinner_;
-    ros::WallTimer safety_phase_timer_;
-    ros::Publisher topology_safety_phase_pub_;
+    rclcpp::CallbackGroup::SharedPtr control_callback_group_;
+    rclcpp::CallbackGroup::SharedPtr reference_callback_group_;
+    rclcpp::CallbackGroup::SharedPtr plan_callback_group_;
+    rclcpp::CallbackGroup::SharedPtr finish_client_callback_group_;
+    rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr vel_pub_;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr fixed_route_mode_pub_;
+    rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
+    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr marker_pub;
+    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_array_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr task_status_pub_;
+    rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diagnostics_pub_;
+    rclcpp::Subscription<geometry_msgs::msg::Vector3Stamped>::SharedPtr reference_status_sub_;
+    rclcpp::TimerBase::SharedPtr safety_phase_timer_;
+    rclcpp::TimerBase::SharedPtr marker_timer_;
+    rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr topology_safety_phase_pub_;
     std::mutex topology_safety_phase_mutex_;
     uint8_t topology_safety_phase_ = TOPOLOGY_SAFETY_NORMAL;
     std::string topology_safety_phase_topic_;
     double topology_safety_phase_rate_ = 10.0;
     std::mutex reference_status_mutex_;
-    ros::Time reference_status_stamp_;
+    rclcpp::Time reference_status_stamp_;
     int reference_status_path_index_ = -1;
     int reference_status_code_ = 0;
-    ros::ServiceServer plan_path_service;
-    ros::ServiceServer cancel_navigation_service_;
-    ros::ServiceServer nav_config_service_;
-    ros::ServiceServer reload_topology_service_;
-    ros::ServiceClient finish_motion_client_;
+    rclcpp::Service<x2bot_teleop::srv::SetInt>::SharedPtr plan_path_service;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr cancel_navigation_service_;
+    rclcpp::Service<x2bot_teleop::srv::NavConfig>::SharedPtr nav_config_service_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reload_topology_service_;
+    rclcpp::Client<cmd_vel_arbiter::srv::FinishMotion>::SharedPtr finish_motion_client_;
 
     int current_pose_index;
     std::vector<TargetPose> target_poses;
@@ -713,40 +823,49 @@ private:
 
     bool notifyMotionFinished(uint8_t reason)
     {
-        cmd_vel_arbiter::FinishMotion service;
-        service.request.source = "nav";
-        service.request.reason = reason;
-        if (!finish_motion_client_.call(service))
+        if (!finish_motion_client_->wait_for_service(std::chrono::seconds(1)))
         {
-            ROS_ERROR("Failed to call /cmd_vel_arbiter/finish_motion for navigation.");
+            RCLCPP_ERROR(
+                get_logger(),
+                "Failed to call /cmd_vel_arbiter/finish_motion for navigation.");
             return false;
         }
-        if (!service.response.centered)
+        auto request = std::make_shared<cmd_vel_arbiter::srv::FinishMotion::Request>();
+        request->source = "nav";
+        request->reason = reason;
+        auto future = finish_motion_client_->async_send_request(request);
+        future.wait();
+        const auto response = future.get();
+        if (!response->centered)
         {
-            ROS_ERROR_STREAM("Navigation stopped, but centering was not confirmed: "
-                             << service.response.message);
+            RCLCPP_ERROR(
+                get_logger(),
+                "Navigation stopped, but centering was not confirmed: %s",
+                response->message.c_str());
         }
-        return service.response.centered;
+        return response->centered;
     }
 
     void publishFixedRouteMode(bool enabled)
     {
-        ros::param::set("/anav/fixed_route_mode", enabled);
-        std_msgs::Bool mode;
+        set_parameter(rclcpp::Parameter("fixed_route_mode", enabled));
+        std_msgs::msg::Bool mode;
         mode.data = enabled;
-        fixed_route_mode_pub_.publish(mode);
-        ROS_INFO("Fixed-route navigation mode %s.", enabled ? "enabled" : "disabled");
+        fixed_route_mode_pub_->publish(mode);
+        RCLCPP_INFO(
+            get_logger(), "Fixed-route navigation mode %s.",
+            enabled ? "enabled" : "disabled");
     }
 
     void publishTopologySafetyPhase()
     {
         std::lock_guard<std::mutex> lock(topology_safety_phase_mutex_);
-        std_msgs::UInt8 message;
+        std_msgs::msg::UInt8 message;
         message.data = topology_safety_phase_;
-        topology_safety_phase_pub_.publish(message);
+        topology_safety_phase_pub_->publish(message);
     }
 
-    void topologySafetyPhaseTimerCallback(const ros::WallTimerEvent &)
+    void topologySafetyPhaseTimerCallback()
     {
         publishTopologySafetyPhase();
     }
@@ -758,13 +877,13 @@ private:
             std::lock_guard<std::mutex> lock(topology_safety_phase_mutex_);
             previous = topology_safety_phase_;
             topology_safety_phase_ = phase;
-            std_msgs::UInt8 message;
+            std_msgs::msg::UInt8 message;
             message.data = phase;
-            topology_safety_phase_pub_.publish(message);
+            topology_safety_phase_pub_->publish(message);
         }
         if (previous != phase)
         {
-            ROS_INFO("Topology safety phase: %s -> %s.",
+            RCLCPP_INFO(get_logger(), "Topology safety phase: %s -> %s.",
                      topologySafetyPhaseName(previous),
                      topologySafetyPhaseName(phase));
         }
@@ -901,7 +1020,9 @@ private:
             return home_dir + "/maps";
         }
 
-        ROS_WARN("HOME is not set; falling back to /home/nav/maps.");
+        RCLCPP_WARN(
+            rclcpp::get_logger("target_pose_loader"),
+            "HOME is not set; falling back to /home/nav/maps.");
         return "/home/nav/maps";
     }
 
@@ -1012,7 +1133,7 @@ private:
             config.fixed_route_final_xy_tolerance;
     }
 
-    void fillNavConfigResponse(x2bot_teleop::NavConfig::Response &response)
+    void fillNavConfigResponse(x2bot_teleop::srv::NavConfig::Response &response)
     {
         const NavConfigValues config = currentNavConfig();
         response.navigation_active = navigation_active_.load();
@@ -1028,8 +1149,15 @@ private:
             config.fixed_route_final_xy_tolerance;
     }
 
-    bool navConfigCallback(x2bot_teleop::NavConfig::Request &request,
-                           x2bot_teleop::NavConfig::Response &response)
+    void navConfigCallback(
+        const std::shared_ptr<x2bot_teleop::srv::NavConfig::Request> request,
+        std::shared_ptr<x2bot_teleop::srv::NavConfig::Response> response)
+    {
+        navConfigImpl(*request, *response);
+    }
+
+    bool navConfigImpl(x2bot_teleop::srv::NavConfig::Request &request,
+                       x2bot_teleop::srv::NavConfig::Response &response)
     {
         std::lock_guard<std::mutex> lock(nav_config_mutex_);
         if (!request.apply)
@@ -1071,12 +1199,19 @@ private:
         response.success = true;
         response.message = "AutoNAV 参数已应用到当前节点";
         fillNavConfigResponse(response);
-        ROS_INFO("Applied AutoNAV runtime configuration from GUI.");
+        RCLCPP_INFO(get_logger(), "Applied AutoNAV runtime configuration from GUI.");
         return true;
     }
 
-    bool reloadTopologyCallback(std_srvs::Trigger::Request &,
-                                std_srvs::Trigger::Response &response)
+    void reloadTopologyCallback(
+        const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+        std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+    {
+        (void)request;
+        reloadTopologyImpl(*response);
+    }
+
+    bool reloadTopologyImpl(std_srvs::srv::Trigger::Response &response)
     {
         std::lock_guard<std::mutex> lock(nav_config_mutex_);
         if (navigation_active_.load())
@@ -1104,7 +1239,7 @@ private:
         std::ifstream file(filename);
         if (!file.is_open())
         {
-            ROS_INFO_STREAM("AutoNAV parameter file not found; use defaults: "
+            RCLCPP_INFO_STREAM(get_logger(), "AutoNAV parameter file not found; use defaults: "
                             << filename);
             return;
         }
@@ -1150,7 +1285,7 @@ private:
         }
         catch (const std::exception &error)
         {
-            ROS_ERROR_STREAM("Invalid AutoNAV parameter file " << filename
+            RCLCPP_ERROR_STREAM(get_logger(), "Invalid AutoNAV parameter file " << filename
                              << ": " << error.what() << "; use defaults.");
             return;
         }
@@ -1158,12 +1293,12 @@ private:
         std::string reason;
         if (!validateNavConfig(config, reason))
         {
-            ROS_ERROR_STREAM("Rejected AutoNAV parameter file " << filename
+            RCLCPP_ERROR_STREAM(get_logger(), "Rejected AutoNAV parameter file " << filename
                              << ": " << reason << "; use defaults.");
             return;
         }
         applyNavConfig(config);
-        ROS_INFO_STREAM("Loaded AutoNAV parameters from " << filename);
+        RCLCPP_INFO_STREAM(get_logger(), "Loaded AutoNAV parameters from " << filename);
     }
 
     void parseMapOrigin(const std::string &value)
@@ -1385,20 +1520,20 @@ private:
         return index >= 0 && index < static_cast<int>(target_poses.size());
     }
 
-    visualization_msgs::Marker makeMarker(const std::string &ns, int id, int type)
+    visualization_msgs::msg::Marker makeMarker(const std::string &ns, int id, int type)
     {
-        visualization_msgs::Marker marker;
+        visualization_msgs::msg::Marker marker;
         marker.header.frame_id = "map";
-        marker.header.stamp = ros::Time::now();
+        marker.header.stamp = now();
         marker.ns = ns;
         marker.id = id;
         marker.type = type;
-        marker.action = visualization_msgs::Marker::ADD;
+        marker.action = visualization_msgs::msg::Marker::ADD;
         marker.pose.orientation.w = 1.0;
         return marker;
     }
 
-    void setMarkerColor(visualization_msgs::Marker &marker, double r, double g, double b, double a)
+    void setMarkerColor(visualization_msgs::msg::Marker &marker, double r, double g, double b, double a)
     {
         marker.color.r = r;
         marker.color.g = g;
@@ -1406,16 +1541,16 @@ private:
         marker.color.a = a;
     }
 
-    void setMarkerScale(visualization_msgs::Marker &marker, double size)
+    void setMarkerScale(visualization_msgs::msg::Marker &marker, double size)
     {
         marker.scale.x = size;
         marker.scale.y = size;
         marker.scale.z = size;
     }
 
-    geometry_msgs::Point pointForIndex(int index) const
+    geometry_msgs::msg::Point pointForIndex(int index) const
     {
-        geometry_msgs::Point point;
+        geometry_msgs::msg::Point point;
         if (validIndex(index))
         {
             point.x = target_poses[index].x;
@@ -1448,7 +1583,7 @@ private:
         auto it = workstation_indices.find(workstation_label);
         if (it == workstation_indices.end())
         {
-            ROS_ERROR_STREAM("Workstation " << workstation_label << " not found in robot_positions.txt");
+            RCLCPP_ERROR_STREAM(get_logger(), "Workstation " << workstation_label << " not found in robot_positions.txt");
             return -1;
         }
         return it->second;
@@ -1474,44 +1609,41 @@ private:
     void publishTaskStatus(const std::string &state, int requested_index,
                            const std::string &target_name, const std::string &detail)
     {
-        std_msgs::String status;
+        std_msgs::msg::String status;
         status.data = cleanStatusField(state) + "\t" + std::to_string(requested_index) +
                       "\t" + cleanStatusField(target_name) + "\t" + cleanStatusField(detail);
-        task_status_pub_.publish(status);
+        task_status_pub_->publish(status);
         if (state == "failed")
         {
             publishDiagnostic(
-                diagnostic_msgs::DiagnosticStatus::ERROR,
+                diagnostic_msgs::msg::DiagnosticStatus::ERROR,
                 "ANAV-NAV-012", "导航任务执行失败", detail,
                 "查看目标点、拓扑路径、局部规划和障碍安全状态。", true);
         }
         else if (state == "running" || state == "arrived")
         {
             publishDiagnostic(
-                diagnostic_msgs::DiagnosticStatus::OK,
+                diagnostic_msgs::msg::DiagnosticStatus::OK,
                 "ANAV-NAV-000", "导航任务状态正常", detail, "", false);
         }
     }
 
-    geometry_msgs::PoseStamped toPoseStamped(const TargetPose &pose)
+    geometry_msgs::msg::PoseStamped toPoseStamped(const TargetPose &pose)
     {
-        geometry_msgs::PoseStamped msg;
+        geometry_msgs::msg::PoseStamped msg;
         msg.header.frame_id = "map";
-        msg.header.stamp = ros::Time::now();
+        msg.header.stamp = now();
         msg.pose.position.x = pose.x;
         msg.pose.position.y = pose.y;
         msg.pose.position.z = pose.z;
 
-        tf::Quaternion q;
+        tf2::Quaternion q;
         q.setRPY(pose.roll, pose.pitch, pose.yaw);
-        msg.pose.orientation.x = q.x();
-        msg.pose.orientation.y = q.y();
-        msg.pose.orientation.z = q.z();
-        msg.pose.orientation.w = q.w();
+        msg.pose.orientation = tf2::toMsg(q);
         return msg;
     }
 
-    geometry_msgs::PoseStamped toPoseStampedWithYaw(const TargetPose &pose, double yaw)
+    geometry_msgs::msg::PoseStamped toPoseStampedWithYaw(const TargetPose &pose, double yaw)
     {
         TargetPose adjusted_pose = pose;
         adjusted_pose.roll = 0.0;
@@ -1535,16 +1667,16 @@ private:
         return std::hypot(a.x - b.x, a.y - b.y);
     }
 
-    double poseDistance(const geometry_msgs::PoseStamped &a, const geometry_msgs::PoseStamped &b) const
+    double poseDistance(const geometry_msgs::msg::PoseStamped &a, const geometry_msgs::msg::PoseStamped &b) const
     {
         return std::hypot(a.pose.position.x - b.pose.position.x,
                           a.pose.position.y - b.pose.position.y);
     }
 
-    double poseYawDelta(const geometry_msgs::PoseStamped &a,
-                        const geometry_msgs::PoseStamped &b) const
+    double poseYawDelta(const geometry_msgs::msg::PoseStamped &a,
+                        const geometry_msgs::msg::PoseStamped &b) const
     {
-        double delta = tf::getYaw(a.pose.orientation) - tf::getYaw(b.pose.orientation);
+        double delta = tf2::getYaw(a.pose.orientation) - tf2::getYaw(b.pose.orientation);
         while (delta > M_PI)
         {
             delta -= 2.0 * M_PI;
@@ -1556,7 +1688,7 @@ private:
         return std::fabs(delta);
     }
 
-    double distanceToNode(const geometry_msgs::PoseStamped &pose, int index) const
+    double distanceToNode(const geometry_msgs::msg::PoseStamped &pose, int index) const
     {
         if (!validIndex(index))
         {
@@ -1566,14 +1698,16 @@ private:
                           pose.pose.position.y - target_poses[index].y);
     }
 
-    bool getCurrentRobotPose(geometry_msgs::PoseStamped &pose)
+    bool getCurrentRobotPose(geometry_msgs::msg::PoseStamped &pose)
     {
         try
         {
-            geometry_msgs::TransformStamped transform =
-                tf_buffer_.lookupTransform("map", "base_link", ros::Time(0), ros::Duration(0.2));
+            geometry_msgs::msg::TransformStamped transform =
+                tf_buffer_.lookupTransform(
+                    "map", "base_link", tf2::TimePointZero,
+                    tf2::durationFromSec(0.2));
             pose.header.frame_id = "map";
-            pose.header.stamp = ros::Time::now();
+            pose.header.stamp = now();
             pose.pose.position.x = transform.transform.translation.x;
             pose.pose.position.y = transform.transform.translation.y;
             pose.pose.position.z = transform.transform.translation.z;
@@ -1582,14 +1716,14 @@ private:
         }
         catch (const tf2::TransformException &ex)
         {
-            ROS_WARN_THROTTLE(1.0, "Failed to lookup map->base_link: %s", ex.what());
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "Failed to lookup map->base_link: %s", ex.what());
             return false;
         }
     }
 
     int nearestPoseIndex()
     {
-        geometry_msgs::PoseStamped robot_pose;
+        geometry_msgs::msg::PoseStamped robot_pose;
         if (!getCurrentRobotPose(robot_pose) || target_poses.empty())
         {
             return -1;
@@ -1610,13 +1744,13 @@ private:
             if (staticMapSegmentFree(robot_pose.pose.position.x, robot_pose.pose.position.y,
                                      target_poses[index].x, target_poses[index].y))
             {
-                ROS_INFO("Nearest reachable topology node is P%d at %.2f m.",
+                RCLCPP_INFO(get_logger(), "Nearest reachable topology node is P%d at %.2f m.",
                          index, candidate.first);
                 return index;
             }
         }
 
-        ROS_WARN("No topology connect node is directly reachable in static map, fall back to nearest P%d at %.2f m.",
+        RCLCPP_WARN(get_logger(), "No topology connect node is directly reachable in static map, fall back to nearest P%d at %.2f m.",
                  candidates.front().second, candidates.front().first);
         return candidates.front().second;
     }
@@ -1624,7 +1758,7 @@ private:
     int forwardReentryPosition(const std::vector<int> &path_indices,
                                std::size_t search_start)
     {
-        geometry_msgs::PoseStamped robot_pose;
+        geometry_msgs::msg::PoseStamped robot_pose;
         if (!getCurrentRobotPose(robot_pose) || path_indices.empty())
         {
             return -1;
@@ -1671,14 +1805,14 @@ private:
                                      target_poses[candidate].x,
                                      target_poses[candidate].y))
             {
-                ROS_INFO("Forward topology re-entry selects route position %zu, P%d (%.2f m).",
+                RCLCPP_INFO(get_logger(), "Forward topology re-entry selects route position %zu, P%d (%.2f m).",
                          position, candidate,
                          distanceToNode(robot_pose, candidate));
                 return static_cast<int>(position);
             }
         }
 
-        ROS_WARN("No forward node on the remaining topology route is directly reachable.");
+        RCLCPP_WARN(get_logger(), "No forward node on the remaining topology route is directly reachable.");
         return -1;
     }
 
@@ -1742,7 +1876,7 @@ private:
         edge.trusted = trusted;
         edge.bidirectional = bidirectional;
         edge.configured_blocked = blocked;
-        edge.blocked_until = ros::WallTime();
+        edge.blocked_until = std::chrono::steady_clock::time_point{};
         edge.failure_count = 0;
         edge.source = source;
         graph[from].push_back(edge);
@@ -1835,7 +1969,7 @@ private:
 
         if (!static_map_loaded_)
         {
-            ROS_ERROR("Refuse topology load because the static map is unavailable.");
+            RCLCPP_ERROR(get_logger(), "Refuse topology load because the static map is unavailable.");
             return false;
         }
 
@@ -1873,13 +2007,13 @@ private:
                 std::fabs(length - geometric_length) > 0.05 ||
                 min_clearance + 1e-6 < static_map_inflation_radius_)
             {
-                ROS_ERROR("Invalid topology edge P%d -> P%d.", from, to);
+                RCLCPP_ERROR(get_logger(), "Invalid topology edge P%d -> P%d.", from, to);
                 valid = false;
             }
             else if (!staticMapSegmentFree(target_poses[from].x, target_poses[from].y,
                                            target_poses[to].x, target_poses[to].y))
             {
-                ROS_ERROR("Topology edge P%d -> P%d fails current static-map clearance check.",
+                RCLCPP_ERROR(get_logger(), "Topology edge P%d -> P%d fails current static-map clearance check.",
                           from, to);
                 valid = false;
             }
@@ -1890,7 +2024,7 @@ private:
                 if (directed_edges.count(forward) ||
                     (bidirectional && directed_edges.count(reverse)))
                 {
-                    ROS_ERROR("Duplicate topology edge P%d -> P%d.", from, to);
+                    RCLCPP_ERROR(get_logger(), "Duplicate topology edge P%d -> P%d.", from, to);
                     valid = false;
                 }
                 else
@@ -1977,7 +2111,7 @@ private:
         }
         catch (const std::exception &error)
         {
-            ROS_ERROR_STREAM("Invalid topology yaml " << filename << ": " << error.what());
+            RCLCPP_ERROR_STREAM(get_logger(), "Invalid topology yaml " << filename << ": " << error.what());
             return false;
         }
 
@@ -1996,14 +2130,14 @@ private:
             !std::isfinite(topology_required_clearance) ||
             topology_required_clearance + 1e-6 < static_map_inflation_radius_)
         {
-            ROS_ERROR("Topology metadata is stale or incompatible; rebuild topology.yaml.");
+            RCLCPP_ERROR(get_logger(), "Topology metadata is stale or incompatible; rebuild topology.yaml.");
             valid = false;
         }
         if (!valid || loaded <= 0 || !topologyStronglyConnected())
         {
             if (valid && loaded > 0)
             {
-                ROS_ERROR("Topology is not strongly connected across all configured nodes.");
+                RCLCPP_ERROR(get_logger(), "Topology is not strongly connected across all configured nodes.");
             }
             return false;
         }
@@ -2066,22 +2200,25 @@ private:
         {
             return true;
         }
-        return !edge.blocked_until.isZero() &&
-               ros::WallTime::now() < edge.blocked_until;
+        return edge.blocked_until != std::chrono::steady_clock::time_point{} &&
+               std::chrono::steady_clock::now() < edge.blocked_until;
     }
 
     double nextTemporaryUnblockDelay() const
     {
-        const ros::WallTime now = ros::WallTime::now();
+        const auto steady_now = std::chrono::steady_clock::now();
         double delay = std::numeric_limits<double>::infinity();
         for (const auto &item : graph)
         {
             for (const TopoEdge &edge : item.second)
             {
-                if (!edge.configured_blocked && !edge.blocked_until.isZero() &&
-                    now < edge.blocked_until)
+                if (!edge.configured_blocked &&
+                    edge.blocked_until != std::chrono::steady_clock::time_point{} &&
+                    steady_now < edge.blocked_until)
                 {
-                    delay = std::min(delay, (edge.blocked_until - now).toSec());
+                    delay = std::min(
+                        delay,
+                        std::chrono::duration<double>(edge.blocked_until - steady_now).count());
                 }
             }
         }
@@ -2095,14 +2232,14 @@ private:
             return false;
         }
 
-        const ros::WallTime wait_start = ros::WallTime::now();
+        const auto wait_start = std::chrono::steady_clock::now();
         bool announced = false;
-        while (ros::ok() && !stop_and_quit)
+        while (rclcpp::ok() && !stop_and_quit)
         {
             path = dijkstraShortestPath(start, target);
             if (!path.empty())
             {
-                ROS_INFO("A temporary topology block expired; retry path to P%d.", target);
+                RCLCPP_INFO(get_logger(), "A temporary topology block expired; retry path to P%d.", target);
                 return true;
             }
 
@@ -2112,22 +2249,24 @@ private:
                 return false;
             }
 
-            const double elapsed = (ros::WallTime::now() - wait_start).toSec();
+            const double elapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - wait_start).count();
             if (elapsed >= blocked_wait_timeout_)
             {
-                ROS_ERROR("Timed out after %.1f seconds waiting for a temporary topology block to expire.",
+                RCLCPP_ERROR(get_logger(), "Timed out after %.1f seconds waiting for a temporary topology block to expire.",
                           blocked_wait_timeout_);
                 return false;
             }
 
             if (!announced)
             {
-                ROS_WARN("No alternate topology path. Stop and wait up to %.1f seconds for a temporary block to expire.",
+                RCLCPP_WARN(get_logger(), "No alternate topology path. Stop and wait up to %.1f seconds for a temporary block to expire.",
                          blocked_wait_timeout_);
                 announced = true;
             }
             stopRobot();
-            ros::WallDuration(std::min(0.2, std::max(0.01, next_delay))).sleep();
+            std::this_thread::sleep_for(
+                std::chrono::duration<double>(std::min(0.2, std::max(0.01, next_delay))));
         }
         return false;
     }
@@ -2230,7 +2369,7 @@ private:
         std::reverse(path.begin(), path.end());
         if (!fixed_route && failed_edge_score[goal] > 0)
         {
-            ROS_WARN("Topology path to P%d must retry previously failed edges "
+            RCLCPP_WARN(get_logger(), "Topology path to P%d must retry previously failed edges "
                      "(failure score=%d); no clean alternative is available.",
                      goal, failed_edge_score[goal]);
         }
@@ -2265,7 +2404,9 @@ private:
                         blocked_cooldown_initial_ *
                             std::pow(blocked_backoff_factor_, edge.failure_count - 1),
                         blocked_cooldown_max_);
-                    edge.blocked_until = ros::WallTime::now() + ros::WallDuration(cooldown);
+                    edge.blocked_until = std::chrono::steady_clock::now() +
+                        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                            std::chrono::duration<double>(cooldown));
                     longest_cooldown = std::max(longest_cooldown, cooldown);
                     blocked_count++;
                 }
@@ -2278,7 +2419,7 @@ private:
             block_one_direction(to, from);
         }
 
-        ROS_WARN("Temporarily blocked topology edge P%d -> P%d%s for %.1f seconds (%d directed edges).",
+        RCLCPP_WARN(get_logger(), "Temporarily blocked topology edge P%d -> P%d%s for %.1f seconds (%d directed edges).",
                  from, to, block_bidirectional_ ? " bidirectional" : "",
                  longest_cooldown, blocked_count);
     }
@@ -2295,7 +2436,7 @@ private:
             {
                 if (edge.to == b)
                 {
-                    edge.blocked_until = ros::WallTime();
+                    edge.blocked_until = std::chrono::steady_clock::time_point{};
                     edge.failure_count = 0;
                 }
             }
@@ -2325,9 +2466,9 @@ private:
     void publishTopologyPath(const std::vector<int> &path_indices)
     {
         active_path_ = path_indices;
-        nav_msgs::Path path;
+        nav_msgs::msg::Path path;
         path.header.frame_id = "map";
-        path.header.stamp = ros::Time::now();
+        path.header.stamp = now();
         for (int index : path_indices)
         {
             if (validIndex(index))
@@ -2335,16 +2476,16 @@ private:
                 path.poses.push_back(toPoseStamped(target_poses[index]));
             }
         }
-        path_pub_.publish(path);
+        path_pub_->publish(path);
         publishTopologyMarkers();
     }
 
     void publishTopologyMarkers()
     {
-        visualization_msgs::MarkerArray markers;
+        visualization_msgs::msg::MarkerArray markers;
 
-        visualization_msgs::Marker default_edges =
-            makeMarker("topology_default_edges", 0, visualization_msgs::Marker::LINE_LIST);
+        visualization_msgs::msg::Marker default_edges =
+            makeMarker("topology_default_edges", 0, visualization_msgs::msg::Marker::LINE_LIST);
         setMarkerScale(default_edges, 0.035);
         setMarkerColor(default_edges, 1.0, 0.82, 0.05, 0.75);
 
@@ -2369,8 +2510,8 @@ private:
             }
         }
 
-        visualization_msgs::Marker default_nodes =
-            makeMarker("topology_default_nodes", 1, visualization_msgs::Marker::SPHERE_LIST);
+        visualization_msgs::msg::Marker default_nodes =
+            makeMarker("topology_default_nodes", 1, visualization_msgs::msg::Marker::SPHERE_LIST);
         setMarkerScale(default_nodes, 0.24);
         setMarkerColor(default_nodes, 1.0, 0.82, 0.05, 0.90);
         for (int i = 0; i < static_cast<int>(target_poses.size()); ++i)
@@ -2378,8 +2519,8 @@ private:
             default_nodes.points.push_back(pointForIndex(i));
         }
 
-        visualization_msgs::Marker selected_edges =
-            makeMarker("topology_selected_edges", 2, visualization_msgs::Marker::LINE_LIST);
+        visualization_msgs::msg::Marker selected_edges =
+            makeMarker("topology_selected_edges", 2, visualization_msgs::msg::Marker::LINE_LIST);
         setMarkerScale(selected_edges, 0.065);
         setMarkerColor(selected_edges, 0.0, 0.85, 0.20, 0.95);
         for (std::size_t i = 1; i < active_path_.size(); ++i)
@@ -2392,8 +2533,8 @@ private:
             selected_edges.points.push_back(pointForIndex(active_path_[i]));
         }
 
-        visualization_msgs::Marker selected_nodes =
-            makeMarker("topology_selected_nodes", 3, visualization_msgs::Marker::SPHERE_LIST);
+        visualization_msgs::msg::Marker selected_nodes =
+            makeMarker("topology_selected_nodes", 3, visualization_msgs::msg::Marker::SPHERE_LIST);
         setMarkerScale(selected_nodes, 0.32);
         setMarkerColor(selected_nodes, 0.0, 0.85, 0.20, 0.95);
         for (int index : active_path_)
@@ -2404,8 +2545,8 @@ private:
             }
         }
 
-        visualization_msgs::Marker next_node =
-            makeMarker("topology_next_goal", 4, visualization_msgs::Marker::SPHERE);
+        visualization_msgs::msg::Marker next_node =
+            makeMarker("topology_next_goal", 4, visualization_msgs::msg::Marker::SPHERE);
         setMarkerScale(next_node, 0.46);
         setMarkerColor(next_node, 1.0, 0.05, 0.02, 1.0);
         if (validIndex(active_next_index_))
@@ -2414,7 +2555,7 @@ private:
         }
         else
         {
-            next_node.action = visualization_msgs::Marker::DELETE;
+            next_node.action = visualization_msgs::msg::Marker::DELETE;
         }
 
         markers.markers.push_back(default_edges);
@@ -2422,15 +2563,19 @@ private:
         markers.markers.push_back(selected_edges);
         markers.markers.push_back(selected_nodes);
         markers.markers.push_back(next_node);
-        marker_array_pub_.publish(markers);
+        marker_array_pub_->publish(markers);
     }
 
     void initializeGlobalAC()
     {
-        global_ac = new MVClient("move_base", true);
-        ROS_INFO("Waiting for move_base action server to start...");
+        const auto action_name =
+            declare_parameter<std::string>("navigate_action", "/navigate_to_pose");
+        global_ac = new MVClient(this, action_name);
+        RCLCPP_INFO(
+            get_logger(), "Waiting for navigation action server %s to start...",
+            action_name.c_str());
         global_ac->waitForServer();
-        ROS_INFO("Connected to move_base action server");
+        RCLCPP_INFO(get_logger(), "Connected to navigation action server");
     }
 
     enum ReferenceStatusCode
@@ -2450,7 +2595,8 @@ private:
         GOAL_CANCELED
     };
 
-    void referenceStatusCallback(const geometry_msgs::Vector3Stamped::ConstPtr &msg)
+    void referenceStatusCallback(
+        const geometry_msgs::msg::Vector3Stamped::ConstSharedPtr msg)
     {
         std::lock_guard<std::mutex> lock(reference_status_mutex_);
         reference_status_stamp_ = msg->header.stamp;
@@ -2461,13 +2607,13 @@ private:
     void resetReferenceStatus()
     {
         std::lock_guard<std::mutex> lock(reference_status_mutex_);
-        reference_status_stamp_ = ros::Time(0);
+        reference_status_stamp_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
         reference_status_path_index_ = -1;
         reference_status_code_ = 0;
     }
 
     bool referenceStatusMatches(int topology_path_index, int status_code,
-                                const ros::Time &goal_start_time)
+                                const rclcpp::Time &goal_start_time)
     {
         std::lock_guard<std::mutex> lock(reference_status_mutex_);
         return reference_status_stamp_ >= goal_start_time &&
@@ -2476,7 +2622,7 @@ private:
     }
 
     bool referenceTrackingOrPassed(int topology_path_index,
-                                   const ros::Time &goal_start_time)
+                                   const rclcpp::Time &goal_start_time)
     {
         std::lock_guard<std::mutex> lock(reference_status_mutex_);
         return reference_status_stamp_ >= goal_start_time &&
@@ -2490,36 +2636,36 @@ private:
                                          bool fixed_route = false)
     {
         const TargetPose &target_pose = target_poses[target_index];
-        move_base_msgs::MoveBaseGoal mb_goal;
+        nav2_msgs::action::NavigateToPose::Goal mb_goal;
         if (final_goal)
         {
-            mb_goal.target_pose = toPoseStamped(target_pose);
+            mb_goal.pose = toPoseStamped(target_pose);
         }
         else if (validIndex(previous_index))
         {
-            mb_goal.target_pose = toPoseStampedWithYaw(target_pose,
-                                                       yawBetween(previous_index, target_index));
+            mb_goal.pose = toPoseStampedWithYaw(target_pose,
+                                                yawBetween(previous_index, target_index));
         }
         else
         {
-            mb_goal.target_pose = toPoseStamped(target_pose);
+            mb_goal.pose = toPoseStamped(target_pose);
         }
 
         active_next_index_ = target_index;
         resetReferenceStatus();
         publishTopologyMarkers();
-        ROS_INFO_STREAM("Sending topology " << (final_goal ? "final" : "pass-through")
+        RCLCPP_INFO_STREAM(get_logger(), "Sending topology " << (final_goal ? "final" : "pass-through")
                                             << " goal P" << target_index << ": ("
                                             << target_pose.x << ", " << target_pose.y << ")");
-        const ros::Time goal_start_time = ros::Time::now();
+        const rclcpp::Time goal_start_time = now();
         global_ac->sendGoal(mb_goal);
 
-        geometry_msgs::PoseStamped last_progress_pose;
+        geometry_msgs::msg::PoseStamped last_progress_pose;
         bool have_progress_pose = getCurrentRobotPose(last_progress_pose);
-        ros::Time last_progress_time = ros::Time::now();
-        const ros::Time start_time = last_progress_time;
+        rclcpp::Time last_progress_time = now();
+        const rclcpp::Time start_time = last_progress_time;
 
-        while (ros::ok())
+        while (rclcpp::ok())
         {
             if (cancel_requested_.load())
             {
@@ -2538,7 +2684,7 @@ private:
             {
                 global_ac->cancelGoal();
                 stopRobot();
-                while (pause_robot.load() && ros::ok())
+                while (pause_robot.load() && rclcpp::ok())
                 {
                     if (cancel_requested_.load())
                     {
@@ -2547,9 +2693,9 @@ private:
                         return GOAL_CANCELED;
                     }
                     stopRobot();
-                    ros::Duration(0.2).sleep();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 }
-                if (!ros::ok())
+                if (!rclcpp::ok())
                 {
                     return GOAL_FAILED;
                 }
@@ -2561,7 +2707,7 @@ private:
                 pause_reentry_requested_.store(false);
                 active_next_index_ = -1;
                 publishTopologyMarkers();
-                ROS_INFO("Resume via topology re-entry after pausing at path index %d%s.",
+                RCLCPP_INFO(get_logger(), "Resume via topology re-entry after pausing at path index %d%s.",
                          topology_path_index,
                          current_goal_passed ? " (current waypoint already passed)" : "");
                 return current_goal_passed ? GOAL_PAUSED_AFTER_PASS : GOAL_PAUSED;
@@ -2571,7 +2717,7 @@ private:
                                        REFERENCE_PATH_DEVIATED,
                                        goal_start_time))
             {
-                ROS_WARN("B-spline path deviation at topology path index %d; "
+                RCLCPP_WARN(get_logger(), "B-spline path deviation at topology path index %d; "
                          "stop the current action and hand re-entry to topology.",
                          topology_path_index);
                 global_ac->cancelGoal();
@@ -2581,7 +2727,7 @@ private:
                 return GOAL_PATH_DEVIATED;
             }
 
-            if (global_ac->waitForResult(ros::Duration(0.2)))
+            if (global_ac->waitForResult(rclcpp::Duration::from_seconds(0.2)))
             {
                 if (cancel_requested_.load())
                 {
@@ -2606,10 +2752,10 @@ private:
                     publishTopologyMarkers();
                     return GOAL_PATH_DEVIATED;
                 }
-                const actionlib::SimpleClientGoalState state = global_ac->getState();
-                if (state == actionlib::SimpleClientGoalState::SUCCEEDED)
+                const MVGoalState state = global_ac->getState();
+                if (state.succeeded())
                 {
-                    geometry_msgs::PoseStamped current_pose;
+                    geometry_msgs::msg::PoseStamped current_pose;
                     if (!final_goal &&
                         validate_pass_through_action_success_distance_ &&
                         getCurrentRobotPose(current_pose))
@@ -2617,7 +2763,7 @@ private:
                         const double target_distance = distanceToNode(current_pose, target_index);
                         if (target_distance > waypoint_reached_distance_)
                         {
-                            ROS_WARN("move_base reported P%d reached, but robot is %.2f m away. Retry same topology goal.",
+                            RCLCPP_WARN(get_logger(), "move_base reported P%d reached, but robot is %.2f m away. Retry same topology goal.",
                                      target_index, target_distance);
                             global_ac->sendGoal(mb_goal);
                             continue;
@@ -2626,19 +2772,19 @@ private:
                     else if (!final_goal && getCurrentRobotPose(current_pose))
                     {
                         const double target_distance = distanceToNode(current_pose, target_index);
-                        ROS_INFO("Pass-through P%d accepted by move_base action success at %.2f m "
+                        RCLCPP_INFO(get_logger(), "Pass-through P%d accepted by move_base action success at %.2f m "
                                  "from topo point; reference curve may not pass exactly through the waypoint.",
                                  target_index, target_distance);
                     }
-                    ROS_INFO_STREAM("Reached topology goal P" << target_index);
+                    RCLCPP_INFO_STREAM(get_logger(), "Reached topology goal P" << target_index);
                     current_pose_index = target_index;
                     active_next_index_ = -1;
                     publishTopologyMarkers();
                     return GOAL_REACHED;
                 }
-                ROS_WARN_STREAM("Goal P" << target_index << " failed with state: " << state.toString());
-                while (ros::ok() &&
-                       (ros::Time::now() - last_progress_time).toSec() < blocked_timeout_)
+                RCLCPP_WARN_STREAM(get_logger(), "Goal P" << target_index << " failed with state: " << state.toString());
+                while (rclcpp::ok() &&
+                       (now() - last_progress_time).seconds() < blocked_timeout_)
                 {
                     if (stop_and_quit)
                     {
@@ -2646,7 +2792,7 @@ private:
                         return GOAL_FAILED;
                     }
                     stopRobot();
-                    ros::Duration(0.2).sleep();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 }
                 return GOAL_FAILED;
             }
@@ -2655,7 +2801,7 @@ private:
                 referenceStatusMatches(topology_path_index, REFERENCE_PASSED,
                                        goal_start_time))
             {
-                ROS_INFO("B-spline pass-through P%d reached at topology path index %d; "
+                RCLCPP_INFO(get_logger(), "B-spline pass-through P%d reached at topology path index %d; "
                          "send the next goal without cancelling or stopping.",
                          target_index, topology_path_index);
                 current_pose_index = target_index;
@@ -2664,7 +2810,7 @@ private:
                 return GOAL_REACHED;
             }
 
-            geometry_msgs::PoseStamped current_pose;
+            geometry_msgs::msg::PoseStamped current_pose;
             if (getCurrentRobotPose(current_pose))
             {
                 const double target_distance = distanceToNode(current_pose, target_index);
@@ -2678,15 +2824,13 @@ private:
                     // being preempted by this legacy 0.20 m fallback.
                     if (bspline_tracking)
                     {
-                        ROS_DEBUG_THROTTLE(
-                            1.0,
-                            "Ignore legacy XY arrival for B-spline waypoint P%d "
+                        RCLCPP_DEBUG_THROTTLE(get_logger(), *get_clock(), 1000, "Ignore legacy XY arrival for B-spline waypoint P%d "
                             "at %.3f m; wait for REFERENCE_PASSED.",
                             target_index, target_distance);
                     }
                     else
                     {
-                        ROS_INFO("Pass-through waypoint P%d reached by XY distance %.2f m.",
+                        RCLCPP_INFO(get_logger(), "Pass-through waypoint P%d reached by XY distance %.2f m.",
                                  target_index, target_distance);
                         global_ac->cancelGoal();
                         current_pose_index = target_index;
@@ -2697,7 +2841,7 @@ private:
                 }
                 if (final_goal && target_distance <= waypoint_reached_distance_)
                 {
-                    last_progress_time = ros::Time::now();
+                    last_progress_time = now();
                 }
 
                 if (!have_progress_pose ||
@@ -2706,23 +2850,21 @@ private:
                 {
                     last_progress_pose = current_pose;
                     have_progress_pose = true;
-                    last_progress_time = ros::Time::now();
+                    last_progress_time = now();
                 }
             }
 
-            const ros::Time now = ros::Time::now();
-            if ((now - last_progress_time).toSec() >= blocked_timeout_)
+            const rclcpp::Time current_time = now();
+            if ((current_time - last_progress_time).seconds() >= blocked_timeout_)
             {
                 if (fixed_route)
                 {
-                    ROS_WARN_THROTTLE(
-                        2.0,
-                        "Fixed route P%d: no motion for %.1f seconds; keep the same goal and wait without replanning.",
+                    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "Fixed route P%d: no motion for %.1f seconds; keep the same goal and wait without replanning.",
                         target_index,
-                        (now - last_progress_time).toSec());
+                        (current_time - last_progress_time).seconds());
                     continue;
                 }
-                ROS_WARN("No effective motion for %.1f seconds, treat current edge as blocked.",
+                RCLCPP_WARN(get_logger(), "No effective motion for %.1f seconds, treat current edge as blocked.",
                          blocked_timeout_);
                 global_ac->cancelGoal();
                 stopRobot();
@@ -2730,18 +2872,16 @@ private:
                 publishTopologyMarkers();
                 return GOAL_FAILED;
             }
-            if ((now - start_time).toSec() >= goal_timeout_)
+            if ((current_time - start_time).seconds() >= goal_timeout_)
             {
                 if (fixed_route)
                 {
-                    ROS_WARN_THROTTLE(
-                        2.0,
-                        "Fixed route P%d: goal remains active after %.1f seconds; wait indefinitely without replanning.",
+                    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "Fixed route P%d: goal remains active after %.1f seconds; wait indefinitely without replanning.",
                         target_index,
-                        (now - start_time).toSec());
+                        (current_time - start_time).seconds());
                     continue;
                 }
-                ROS_WARN("Goal P%d timeout after %.1f seconds.", target_index, goal_timeout_);
+                RCLCPP_WARN(get_logger(), "Goal P%d timeout after %.1f seconds.", target_index, goal_timeout_);
                 global_ac->cancelGoal();
                 stopRobot();
                 active_next_index_ = -1;
@@ -2766,7 +2906,7 @@ private:
             return 0;
         }
 
-        geometry_msgs::PoseStamped current_pose;
+        geometry_msgs::msg::PoseStamped current_pose;
         if (!getCurrentRobotPose(current_pose))
         {
             return 0;
@@ -2780,7 +2920,7 @@ private:
         }
 
         current_pose_index = path_indices.front();
-        ROS_INFO("Starting topology anchor P%d confirmed at %.3f m; "
+        RCLCPP_INFO(get_logger(), "Starting topology anchor P%d confirmed at %.3f m; "
                  "begin motion with the next path node.",
                  current_pose_index, anchor_distance);
         return 1;
@@ -2810,7 +2950,7 @@ private:
             const int previous_index = (i == 0) ? -1 : path_indices[i - 1];
             const bool final_goal = next_index == target_index;
             selectTopologySafetyPhase(start_segment_active, final_goal);
-            while (ros::ok())
+            while (rclcpp::ok())
             {
                 const GoalMonitorResult result = sendGoalAndMonitor(
                     next_index, previous_index, final_goal,
@@ -2822,7 +2962,7 @@ private:
                 }
                 if (result == GOAL_PAUSED)
                 {
-                    ROS_INFO("Fixed route: resume the same topology goal P%d without replanning.",
+                    RCLCPP_INFO(get_logger(), "Fixed route: resume the same topology goal P%d without replanning.",
                              next_index);
                     continue;
                 }
@@ -2837,7 +2977,7 @@ private:
                 stopRobot();
                 active_next_index_ = -1;
                 publishTopologyMarkers();
-                ROS_ERROR("Fixed route stopped at P%d; no alternate path will be planned.",
+                RCLCPP_ERROR(get_logger(), "Fixed route stopped at P%d; no alternate path will be planned.",
                           next_index);
                 return false;
             }
@@ -2847,7 +2987,7 @@ private:
             {
                 start_segment_active = false;
             }
-            if (!ros::ok())
+            if (!rclcpp::ok())
             {
                 stopRobot();
                 return false;
@@ -2875,20 +3015,20 @@ private:
         int replan_count = 0;
         const int max_replans = std::max(3, static_cast<int>(target_poses.size()) * 2);
 
-        while (ros::ok() && replan_count <= max_replans)
+        while (rclcpp::ok() && replan_count <= max_replans)
         {
             if (path_indices.empty())
             {
                 path_indices = dijkstraShortestPath(start_index, target_index);
                 if (path_indices.empty())
                 {
-                    ROS_ERROR("No available topology path to target P%d.", target_index);
+                    RCLCPP_ERROR(get_logger(), "No available topology path to target P%d.", target_index);
                     stopRobot();
                     return false;
                 }
                 execution_start = 0;
                 publishTopologyPath(path_indices);
-                ROS_INFO_STREAM(formatPathMessage("replan ok:", path_indices));
+                RCLCPP_INFO_STREAM(get_logger(), formatPathMessage("replan ok:", path_indices));
             }
 
             for (std::size_t i = execution_start; i < path_indices.size(); ++i)
@@ -2962,13 +3102,13 @@ private:
                         start_index = path_indices[execution_start];
                         ++replan_count;
                         publishTopologyPath(path_indices);
-                        ROS_WARN_STREAM(formatPathMessage(
+                        RCLCPP_WARN_STREAM(get_logger(), formatPathMessage(
                             paused ? "topology forward re-entry after pause:"
                                    : "topology forward re-entry after B-spline deviation:",
                             path_indices));
                         break;
                     }
-                    ROS_WARN("Forward topology re-entry failed; fall back to nearest reachable node.");
+                    RCLCPP_WARN(get_logger(), "Forward topology re-entry failed; fall back to nearest reachable node.");
                 }
 
                 if (!needs_forward_reentry && validIndex(previous_index))
@@ -2986,7 +3126,7 @@ private:
                 if (validIndex(previous_index))
                 {
                     start_index = previous_index;
-                    ROS_INFO("Anchor blocked-edge replan at last confirmed node P%d "
+                    RCLCPP_INFO(get_logger(), "Anchor blocked-edge replan at last confirmed node P%d "
                              "instead of choosing an arbitrary nearest node.",
                              start_index);
                 }
@@ -3005,14 +3145,14 @@ private:
                 {
                     if (!waitForTemporaryPath(start_index, target_index, path_indices))
                     {
-                        ROS_ERROR("Target P%d remains unreachable after waiting for temporary blocks.",
+                        RCLCPP_ERROR(get_logger(), "Target P%d remains unreachable after waiting for temporary blocks.",
                                   target_index);
                         stopRobot();
                         return false;
                     }
                 }
                 publishTopologyPath(path_indices);
-                ROS_WARN_STREAM(formatPathMessage(
+                RCLCPP_WARN_STREAM(get_logger(), formatPathMessage(
                     needs_forward_reentry ? "nearest-node topology re-entry fallback:"
                                           : "replan after blocked edge:",
                     path_indices));
@@ -3020,7 +3160,7 @@ private:
             }
         }
 
-        ROS_ERROR("Exceeded topology replan limit for target P%d.", target_index);
+        RCLCPP_ERROR(get_logger(), "Exceeded topology replan limit for target P%d.", target_index);
         stopRobot();
         return false;
     }
@@ -3034,8 +3174,8 @@ private:
         setTopologySafetyPhase(TOPOLOGY_SAFETY_START_SEGMENT);
         const bool ok = runTopologyMission(path_indices.back(), path_indices);
         notifyMotionFinished(
-            ok ? cmd_vel_arbiter::FinishMotionRequest::TASK_FINISHED
-               : cmd_vel_arbiter::FinishMotionRequest::TASK_FAILED);
+            ok ? cmd_vel_arbiter::srv::FinishMotion::Request::TASK_FINISHED
+               : cmd_vel_arbiter::srv::FinishMotion::Request::TASK_FAILED);
         setTopologySafetyPhase(TOPOLOGY_SAFETY_NORMAL);
     }
 
@@ -3084,7 +3224,7 @@ private:
     {
         if (pause_robot.exchange(false))
         {
-            ROS_INFO("Resume topology navigation.");
+            RCLCPP_INFO(get_logger(), "Resume topology navigation.");
         }
     }
 
@@ -3095,8 +3235,15 @@ private:
         stopRobot();
     }
 
-    bool cancelNavigationCallback(std_srvs::Trigger::Request &,
-                                  std_srvs::Trigger::Response &res)
+    void cancelNavigationCallback(
+        const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+        std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+    {
+        (void)request;
+        cancelNavigationImpl(*response);
+    }
+
+    bool cancelNavigationImpl(std_srvs::srv::Trigger::Response &res)
     {
         cancel_requested_.store(true);
         pause_robot.store(false);
@@ -3105,35 +3252,35 @@ private:
         stopRobot();
         res.success = true;
         res.message = "navigation cancellation requested";
-        ROS_INFO("Navigation cancellation requested by GUI.");
+        RCLCPP_INFO(get_logger(), "Navigation cancellation requested by GUI.");
         return true;
     }
 
     void stopRobot()
     {
-        vel_pub_.publish(geometry_msgs::Twist());
+        vel_pub_->publish(geometry_msgs::msg::Twist());
     }
 
-    void joyCallback(const sensor_msgs::Joy::ConstPtr &joy)
+    void joyCallback(const sensor_msgs::msg::Joy::ConstSharedPtr joy)
     {
         const bool Apressed = joy->buttons[0];
         const bool Xpressed = joy->buttons[2];
         const bool Ypressed = joy->buttons[3];
         if (Apressed)
         {
-            ROS_INFO("A pressed, pause.");
+            RCLCPP_INFO(get_logger(), "A pressed, pause.");
             pause();
         }
 
         if (Xpressed)
         {
-            ROS_INFO("X pressed, resume.");
+            RCLCPP_INFO(get_logger(), "X pressed, resume.");
             resume();
         }
 
         if (Ypressed)
         {
-            ROS_INFO("Y pressed, start or resume.");
+            RCLCPP_INFO(get_logger(), "Y pressed, start or resume.");
             pause_robot.store(false);
             if ((nullptr == runth_) || (current_status == 3))
             {
@@ -3145,53 +3292,54 @@ private:
 
 int main(int argc, char **argv)
 {
-    ros::init(argc, argv, "target_pose_loader");
+    rclcpp::init(argc, argv);
 
-    mynav current_nav;
-    if (!current_nav.loadNavPnts())
+    auto current_nav = std::make_shared<mynav>();
+    if (!current_nav->loadNavPnts())
     {
-        current_nav.publishDiagnostic(
-            diagnostic_msgs::DiagnosticStatus::ERROR,
+        current_nav->publishDiagnostic(
+            diagnostic_msgs::msg::DiagnosticStatus::ERROR,
             "ANAV-MAP-004", "导航点文件缺失或内容无效",
             "无法加载 robot_positions.txt。",
             "检查 ~/maps/robot_positions.txt 的路径、格式和点位数量。", true);
-        ROS_FATAL("Navigation points are missing or invalid; topology navigation will not start.");
-        ros::WallDuration(0.2).sleep();
+        RCLCPP_FATAL(current_nav->get_logger(), "Navigation points are missing or invalid; topology navigation will not start.");
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        rclcpp::shutdown();
         return 2;
     }
-    if (!current_nav.loadStaticMap())
+    if (!current_nav->loadStaticMap())
     {
-        current_nav.publishDiagnostic(
-            diagnostic_msgs::DiagnosticStatus::ERROR,
+        current_nav->publishDiagnostic(
+            diagnostic_msgs::msg::DiagnosticStatus::ERROR,
             "ANAV-MAP-002", "静态地图检查未通过",
             "map.yaml 或其图像文件缺失、格式错误或无法读取。",
             "检查 ~/maps/map.yaml、image 路径及文件权限。", true);
-        ROS_FATAL("Static map is missing or invalid; topology navigation will not start.");
-        ros::WallDuration(0.2).sleep();
+        RCLCPP_FATAL(current_nav->get_logger(), "Static map is missing or invalid; topology navigation will not start.");
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        rclcpp::shutdown();
         return 3;
     }
-    if (!current_nav.loadTopology())
+    if (!current_nav->loadTopology())
     {
-        current_nav.publishDiagnostic(
-            diagnostic_msgs::DiagnosticStatus::ERROR,
+        current_nav->publishDiagnostic(
+            diagnostic_msgs::msg::DiagnosticStatus::ERROR,
             "ANAV-MAP-009", "导航拓扑检查未通过",
             "topology.yaml 缺失、与点位/地图不匹配或校验失败。",
             "在 GUI 中重新构建导航拓扑并检查构建输出。", true);
-        ROS_FATAL("Validated topology is unavailable; topology navigation will not start.");
-        ros::WallDuration(0.2).sleep();
+        RCLCPP_FATAL(current_nav->get_logger(), "Validated topology is unavailable; topology navigation will not start.");
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        rclcpp::shutdown();
         return 4;
     }
-    current_nav.publishDiagnostic(
-        diagnostic_msgs::DiagnosticStatus::OK,
+    current_nav->publishDiagnostic(
+        diagnostic_msgs::msg::DiagnosticStatus::OK,
         "ANAV-NAV-000", "导航配置检查通过", "点位、静态地图和拓扑已加载。",
         "", false);
 
-    while (ros::ok())
-    {
-        current_nav.publishNavPointsMarkers();
-        ros::Duration(0.05).sleep();
-        ros::spinOnce();
-    }
-
+    current_nav->startMarkerPublishing();
+    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 5);
+    executor.add_node(current_nav);
+    executor.spin();
+    rclcpp::shutdown();
     return 0;
 }

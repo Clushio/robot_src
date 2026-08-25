@@ -1,15 +1,19 @@
-#include <ros/ros.h>
-#include <geometry_msgs/PoseStamped.h>
-#include <geometry_msgs/Twist.h>
-#include <cmd_vel_arbiter/FinishMotion.h>
-#include <diagnostic_msgs/DiagnosticArray.h>
-#include <diagnostic_msgs/DiagnosticStatus.h>
-#include <diagnostic_msgs/KeyValue.h>
-#include <x2bot_teleop/SetTagY.h>
-#include <tf/transform_datatypes.h> // 用于处理四元数
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <memory>
+
+#include <cmd_vel_arbiter/srv/finish_motion.hpp>
+#include <diagnostic_msgs/msg/diagnostic_array.hpp>
+#include <diagnostic_msgs/msg/diagnostic_status.hpp>
+#include <diagnostic_msgs/msg/key_value.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/twist.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <tf2/utils.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+#include <x2bot_teleop/srv/set_tag_y.hpp>
 
 namespace {
 const char* const COLOR_YELLOW = "\033[33m";
@@ -29,9 +33,9 @@ double normalizeAngleRad(double angle) {
     return angle;
 }
 
-void addDiagnosticValue(diagnostic_msgs::DiagnosticStatus& status,
+void addDiagnosticValue(diagnostic_msgs::msg::DiagnosticStatus& status,
                         const std::string& key, const std::string& value) {
-    diagnostic_msgs::KeyValue item;
+    diagnostic_msgs::msg::KeyValue item;
     item.key = key;
     item.value = value;
     status.values.push_back(item);
@@ -47,10 +51,10 @@ private:
 };
 }
 
-class RobotController {
+class RobotController : public rclcpp::Node {
 public:
-    RobotController(ros::NodeHandle& nh)
-        : nh_(nh),
+    RobotController()
+        : Node("robot_controller"),
           current_x_m_(0.0),
           current_y_m_(0.0),
           target_x_m_(0.0),
@@ -67,50 +71,66 @@ public:
           tag_update_seq_(0),
           last_yaw_stable_seq_(0),
           control_active_(false),
-          last_update_time_(ros::Time(0)) {
+          last_update_time_(0, 0, get_clock()->get_clock_type()),
+          previous_yaw_time_(0, 0, get_clock()->get_clock_type()) {
         // 初始化参数
-        ros::NodeHandle private_nh("~");
-        private_nh.param("kp", kp_, 0.5);                  // y 方向比例增益
-        private_nh.param("kp_x", kp_x_, 0.5);              // x 方向比例增益
-        private_nh.param("target_x", target_x_m_, 0.0);    // x 方向目标偏差，单位 m，默认对中
-        private_nh.param("min_speed", min_speed_, 0.01);   // 死区外最低启动速度
-        private_nh.param("max_speed", max_speed_, 0.05);   // 最高速度绝对值
-        private_nh.param("arrival_threshold_y", arrival_threshold_y_, 0.005); // y 到达目标阈值
-        private_nh.param("arrival_threshold", arrival_threshold_y_, arrival_threshold_y_); // 兼容旧参数名
-        private_nh.param("arrival_threshold_x", arrival_threshold_x_, 0.005); // x 到达目标阈值
-        private_nh.param("data_timeout", data_timeout_, 3.0);              // 数据超时时间（秒）
-        private_nh.param("tag_abort_timeout", tag_abort_timeout_, 10.0);   // 连续无效后结束任务
-        private_nh.param("rotation_threshold", rotation_threshold_, 0.015);  // 旋转角度阈值
-        private_nh.param("yaw_kp", yaw_kp_, 0.5);             // 角度 PD 的 P
-        private_nh.param("yaw_kd", yaw_kd_, 0.00);            // 角度 PD 的 D
-        private_nh.param("max_angular_speed", max_angular_speed_, 0.15); // 最大角速度
-        private_nh.param("max_angular_accel", max_angular_accel_, 0.15); // 最大角加速度
-        private_nh.param("filter_alpha", filter_alpha_, 0.5); // 位置/角度低通滤波系数
-        private_nh.param("yaw_stable_count", yaw_stable_required_, 5); // 连续多少帧 yaw 达标才切换/成功
-        private_nh.param("final_yaw_kp", final_yaw_kp_, 0.2); // Y+Yaw 阶段角度 P，独立于初始旋转
-        private_nh.param("final_yaw_cmd_deadband", final_yaw_cmd_deadband_, rotation_threshold_); // 最后 Y+Yaw 阶段的角速度死区
-        private_nh.param("enable_final_y_yaw_after_x_check", enable_final_y_yaw_after_x_check_, false); // 最终 X 后是否再补一轮 Y+Yaw
+        kp_ = declare_parameter<double>("kp", 0.5);
+        kp_x_ = declare_parameter<double>("kp_x", 0.5);
+        target_x_m_ = declare_parameter<double>("target_x", 0.0);
+        min_speed_ = declare_parameter<double>("min_speed", 0.01);
+        max_speed_ = declare_parameter<double>("max_speed", 0.05);
+        arrival_threshold_y_ = declare_parameter<double>("arrival_threshold_y", 0.005);
+        arrival_threshold_y_ = declare_parameter<double>("arrival_threshold", arrival_threshold_y_);
+        arrival_threshold_x_ = declare_parameter<double>("arrival_threshold_x", 0.005);
+        data_timeout_ = declare_parameter<double>("data_timeout", 3.0);
+        tag_abort_timeout_ = declare_parameter<double>("tag_abort_timeout", 10.0);
+        rotation_threshold_ = declare_parameter<double>("rotation_threshold", 0.015);
+        yaw_kp_ = declare_parameter<double>("yaw_kp", 0.5);
+        yaw_kd_ = declare_parameter<double>("yaw_kd", 0.0);
+        max_angular_speed_ = declare_parameter<double>("max_angular_speed", 0.15);
+        max_angular_accel_ = declare_parameter<double>("max_angular_accel", 0.15);
+        filter_alpha_ = declare_parameter<double>("filter_alpha", 0.5);
+        yaw_stable_required_ = declare_parameter<int>("yaw_stable_count", 5);
+        final_yaw_kp_ = declare_parameter<double>("final_yaw_kp", 0.2);
+        final_yaw_cmd_deadband_ =
+            declare_parameter<double>("final_yaw_cmd_deadband", rotation_threshold_);
+        enable_final_y_yaw_after_x_check_ =
+            declare_parameter<bool>("enable_final_y_yaw_after_x_check", false);
 
         sanitizeParameters();
 
         // 订阅 /tag_position 话题
-        tag_subscriber_ = nh_.subscribe("/tag_position", 10, &RobotController::tagCallback, this);
+        tag_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+        service_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+        client_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+        rclcpp::SubscriptionOptions subscription_options;
+        subscription_options.callback_group = tag_callback_group_;
+        tag_subscriber_ = create_subscription<geometry_msgs::msg::PoseStamped>(
+            "/tag_position", rclcpp::QoS(10),
+            std::bind(&RobotController::tagCallback, this, std::placeholders::_1),
+            subscription_options);
 
         // 发布到仲裁器输入；只有 cmd_vel_arbiter 可以发布 /cmd_vel。
         std::string cmd_vel_topic;
-        private_nh.param("cmd_vel_topic", cmd_vel_topic,
-                         std::string("/cmd_vel/tag"));
-        cmd_vel_publisher_ = nh_.advertise<geometry_msgs::Twist>(cmd_vel_topic, 10);
+        cmd_vel_topic = declare_parameter<std::string>("cmd_vel_topic", "/cmd_vel/tag");
+        cmd_vel_publisher_ = create_publisher<geometry_msgs::msg::Twist>(cmd_vel_topic, 10);
         diagnostics_publisher_ =
-            nh_.advertise<diagnostic_msgs::DiagnosticArray>("/diagnostics", 10, true);
+            create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
+                "/diagnostics", rclcpp::QoS(10).transient_local());
         finish_motion_client_ =
-            nh_.serviceClient<cmd_vel_arbiter::FinishMotion>(
-                "/cmd_vel_arbiter/finish_motion");
+            create_client<cmd_vel_arbiter::srv::FinishMotion>(
+                "/cmd_vel_arbiter/finish_motion", rmw_qos_profile_services_default,
+                client_callback_group_);
 
         // 创建服务
-        service_ = nh_.advertiseService("set_target_y", &RobotController::handleSetTargetY, this);
+        service_ = create_service<x2bot_teleop::srv::SetTagY>(
+            "set_target_y",
+            std::bind(
+                &RobotController::handleSetTargetY, this,
+                std::placeholders::_1, std::placeholders::_2),
+            rmw_qos_profile_services_default, service_callback_group_);
 
-        ROS_INFO(
+        RCLCPP_INFO(get_logger(),
             "[TAGCTL] Robot controller node initialized. kp=%.3f kp_x=%.3f min_speed=%.3f max_speed=%.3f "
             "arrival_y=%.3f arrival_x=%.3f yaw_kp=%.3f yaw_kd=%.3f max_ang=%.3f max_ang_acc=%.3f "
             "yaw_stable_count=%d final_yaw_kp=%.3f final_yaw_cmd_deadband=%.3f "
@@ -121,21 +141,15 @@ public:
             enable_final_y_yaw_after_x_check_, data_timeout_, tag_abort_timeout_);
     }
 
-    void run() {
-        ros::Rate rate(10);  // 10 Hz
-        while (ros::ok()) {
-            ros::spinOnce();
-            rate.sleep();
-        }
-    }
-
 private:
-    ros::NodeHandle nh_;
-    ros::Subscriber tag_subscriber_;
-    ros::Publisher cmd_vel_publisher_;
-    ros::Publisher diagnostics_publisher_;
-    ros::ServiceServer service_;
-    ros::ServiceClient finish_motion_client_;
+    rclcpp::CallbackGroup::SharedPtr tag_callback_group_;
+    rclcpp::CallbackGroup::SharedPtr service_callback_group_;
+    rclcpp::CallbackGroup::SharedPtr client_callback_group_;
+    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr tag_subscriber_;
+    rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_publisher_;
+    rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diagnostics_publisher_;
+    rclcpp::Service<x2bot_teleop::srv::SetTagY>::SharedPtr service_;
+    rclcpp::Client<cmd_vel_arbiter::srv::FinishMotion>::SharedPtr finish_motion_client_;
 
     double kp_;                    // 比例增益
     double kp_x_;                  // x 方向比例增益
@@ -159,7 +173,7 @@ private:
     double target_y_m_;            // 目标 y 偏差，单位 m
     double target_yaw_rad_;        // 目标 yaw，单位 rad
     double current_yaw_rad_;       // 当前 yaw，单位 rad
-    ros::Time last_update_time_;   // 上次更新时间
+    rclcpp::Time last_update_time_;   // 上次更新时间
     double data_timeout_;          // 数据超时时间（秒）
     double tag_abort_timeout_;     // 连续无效数据导致任务失败的超时
     double current_valid_;
@@ -167,7 +181,7 @@ private:
     bool yaw_pd_initialized_;
     double previous_yaw_error_;
     double previous_angular_speed_;
-    ros::Time previous_yaw_time_;
+    rclcpp::Time previous_yaw_time_;
     int yaw_stable_count_;
     int yaw_stable_required_;
     unsigned int tag_update_seq_;
@@ -178,17 +192,14 @@ private:
     State state_ = ROTATING;       // 初始状态为旋转
 
     // 订阅回调函数
-    void tagCallback(const geometry_msgs::PoseStamped::ConstPtr& msg) {
+    void tagCallback(const geometry_msgs::msg::PoseStamped::ConstSharedPtr msg) {
         current_valid_ = msg->pose.position.z;
         if(current_valid_>=-1)
         {
             const double measured_x_m = msg->pose.position.x / 100.0;
             const double measured_y_m = msg->pose.position.y / 100.0;
 
-            tf::Quaternion quat;
-            tf::quaternionMsgToTF(msg->pose.orientation, quat);
-            double roll, pitch, yaw;
-            tf::Matrix3x3(quat).getRPY(roll, pitch, yaw);
+            const double yaw = tf2::getYaw(msg->pose.orientation);
 
             if (!filter_initialized_) {
                 current_x_m_ = measured_x_m;
@@ -204,15 +215,15 @@ private:
             ++tag_update_seq_;
         }
 
-        last_update_time_ = ros::Time::now();         // 更新时间戳
+        last_update_time_ = now();         // 更新时间戳
     }
 
     // 检查数据是否过期
     bool isDataStale() {
-        if (last_update_time_.isZero()) {
+        if (last_update_time_.nanoseconds() == 0) {
             return true;
         }
-        return (ros::Time::now() - last_update_time_).toSec() > data_timeout_;
+        return (now() - last_update_time_).seconds() > data_timeout_;
     }
 
     // 限制速度范围
@@ -222,56 +233,56 @@ private:
 
     void sanitizeParameters() {
         if (kp_ <= 0.0) {
-            ROS_WARN("[TAGCTL] Invalid kp %.3f, reset to 0.5", kp_);
+            RCLCPP_WARN(get_logger(), "[TAGCTL] Invalid kp %.3f, reset to 0.5", kp_);
             kp_ = 0.5;
         }
         if (kp_x_ <= 0.0) {
-            ROS_WARN("[TAGCTL] Invalid kp_x %.3f, reset to 0.5", kp_x_);
+            RCLCPP_WARN(get_logger(), "[TAGCTL] Invalid kp_x %.3f, reset to 0.5", kp_x_);
             kp_x_ = 0.5;
         }
         if (min_speed_ < 0.0) {
-            ROS_WARN("[TAGCTL] Invalid min_speed %.3f, reset to 0.01", min_speed_);
+            RCLCPP_WARN(get_logger(), "[TAGCTL] Invalid min_speed %.3f, reset to 0.01", min_speed_);
             min_speed_ = 0.01;
         }
         if (max_speed_ <= 0.0) {
-            ROS_WARN("[TAGCTL] Invalid max_speed %.3f, reset to 0.05", max_speed_);
+            RCLCPP_WARN(get_logger(), "[TAGCTL] Invalid max_speed %.3f, reset to 0.05", max_speed_);
             max_speed_ = 0.05;
         }
         if (min_speed_ > max_speed_) {
-            ROS_WARN("[TAGCTL] min_speed %.3f is larger than max_speed %.3f, clamp min_speed to max_speed.",
+            RCLCPP_WARN(get_logger(), "[TAGCTL] min_speed %.3f is larger than max_speed %.3f, clamp min_speed to max_speed.",
                      min_speed_, max_speed_);
             min_speed_ = max_speed_;
         }
         if (arrival_threshold_y_ <= 0.0) {
-            ROS_WARN("[TAGCTL] Invalid arrival_threshold_y %.3f, reset to 0.01", arrival_threshold_y_);
+            RCLCPP_WARN(get_logger(), "[TAGCTL] Invalid arrival_threshold_y %.3f, reset to 0.01", arrival_threshold_y_);
             arrival_threshold_y_ = 0.01;
         }
         if (arrival_threshold_x_ <= 0.0) {
-            ROS_WARN("[TAGCTL] Invalid arrival_threshold_x %.3f, reset to 0.1", arrival_threshold_x_);
+            RCLCPP_WARN(get_logger(), "[TAGCTL] Invalid arrival_threshold_x %.3f, reset to 0.1", arrival_threshold_x_);
             arrival_threshold_x_ = 0.1;
         }
         if (max_angular_speed_ <= 0.0) {
-            ROS_WARN("[TAGCTL] Invalid max_angular_speed %.3f, reset to 0.15", max_angular_speed_);
+            RCLCPP_WARN(get_logger(), "[TAGCTL] Invalid max_angular_speed %.3f, reset to 0.15", max_angular_speed_);
             max_angular_speed_ = 0.15;
         }
         if (max_angular_accel_ <= 0.0) {
-            ROS_WARN("[TAGCTL] Invalid max_angular_accel %.3f, reset to 0.15", max_angular_accel_);
+            RCLCPP_WARN(get_logger(), "[TAGCTL] Invalid max_angular_accel %.3f, reset to 0.15", max_angular_accel_);
             max_angular_accel_ = 0.15;
         }
         if (tag_abort_timeout_ <= 0.0) {
-            ROS_WARN("[TAGCTL] Invalid tag_abort_timeout %.3f, reset to 10.0", tag_abort_timeout_);
+            RCLCPP_WARN(get_logger(), "[TAGCTL] Invalid tag_abort_timeout %.3f, reset to 10.0", tag_abort_timeout_);
             tag_abort_timeout_ = 10.0;
         }
         if (yaw_stable_required_ <= 0) {
-            ROS_WARN("[TAGCTL] Invalid yaw_stable_count %d, reset to 5", yaw_stable_required_);
+            RCLCPP_WARN(get_logger(), "[TAGCTL] Invalid yaw_stable_count %d, reset to 5", yaw_stable_required_);
             yaw_stable_required_ = 5;
         }
         if (final_yaw_kp_ <= 0.0) {
-            ROS_WARN("[TAGCTL] Invalid final_yaw_kp %.3f, reset to 0.1", final_yaw_kp_);
+            RCLCPP_WARN(get_logger(), "[TAGCTL] Invalid final_yaw_kp %.3f, reset to 0.1", final_yaw_kp_);
             final_yaw_kp_ = 0.1;
         }
         if (final_yaw_cmd_deadband_ <= 0.0) {
-            ROS_WARN("[TAGCTL] Invalid final_yaw_cmd_deadband %.3f, reset to rotation_threshold %.3f",
+            RCLCPP_WARN(get_logger(), "[TAGCTL] Invalid final_yaw_cmd_deadband %.3f, reset to rotation_threshold %.3f",
                      final_yaw_cmd_deadband_, rotation_threshold_);
             final_yaw_cmd_deadband_ = rotation_threshold_;
         }
@@ -319,20 +330,20 @@ private:
     }
 
     double computeYawCommandWithKp(double yaw_kp) {
-        const ros::Time now = ros::Time::now();
+        const auto current_time = now();
         const double yaw_error = yawError();
         double yaw_rate_error = 0.0;
 
         double dt = 0.0;
         if (yaw_pd_initialized_) {
-            dt = (now - previous_yaw_time_).toSec();
+            dt = (current_time - previous_yaw_time_).seconds();
             if (dt > 1e-3) {
                 yaw_rate_error = (yaw_error - previous_yaw_error_) / dt;
             }
         }
 
         previous_yaw_error_ = yaw_error;
-        previous_yaw_time_ = now;
+        previous_yaw_time_ = current_time;
 
         const double raw_angular_speed =
             clamp(yaw_kp * yaw_error + yaw_kd_ * yaw_rate_error,
@@ -356,47 +367,52 @@ private:
         return computeYawCommandWithKp(yaw_kp_);
     }
 
-    void publishStop(ros::Rate& rate, int count = 3) {
-        geometry_msgs::Twist cmd_vel_msg;
+    void publishStop(rclcpp::Rate& rate, int count = 3) {
+        geometry_msgs::msg::Twist cmd_vel_msg;
         for (int i = 0; i < count; ++i) {
-            cmd_vel_publisher_.publish(cmd_vel_msg);
+            cmd_vel_publisher_->publish(cmd_vel_msg);
             rate.sleep();
         }
     }
 
     bool notifyMotionFinished(uint8_t reason) {
-        cmd_vel_arbiter::FinishMotion service;
-        service.request.source = "tag";
-        service.request.reason = reason;
-        if (!finish_motion_client_.call(service)) {
-            ROS_ERROR("[TAGCTL] Failed to call /cmd_vel_arbiter/finish_motion.");
-            publishDiagnostic(diagnostic_msgs::DiagnosticStatus::ERROR,
+        if (!finish_motion_client_->wait_for_service(std::chrono::seconds(1))) {
+            RCLCPP_ERROR(get_logger(), "[TAGCTL] Failed to call /cmd_vel_arbiter/finish_motion.");
+            publishDiagnostic(diagnostic_msgs::msg::DiagnosticStatus::ERROR,
                               "ANAV-TAG-010", "标签任务停车回正服务调用失败",
                               "无法连接 /cmd_vel_arbiter/finish_motion。",
                               "检查速度仲裁与底盘节点。", true);
             return false;
         }
-        if (!service.response.centered) {
-            ROS_ERROR_STREAM("[TAGCTL] Tag motion stopped, but centering was not confirmed: "
-                             << service.response.message);
-            publishDiagnostic(diagnostic_msgs::DiagnosticStatus::ERROR,
+        auto request = std::make_shared<cmd_vel_arbiter::srv::FinishMotion::Request>();
+        request->source = "tag";
+        request->reason = reason;
+        auto future = finish_motion_client_->async_send_request(request);
+        future.wait();
+        const auto response = future.get();
+        if (!response->centered) {
+            RCLCPP_ERROR(
+                get_logger(),
+                "[TAGCTL] Tag motion stopped, but centering was not confirmed: %s",
+                response->message.c_str());
+            publishDiagnostic(diagnostic_msgs::msg::DiagnosticStatus::ERROR,
                               "ANAV-TAG-010", "标签任务结束但轮组未确认回正",
-                              service.response.message,
+                              response->message,
                               "检查转向执行机构和底盘停车回正日志。", true);
-        } else if (reason == cmd_vel_arbiter::FinishMotionRequest::TASK_FINISHED) {
-            publishDiagnostic(diagnostic_msgs::DiagnosticStatus::OK,
+        } else if (reason == cmd_vel_arbiter::srv::FinishMotion::Request::TASK_FINISHED) {
+            publishDiagnostic(diagnostic_msgs::msg::DiagnosticStatus::OK,
                               "ANAV-TAG-000", "标签靠站任务完成", "", "", false);
         }
-        return service.response.centered;
+        return response->centered;
     }
 
     void publishDiagnostic(uint8_t level, const std::string& code,
                            const std::string& message,
                            const std::string& detail,
                            const std::string& action, bool active) {
-        diagnostic_msgs::DiagnosticArray array;
-        array.header.stamp = ros::Time::now();
-        diagnostic_msgs::DiagnosticStatus status;
+        diagnostic_msgs::msg::DiagnosticArray array;
+        array.header.stamp = now();
+        diagnostic_msgs::msg::DiagnosticStatus status;
         status.level = level;
         status.name = "/anav/tag_control";
         status.hardware_id = "ranger";
@@ -407,88 +423,87 @@ private:
         addDiagnosticValue(status, "detail", detail);
         addDiagnosticValue(status, "action", action);
         array.status.push_back(status);
-        diagnostics_publisher_.publish(array);
+        diagnostics_publisher_->publish(array);
     }
 
     // 服务回调函数
-    bool handleSetTargetY(x2bot_teleop::SetTagY::Request& req, x2bot_teleop::SetTagY::Response& res) {
+    void handleSetTargetY(
+        const std::shared_ptr<x2bot_teleop::srv::SetTagY::Request> req,
+        std::shared_ptr<x2bot_teleop::srv::SetTagY::Response> res) {
         bool expected = false;
         if (!control_active_.compare_exchange_strong(expected, true)) {
-            ROS_WARN("[TAGCTL] Reject a new target because another Tag control request is still active.");
-            res.success = false;
-            publishDiagnostic(diagnostic_msgs::DiagnosticStatus::WARN,
+            RCLCPP_WARN(get_logger(), "[TAGCTL] Reject a new target because another Tag control request is still active.");
+            res->success = false;
+            publishDiagnostic(diagnostic_msgs::msg::DiagnosticStatus::WARN,
                               "ANAV-TAG-008", "标签控制器正忙",
                               "已有一个靠站请求正在执行。",
                               "等待当前任务结束后再发起新请求。", true);
-            return true;
+            return;
         }
         ActiveControlGuard control_guard(control_active_);
 
-        target_x_m_ = req.target_x;
-        target_y_m_ = req.target_y;
-        target_yaw_rad_ = degToRad(req.target_angle);
-        ROS_INFO("[TAGCTL] Received target x: %.3f m, target y: %.3f m, target angle: %.2f deg",
-                 target_x_m_, target_y_m_, req.target_angle);
+        target_x_m_ = req->target_x;
+        target_y_m_ = req->target_y;
+        target_yaw_rad_ = degToRad(req->target_angle);
+        RCLCPP_INFO(get_logger(), "[TAGCTL] Received target x: %.3f m, target y: %.3f m, target angle: %.2f deg",
+                 target_x_m_, target_y_m_, req->target_angle);
         state_ = ROTATING;
         yaw_pd_initialized_ = false;
         previous_angular_speed_ = 0.0;
         resetYawStableCounter();
 
-        ros::Rate rate(30);  // 30 Hz
-        ros::WallTime invalid_since;
-        while (ros::ok()) {
-            // The service callback is blocking. Process /tag_position before
-            // checking validity so a request that started without a visible
-            // tag can recover as soon as MM3V sees the tag later.
-            ros::spinOnce();
+        rclcpp::Rate rate(30.0);  // 30 Hz
+        std::chrono::steady_clock::time_point invalid_since;
+        bool invalid_active = false;
+        while (rclcpp::ok()) {
 
             // 检查数据是否过期
             if (isDataStale() || (current_valid_ <0) ) {
-                if (invalid_since.isZero()) {
-                    invalid_since = ros::WallTime::now();
-                    publishDiagnostic(diagnostic_msgs::DiagnosticStatus::WARN,
+                if (!invalid_active) {
+                    invalid_since = std::chrono::steady_clock::now();
+                    invalid_active = true;
+                    publishDiagnostic(diagnostic_msgs::msg::DiagnosticStatus::WARN,
                                       "ANAV-TAG-006", "标签数据无效或超时",
                                       "活动靠站任务未收到有效 /tag_position。",
                                       "检查标签是否在视野内、串口读取和识别节点。", true);
                 }
-                ROS_WARN_THROTTLE(1.0, "[TAGCTL] Tag position data is stale or invalid. Stopping the robot.");
+                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "[TAGCTL] Tag position data is stale or invalid. Stopping the robot.");
                 publishStop(rate, 3);
-                for (int i = 0; i < 20 && ros::ok(); ++i) {
-                    cmd_vel_publisher_.publish(geometry_msgs::Twist());
-                    ros::spinOnce();
+                for (int i = 0; i < 20 && rclcpp::ok(); ++i) {
+                    cmd_vel_publisher_->publish(geometry_msgs::msg::Twist());
                     if (!isDataStale() && current_valid_ >= 0) {
-                        ROS_INFO("[TAGCTL] Tag data became valid; resume the active control request.");
-                        invalid_since = ros::WallTime();
-                        publishDiagnostic(diagnostic_msgs::DiagnosticStatus::OK,
+                        RCLCPP_INFO(get_logger(), "[TAGCTL] Tag data became valid; resume the active control request.");
+                        invalid_active = false;
+                        publishDiagnostic(diagnostic_msgs::msg::DiagnosticStatus::OK,
                                           "ANAV-TAG-000", "标签数据已恢复",
                                           "", "", false);
                         break;
                     }
-                    if ((ros::WallTime::now() - invalid_since).toSec() >=
-                        tag_abort_timeout_) {
-                        ROS_ERROR("[TAGCTL] Tag remained invalid for %.1f seconds; abort the task.",
+                    if (std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - invalid_since).count() >= tag_abort_timeout_) {
+                        RCLCPP_ERROR(get_logger(), "[TAGCTL] Tag remained invalid for %.1f seconds; abort the task.",
                                   tag_abort_timeout_);
-                        publishDiagnostic(diagnostic_msgs::DiagnosticStatus::ERROR,
+                        publishDiagnostic(diagnostic_msgs::msg::DiagnosticStatus::ERROR,
                                           "ANAV-TAG-007", "标签数据持续超时，任务已终止",
                                           "超过 tag_abort_timeout 仍无有效标签数据。",
                                           "检查标签、相机/串口链路后重新发起任务。", true);
                         publishStop(rate, 3);
                         notifyMotionFinished(
-                            cmd_vel_arbiter::FinishMotionRequest::TASK_FAILED);
-                        res.success = false;
-                        return true;
+                            cmd_vel_arbiter::srv::FinishMotion::Request::TASK_FAILED);
+                        res->success = false;
+                        return;
                     }
                     rate.sleep();
                 }
                 continue;
             }
-            invalid_since = ros::WallTime();
+            invalid_active = false;
 
             if (state_ == ROTATING) {
                 // 初始旋转阶段：调整方向直到当前角度接近目标角度
                 if (yawReachedForStableFrames()) {
                     publishStop(rate, 2);
-                    ROS_INFO("[TAGCTL] Initial rotation completed after %d stable tag frames. Switching to x correction state.",
+                    RCLCPP_INFO(get_logger(), "[TAGCTL] Initial rotation completed after %d stable tag frames. Switching to x correction state.",
                              yaw_stable_count_);
                     state_ = CORRECTING_X;  // 切换到 x 修正状态
                     yaw_pd_initialized_ = false;
@@ -497,12 +512,12 @@ private:
                 } else {
                     // PD 角度控制，最大角速度由 max_angular_speed 限制
                     double angular_speed = computeYawCommand();
-                    geometry_msgs::Twist cmd_vel_msg;
+                    geometry_msgs::msg::Twist cmd_vel_msg;
                     cmd_vel_msg.linear.x = 0.0;
                     cmd_vel_msg.linear.y = 0.0;
                     cmd_vel_msg.angular.z = angular_speed;
-                    cmd_vel_publisher_.publish(cmd_vel_msg);
-                    ROS_INFO_THROTTLE(1.0, "%s[TAGCTL] Rotating: yaw=%.3f rad, target_yaw=%.3f rad, yaw_err=%.3f rad, angular.z=%.3f, stable=%d/%d%s",
+                    cmd_vel_publisher_->publish(cmd_vel_msg);
+                    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000, "%s[TAGCTL] Rotating: yaw=%.3f rad, target_yaw=%.3f rad, yaw_err=%.3f rad, angular.z=%.3f, stable=%d/%d%s",
                                       COLOR_YELLOW,
                                       current_yaw_rad_, target_yaw_rad_, yawError(), cmd_vel_msg.angular.z,
                                       yaw_stable_count_, yaw_stable_required_,
@@ -514,7 +529,7 @@ private:
 
                 if (x_reached) {
                     publishStop(rate, 2);
-                    ROS_INFO("[TAGCTL] X reached. Switching to Y+Yaw state. x=%.3f m, target_x=%.3f m, yaw_err=%.3f rad",
+                    RCLCPP_INFO(get_logger(), "[TAGCTL] X reached. Switching to Y+Yaw state. x=%.3f m, target_x=%.3f m, yaw_err=%.3f rad",
                              current_x_m_, target_x_m_, yawError());
                     state_ = MOVING_Y_YAW;
                     yaw_pd_initialized_ = false;
@@ -523,15 +538,13 @@ private:
                 } else {
                     const double linear_y_speed = lateralSpeedFromError(error_x_m);
 
-                    geometry_msgs::Twist cmd_vel_msg;
+                    geometry_msgs::msg::Twist cmd_vel_msg;
                     cmd_vel_msg.linear.x = 0.0;
                     cmd_vel_msg.linear.y = linear_y_speed;
                     cmd_vel_msg.angular.z = 0.0;
-                    cmd_vel_publisher_.publish(cmd_vel_msg);
+                    cmd_vel_publisher_->publish(cmd_vel_msg);
 
-                    ROS_INFO_THROTTLE(
-                        1.0,
-                        "%s[TAGCTL] Correcting X: linear.x=%.3f, linear.y=%.3f, angular.z=%.3f | err_x=%.3f m, yaw_err=%.3f rad%s",
+                    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000, "%s[TAGCTL] Correcting X: linear.x=%.3f, linear.y=%.3f, angular.z=%.3f | err_x=%.3f m, yaw_err=%.3f rad%s",
                         COLOR_YELLOW,
                         cmd_vel_msg.linear.x, cmd_vel_msg.linear.y, cmd_vel_msg.angular.z,
                         error_x_m, yawError(),
@@ -547,16 +560,16 @@ private:
                 if (y_reached) {
                     if (x_reached) {
                         publishStop(rate, 2);
-                        ROS_INFO("[TAGCTL] X and Y reached. Stop Y+Yaw without standalone yaw rotation. x=%.3f m, y=%.3f m, yaw_err=%.3f rad",
+                        RCLCPP_INFO(get_logger(), "[TAGCTL] X and Y reached. Stop Y+Yaw without standalone yaw rotation. x=%.3f m, y=%.3f m, yaw_err=%.3f rad",
                                  current_x_m_, current_y_m_, yawError());
                         notifyMotionFinished(
-                            cmd_vel_arbiter::FinishMotionRequest::TASK_FINISHED);
-                        res.success = true;
-                        return true;
+                            cmd_vel_arbiter::srv::FinishMotion::Request::TASK_FINISHED);
+                        res->success = true;
+                        return;
                     }
 
                     publishStop(rate, 2);
-                    ROS_INFO("[TAGCTL] Y reached. Switching to final X state without standalone yaw rotation. x=%.3f m, target_x=%.3f m, err_x=%.3f m, yaw_err=%.3f rad",
+                    RCLCPP_INFO(get_logger(), "[TAGCTL] Y reached. Switching to final X state without standalone yaw rotation. x=%.3f m, target_x=%.3f m, err_x=%.3f m, yaw_err=%.3f rad",
                              current_x_m_, target_x_m_, error_x_m, yawError());
                     state_ = FINAL_CORRECTING_X;
                     yaw_pd_initialized_ = false;
@@ -571,15 +584,13 @@ private:
                     const double angular_speed = yaw_cmd_enabled ? computeYawCommandWithKp(final_yaw_kp_) : 0.0;
 
                     // 创建并发布 /cmd_vel 消息
-                    geometry_msgs::Twist cmd_vel_msg;
+                    geometry_msgs::msg::Twist cmd_vel_msg;
                     cmd_vel_msg.linear.x = linear_x_speed;
                     cmd_vel_msg.linear.y = 0.0;
                     cmd_vel_msg.angular.z = angular_speed;
-                    cmd_vel_publisher_.publish(cmd_vel_msg);
+                    cmd_vel_publisher_->publish(cmd_vel_msg);
 
-                    ROS_INFO_THROTTLE(
-                        1.0,
-                        "%s[TAGCTL] Moving Y+Yaw: linear.x=%.3f, linear.y=%.3f, angular.z=%.3f | err_x=%.3f m, err_y=%.3f m, yaw_err=%.3f rad, yaw_stable=%d/%d%s",
+                    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000, "%s[TAGCTL] Moving Y+Yaw: linear.x=%.3f, linear.y=%.3f, angular.z=%.3f | err_x=%.3f m, err_y=%.3f m, yaw_err=%.3f rad, yaw_stable=%d/%d%s",
                         COLOR_YELLOW,
                         cmd_vel_msg.linear.x, cmd_vel_msg.linear.y, cmd_vel_msg.angular.z,
                         error_x_m, error_y_m, yawError(), yaw_stable_count_, yaw_stable_required_,
@@ -596,27 +607,27 @@ private:
                 if (x_reached) {
                     if (!enable_final_y_yaw_after_x_check_) {
                         publishStop(rate, 2);
-                        ROS_INFO("[TAGCTL] Final X reached. Final Y+Yaw recheck disabled. Reached target position! x=%.3f m, y=%.3f m, yaw=%.3f rad, target_yaw=%.3f rad",
+                        RCLCPP_INFO(get_logger(), "[TAGCTL] Final X reached. Final Y+Yaw recheck disabled. Reached target position! x=%.3f m, y=%.3f m, yaw=%.3f rad, target_yaw=%.3f rad",
                                  current_x_m_, current_y_m_, current_yaw_rad_, target_yaw_rad_);
                         notifyMotionFinished(
-                            cmd_vel_arbiter::FinishMotionRequest::TASK_FINISHED);
-                        res.success = true;
-                        return true;
+                            cmd_vel_arbiter::srv::FinishMotion::Request::TASK_FINISHED);
+                        res->success = true;
+                        return;
                     }
 
                     if (y_reached && yaw_reached) {
                         publishStop(rate, 2);
-                        ROS_INFO("[TAGCTL] Final X, Y and yaw reached. Reached target position! x=%.3f m, y=%.3f m, yaw=%.3f rad, target_yaw=%.3f rad",
+                        RCLCPP_INFO(get_logger(), "[TAGCTL] Final X, Y and yaw reached. Reached target position! x=%.3f m, y=%.3f m, yaw=%.3f rad, target_yaw=%.3f rad",
                                  current_x_m_, current_y_m_, current_yaw_rad_, target_yaw_rad_);
                         notifyMotionFinished(
-                            cmd_vel_arbiter::FinishMotionRequest::TASK_FINISHED);
-                        res.success = true;
-                        return true;
+                            cmd_vel_arbiter::srv::FinishMotion::Request::TASK_FINISHED);
+                        res->success = true;
+                        return;
                     }
 
                     if (!y_reached || !yaw_in_threshold) {
                         publishStop(rate, 2);
-                        ROS_INFO("[TAGCTL] Final X reached, but Y/Yaw drifted. Switching back to Y+Yaw state. err_y=%.3f m, yaw_err=%.3f rad",
+                        RCLCPP_INFO(get_logger(), "[TAGCTL] Final X reached, but Y/Yaw drifted. Switching back to Y+Yaw state. err_y=%.3f m, yaw_err=%.3f rad",
                                  error_y_m, yawError());
                         state_ = MOVING_Y_YAW;
                         yaw_pd_initialized_ = false;
@@ -624,23 +635,19 @@ private:
                         resetYawStableCounter();
                     } else {
                         publishStop(rate, 1);
-                        ROS_INFO_THROTTLE(
-                            1.0,
-                            "%s[TAGCTL] Final X reached. Waiting for yaw stable frames: yaw_err=%.3f rad, stable=%d/%d%s",
+                        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000, "%s[TAGCTL] Final X reached. Waiting for yaw stable frames: yaw_err=%.3f rad, stable=%d/%d%s",
                             COLOR_YELLOW, yawError(), yaw_stable_count_, yaw_stable_required_, COLOR_RESET);
                     }
                 } else {
                     const double linear_y_speed = lateralSpeedFromError(error_x_m);
 
-                    geometry_msgs::Twist cmd_vel_msg;
+                    geometry_msgs::msg::Twist cmd_vel_msg;
                     cmd_vel_msg.linear.x = 0.0;
                     cmd_vel_msg.linear.y = linear_y_speed;
                     cmd_vel_msg.angular.z = 0.0;
-                    cmd_vel_publisher_.publish(cmd_vel_msg);
+                    cmd_vel_publisher_->publish(cmd_vel_msg);
 
-                    ROS_INFO_THROTTLE(
-                        1.0,
-                        "%s[TAGCTL] Final correcting X: linear.x=%.3f, linear.y=%.3f, angular.z=%.3f | err_x=%.3f m, err_y=%.3f m, yaw_err=%.3f rad%s",
+                    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000, "%s[TAGCTL] Final correcting X: linear.x=%.3f, linear.y=%.3f, angular.z=%.3f | err_x=%.3f m, err_y=%.3f m, yaw_err=%.3f rad%s",
                         COLOR_YELLOW,
                         cmd_vel_msg.linear.x, cmd_vel_msg.linear.y, cmd_vel_msg.angular.z,
                         error_x_m, error_y_m, yawError(),
@@ -651,17 +658,17 @@ private:
             rate.sleep();
         }
 
-        res.success = false;
-        return true;
+        res->success = false;
+        return;
     }
 };
 
 int main(int argc, char** argv) {
-    ros::init(argc, argv, "robot_controller");
-    ros::NodeHandle nh;
-
-    RobotController controller(nh);
-    controller.run();
-
+    rclcpp::init(argc, argv);
+    auto controller = std::make_shared<RobotController>();
+    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 3);
+    executor.add_node(controller);
+    executor.spin();
+    rclcpp::shutdown();
     return 0;
 }
