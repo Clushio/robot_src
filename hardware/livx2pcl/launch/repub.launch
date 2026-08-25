@@ -1,8 +1,0 @@
-<launch>
-
-  <node pkg="livx2pcl" type="livox_repub" name="livox_repub" output="screen" >
-  <remap from="/livox/lidar" to="/livox/lidar" />
-  </node>
-
-</launch>
-

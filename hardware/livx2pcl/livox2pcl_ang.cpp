@@ -1,85 +1,107 @@
-#include <pcl_conversions/pcl_conversions.h>
-#include <sensor_msgs/PointCloud2.h>
-#include "livox_ros_driver/CustomMsg.h"
+#include <cmath>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <vector>
 
-typedef pcl::PointXYZINormal PointType;
-typedef pcl::PointCloud<PointType> PointCloudXYZI;
+#include "livox_ros_driver2/msg/custom_msg.hpp"
+#include "pcl/point_cloud.h"
+#include "pcl/point_types.h"
+#include "pcl_conversions/pcl_conversions.h"
+#include "rclcpp/rclcpp.hpp"
+#include "sensor_msgs/msg/point_cloud2.hpp"
 
-ros::Publisher pub_pcl_out0, pub_pcl_out1;
-uint64_t TO_MERGE_CNT = 1; 
-constexpr bool b_dbg_line = false;
-std::vector<livox_ros_driver::CustomMsgConstPtr> livox_data;
+namespace
+{
 
-// Parameters for angle range
-float min_angle_deg, max_angle_deg;
+using PointType = pcl::PointXYZINormal;
+using CustomMsg = livox_ros_driver2::msg::CustomMsg;
 
-// Helper function to calculate the angle of a point in degrees
-float calculateAngle(float x, float y) {
-    float angle = atan2(y, x) * 180.0 / M_PI; // Convert radians to degrees
-    if (angle < -180.0) angle += 360.0; // Normalize to [-180, 180]
-    return angle;
-}
-
-void LivoxMsgCbk1(const livox_ros_driver::CustomMsgConstPtr& livox_msg_in) {
-  livox_data.push_back(livox_msg_in);
-  if (livox_data.size() < TO_MERGE_CNT) return;
-
-  pcl::PointCloud<PointType> pcl_in;
-
-  for (size_t j = 0; j < livox_data.size(); j++) {
-    auto& livox_msg = livox_data[j];
-    auto time_end = livox_msg->points.back().offset_time;
-    for (unsigned int i = 0; i < livox_msg->point_num; ++i) {
-      float x = livox_msg->points[i].x;
-      float y = livox_msg->points[i].y;
-      float z = livox_msg->points[i].z;
-
-      // Calculate the angle of the point
-      float angle = calculateAngle(x, y);
-
-      // Only process points within the desired angle range
-      if (angle >= min_angle_deg && angle <= max_angle_deg) {
-        PointType pt;
-        pt.x = x;
-        pt.y = y;
-        pt.z = z;
-        float s = livox_msg->points[i].offset_time / (float)time_end;
-
-        pt.intensity = livox_msg->points[i].line + livox_msg->points[i].reflectivity / 10000.0; // The integer part is line number and the decimal part is timestamp
-        pt.curvature = s * 0.1;
-        pcl_in.push_back(pt);
-      }
-    }
+class LivoxAngleRepublisher : public rclcpp::Node
+{
+public:
+  LivoxAngleRepublisher()
+  : Node("livox_repub_ang")
+  {
+    min_angle_deg_ = declare_parameter<double>("min_angle_deg", -120.0);
+    max_angle_deg_ = declare_parameter<double>("max_angle_deg", 120.0);
+    publisher_ = create_publisher<sensor_msgs::msg::PointCloud2>(
+      "/livox_pcl0", 100);
+    subscription_ = create_subscription<CustomMsg>(
+      "/livox/lidar", 100,
+      std::bind(
+        &LivoxAngleRepublisher::LivoxMsgCallback, this,
+        std::placeholders::_1));
+    RCLCPP_INFO(
+      get_logger(), "Angle range set to [%.2f, %.2f] degrees",
+      min_angle_deg_, max_angle_deg_);
   }
 
-  unsigned long timebase_ns = livox_data[0]->timebase;
-  ros::Time timestamp;
-  timestamp.fromNSec(timebase_ns);
+private:
+  static double CalculateAngle(float x, float y)
+  {
+    double angle = std::atan2(y, x) * 180.0 / M_PI;
+    if (angle < -180.0) {
+      angle += 360.0;
+    }
+    return angle;
+  }
 
-  sensor_msgs::PointCloud2 pcl_ros_msg;
-  pcl::toROSMsg(pcl_in, pcl_ros_msg);
-  pcl_ros_msg.header.stamp.fromNSec(timebase_ns);
-  pcl_ros_msg.header.frame_id = "livox_frame";
-  pub_pcl_out1.publish(pcl_ros_msg);
-  livox_data.clear();
-}
+  void LivoxMsgCallback(CustomMsg::ConstSharedPtr livox_msg_in)
+  {
+    livox_data_.push_back(livox_msg_in);
+    if (livox_data_.size() < messages_to_merge_) {
+      return;
+    }
 
-int main(int argc, char** argv) {
-  ros::init(argc, argv, "livox_repub");
-  ros::NodeHandle nh;
-  ros::NodeHandle private_nh("~"); // Private node handle for parameters
+    pcl::PointCloud<PointType> pcl_in;
+    for (const auto & livox_msg : livox_data_) {
+      const auto time_end = livox_msg->points.back().offset_time;
+      for (unsigned int i = 0; i < livox_msg->point_num; ++i) {
+        const float x = livox_msg->points[i].x;
+        const float y = livox_msg->points[i].y;
+        const float z = livox_msg->points[i].z;
+        const double angle = CalculateAngle(x, y);
+        if (angle < min_angle_deg_ || angle > max_angle_deg_) {
+          continue;
+        }
 
-  ROS_INFO("start livox_repub");
+        PointType point;
+        point.x = x;
+        point.y = y;
+        point.z = z;
+        const float offset_ratio =
+          livox_msg->points[i].offset_time / static_cast<float>(time_end);
+        point.intensity = livox_msg->points[i].line +
+          livox_msg->points[i].reflectivity / 10000.0F;
+        point.curvature = offset_ratio * 0.1F;
+        pcl_in.push_back(point);
+      }
+    }
 
-  // Load parameters from the parameter server
-  private_nh.param<float>("min_angle_deg", min_angle_deg, -120.0); // Default: -120
-  private_nh.param<float>("max_angle_deg", max_angle_deg, 120.0);  // Default: 120
+    const uint64_t timebase_ns = livox_data_.front()->timebase;
+    sensor_msgs::msg::PointCloud2 output;
+    pcl::toROSMsg(pcl_in, output);
+    output.header.stamp = rclcpp::Time(static_cast<int64_t>(timebase_ns));
+    output.header.frame_id = "livox_frame";
+    publisher_->publish(output);
+    livox_data_.clear();
+  }
 
-  ROS_INFO("Angle range set to [%.2f, %.2f] degrees", min_angle_deg, max_angle_deg);
+  const std::size_t messages_to_merge_ = 1;
+  double min_angle_deg_ = -120.0;
+  double max_angle_deg_ = 120.0;
+  std::vector<CustomMsg::ConstSharedPtr> livox_data_;
+  rclcpp::Subscription<CustomMsg>::SharedPtr subscription_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher_;
+};
 
-  ros::Subscriber sub_livox_msg1 = nh.subscribe<livox_ros_driver::CustomMsg>(
-      "/livox/lidar", 100, LivoxMsgCbk1);
-  pub_pcl_out1 = nh.advertise<sensor_msgs::PointCloud2>("/livox_pcl0", 100);
+}  // namespace
 
-  ros::spin();
+int main(int argc, char ** argv)
+{
+  rclcpp::init(argc, argv);
+  rclcpp::spin(std::make_shared<LivoxAngleRepublisher>());
+  rclcpp::shutdown();
+  return 0;
 }

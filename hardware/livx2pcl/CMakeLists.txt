@@ -1,62 +1,51 @@
-cmake_minimum_required(VERSION 2.8.3)
+cmake_minimum_required(VERSION 3.8)
 project(livx2pcl)
 
-SET(CMAKE_BUILD_TYPE "Debug")
+if(POLICY CMP0074)
+  cmake_policy(SET CMP0074 NEW)
+endif()
 
+if(NOT CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 17)
+endif()
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fexceptions")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -pthread -std=c++0x -std=c++14 -fexceptions -Wno-unused-local-typedefs")
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
 
-find_package(OpenMP QUIET)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS}   ${OpenMP_C_FLAGS}")
-
-find_package(catkin REQUIRED COMPONENTS
-  geometry_msgs
-  nav_msgs
-  sensor_msgs
-  roscpp
-  rospy
-  std_msgs
-  pcl_ros
-  tf
-  livox_ros_driver2
-  )
-
-find_package(Eigen3 REQUIRED)
-find_package(PCL REQUIRED)
-find_package(OpenCV REQUIRED)
-
-include_directories(
-	${catkin_INCLUDE_DIRS} 
-        ${EIGEN3_INCLUDE_DIR}
-	${PCL_INCLUDE_DIRS})
-
-catkin_package(
-  CATKIN_DEPENDS geometry_msgs nav_msgs roscpp rospy std_msgs
-  DEPENDS EIGEN3 PCL OpenCV
-  
-)
+find_package(ament_cmake REQUIRED)
+find_package(livox_ros_driver2 REQUIRED)
+find_package(PCL REQUIRED COMPONENTS common)
+find_package(pcl_conversions REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(sensor_msgs REQUIRED)
 
 add_executable(livox_repub livox2pcl.cpp)
-add_dependencies(livox_repub livox_ros_driver_generate_messages_cpp)
-target_link_libraries(
-  livox_repub
-  ${catkin_LIBRARIES}
-  ${PCL_LIBRARIES}
-  ${OpenCV_LIBS}
-)
+target_include_directories(livox_repub PRIVATE ${PCL_INCLUDE_DIRS})
+target_link_libraries(livox_repub ${PCL_LIBRARIES})
+ament_target_dependencies(livox_repub
+  livox_ros_driver2 pcl_conversions rclcpp sensor_msgs)
 
 add_executable(livox_repub_ang livox2pcl_ang.cpp)
-add_dependencies(livox_repub_ang livox_ros_driver_generate_messages_cpp)
-target_link_libraries(
-  livox_repub_ang
-  ${catkin_LIBRARIES}
-  ${PCL_LIBRARIES}
-  ${OpenCV_LIBS}
-)
+target_include_directories(livox_repub_ang PRIVATE ${PCL_INCLUDE_DIRS})
+target_link_libraries(livox_repub_ang ${PCL_LIBRARIES})
+ament_target_dependencies(livox_repub_ang
+  livox_ros_driver2 pcl_conversions rclcpp sensor_msgs)
 
 add_executable(livox_pcl_to_scan_clear livox_pcl_to_scan_clear.cpp)
-target_link_libraries(livox_pcl_to_scan_clear ${catkin_LIBRARIES})
+ament_target_dependencies(livox_pcl_to_scan_clear rclcpp sensor_msgs)
 
+install(TARGETS
+  livox_repub
+  livox_repub_ang
+  livox_pcl_to_scan_clear
+  DESTINATION lib/${PROJECT_NAME}
+)
 
+install(DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME}
+  PATTERN "__pycache__" EXCLUDE
+  PATTERN "*.pyc" EXCLUDE
+)
+
+ament_package()
