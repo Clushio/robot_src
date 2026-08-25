@@ -9,17 +9,16 @@ typedef double ProcessType;
 
 #define PUB 1
 
-class ObjectDetector
+class ObjectDetector : public rclcpp::Node
 {
 private:
-    ros::NodeHandle nh;
-    ros::Subscriber subLaserCloud;
-    ros::Publisher PubGround;
-    ros::Publisher PubUnGround;
-    ros::Publisher PubObjectCluster;
-    ros::Publisher PubState;
+    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr subLaserCloud;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr PubGround;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr PubUnGround;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr PubObjectCluster;
+    rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr PubState;
 
-    std_msgs::Header cloudHeader;
+    std_msgs::msg::Header cloudHeader;
     pcl::PointCloud<PointType>::Ptr laserCloudIn; // 存储原始ls数据
     pcl::PointCloud<PointType>::Ptr laserCloudIn2;
 
@@ -74,7 +73,7 @@ private:
     
 
 public:
-    ObjectDetector()
+    ObjectDetector() : Node("obstacle_detection")
     {
         laserCloudIn.reset(new pcl::PointCloud<PointType>());
         laserCloudIn2.reset(new pcl::PointCloud<PointType>());
@@ -82,34 +81,34 @@ public:
         laserCloudOut_clusters.reset(new pcl::PointCloud<pcl::PointXYZRGB>());
 
         // 外部传入参数
-        nh.param<std::string>("object_detector/topic", stopic, "/points_raw");
+        stopic = declare_parameter<std::string>("object_detector.topic", "/points_raw");
 
-        nh.param<float>("object_detector/XLowerBoundary1", fXLowerBoundary1, 0);
-        nh.param<float>("object_detector/XUpperBoundary1", fXUpperBoundary1, 1.5);
-        nh.param<float>("object_detector/YLowerBoundary1", fYLowerBoundary1, -0.5);
-        nh.param<float>("object_detector/YUpperBoundary1", fYUpperBoundary1, 0.5);
+        fXLowerBoundary1 = static_cast<float>(declare_parameter<double>("object_detector.XLowerBoundary1", 0.0));
+        fXUpperBoundary1 = static_cast<float>(declare_parameter<double>("object_detector.XUpperBoundary1", 1.5));
+        fYLowerBoundary1 = static_cast<float>(declare_parameter<double>("object_detector.YLowerBoundary1", -0.5));
+        fYUpperBoundary1 = static_cast<float>(declare_parameter<double>("object_detector.YUpperBoundary1", 0.5));
 
-        nh.param<float>("object_detector/XLowerBoundary2", fXLowerBoundary2, 0);
-        nh.param<float>("object_detector/XUpperBoundary2", fXUpperBoundary2, 3);
-        nh.param<float>("object_detector/YLowerBoundary2", fYLowerBoundary2, -1);
-        nh.param<float>("object_detector/YUpperBoundary2", fYUpperBoundary2, 1);
+        fXLowerBoundary2 = static_cast<float>(declare_parameter<double>("object_detector.XLowerBoundary2", 0.0));
+        fXUpperBoundary2 = static_cast<float>(declare_parameter<double>("object_detector.XUpperBoundary2", 3.0));
+        fYLowerBoundary2 = static_cast<float>(declare_parameter<double>("object_detector.YLowerBoundary2", -1.0));
+        fYUpperBoundary2 = static_cast<float>(declare_parameter<double>("object_detector.YUpperBoundary2", 1.0));
 
-        nh.param<bool>("object_detector/use_z_limit", bzLimits_, false);
-        nh.param<float>("object_detector/ZLowerBoundary", z_lower_boundary_, -5);
-        nh.param<float>("object_detector/ZUpperBoundary", z_upper_boundary_, 1.5);
+        bzLimits_ = declare_parameter<bool>("object_detector.use_z_limit", false);
+        z_lower_boundary_ = static_cast<float>(declare_parameter<double>("object_detector.ZLowerBoundary", -5.0));
+        z_upper_boundary_ = static_cast<float>(declare_parameter<double>("object_detector.ZUpperBoundary", 1.5));
 
-        nh.param<bool>("object_detector/use_ground_detector", bground_detector_, true);
-        nh.param<int>("object_detector/NumSegments", num_segments_, 3);
-        nh.param<double>("object_detector/SensorHeight", sensor_height_, 0.3);
-        nh.param<int>("object_detector/NumIter", num_iter_, 3);
-        nh.param<int>("object_detector/NumLpr", num_lpr_, 250);
-        nh.param<double>("object_detector/SeedTH", th_seeds_, 0.2);
-        nh.param<double>("object_detector/DistanceTH", th_dist_, 0.1);
+        bground_detector_ = declare_parameter<bool>("object_detector.use_ground_detector", true);
+        num_segments_ = declare_parameter<int>("object_detector.NumSegments", 3);
+        sensor_height_ = declare_parameter<double>("object_detector.SensorHeight", 0.3);
+        num_iter_ = declare_parameter<int>("object_detector.NumIter", 3);
+        num_lpr_ = declare_parameter<int>("object_detector.NumLpr", 250);
+        th_seeds_ = declare_parameter<double>("object_detector.SeedTH", 0.2);
+        th_dist_ = declare_parameter<double>("object_detector.DistanceTH", 0.1);
 
-        nh.param<bool>("object_detector/use_dbscan_cluster", bcluster_, true);
-        nh.param<float>("object_detector/NeighbourhoodTH", neighbourhood_, 0.2);
-        nh.param<int>("object_detector/MinPts", min_pts_, 5);
-        nh.param<int>("object_detector/ThreadCount", thread_count_, 4);
+        bcluster_ = declare_parameter<bool>("object_detector.use_dbscan_cluster", true);
+        neighbourhood_ = static_cast<float>(declare_parameter<double>("object_detector.NeighbourhoodTH", 0.2));
+        min_pts_ = declare_parameter<int>("object_detector.MinPts", 5);
+        thread_count_ = declare_parameter<int>("object_detector.ThreadCount", 4);
 
         // 初始化地面检测器和聚类模块
         mGroundDetector = new GroundDetector(3, sensor_height_, num_iter_, num_lpr_, th_seeds_, th_dist_);
@@ -133,15 +132,18 @@ public:
         Zpassthrough.setFilterFieldName("z");
         Zpassthrough.setFilterLimits(z_lower_boundary_, z_upper_boundary_);
 
-        subLaserCloud = nh.subscribe<sensor_msgs::PointCloud2>(stopic, 1, &ObjectDetector::cloudHandler, this);  
+        auto cloud_qos = rclcpp::SensorDataQoS().keep_last(1);
+        subLaserCloud = create_subscription<sensor_msgs::msg::PointCloud2>(
+            stopic, cloud_qos, std::bind(&ObjectDetector::cloudHandler, this, std::placeholders::_1));
 
-        PubGround = nh.advertise<sensor_msgs::PointCloud2>("/obstacle_detection/ground_pc", 1); 
-        PubUnGround = nh.advertise<sensor_msgs::PointCloud2>("/obstacle_detection/unground_pc", 1);   
-        PubObjectCluster = nh.advertise<sensor_msgs::PointCloud2>("/obstacle_detection/obstacle_pc", 1);   
-        PubState = nh.advertise<std_msgs::Int32>("/obstacle_detection/state", 1);  
+        auto output_qos = rclcpp::QoS(1);
+        PubGround = create_publisher<sensor_msgs::msg::PointCloud2>("/obstacle_detection/ground_pc", output_qos);
+        PubUnGround = create_publisher<sensor_msgs::msg::PointCloud2>("/obstacle_detection/unground_pc", output_qos);
+        PubObjectCluster = create_publisher<sensor_msgs::msg::PointCloud2>("/obstacle_detection/obstacle_pc", output_qos);
+        PubState = create_publisher<std_msgs::msg::Int32>("/obstacle_detection/state", rclcpp::QoS(1));
     }
 
-    void copyPointCloud(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg){
+    void copyPointCloud(const sensor_msgs::msg::PointCloud2::ConstSharedPtr& laserCloudMsg){
         // 将ROS中的sensor_msgs::PointCloud2ConstPtr类型转换到pcl点云库指针
         laserCloudIn->clear();
         cloudHeader = laserCloudMsg->header;
@@ -165,7 +167,7 @@ public:
 
     }
 
-    void cloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
+    void cloudHandler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr& laserCloudMsg)
     {
         int cur_state = -1;
 
@@ -176,7 +178,7 @@ public:
         PointType point;
         if(!bground_detector_ && !bzLimits_)
         {
-            ROS_INFO("\033[1;31m----> param use_ground_detector or use_z_limit use at least one! \033[0m");
+            RCLCPP_INFO(get_logger(), "\033[1;31m----> param use_ground_detector or use_z_limit use at least one! \033[0m");
             return;
         }
 
@@ -207,11 +209,11 @@ public:
                     *laserCloudOut_ground += *vGroundMeas[i];
                 }
 
-                sensor_msgs::PointCloud2 laserCloudground;
+                sensor_msgs::msg::PointCloud2 laserCloudground;
 		        pcl::toROSMsg(*laserCloudOut_ground, laserCloudground);
 		        laserCloudground.header.stamp = cloudHeader.stamp;
 		        laserCloudground.header.frame_id = cloudHeader.frame_id;
-	    	    PubGround.publish(laserCloudground);
+                PubGround->publish(laserCloudground);
             }
         }
         else
@@ -238,11 +240,11 @@ public:
         // 发布非地面不可靠区域点云
         if(1)
         {
-            sensor_msgs::PointCloud2 laserCloudUnground;
+            sensor_msgs::msg::PointCloud2 laserCloudUnground;
 		    pcl::toROSMsg(*unground_pc2, laserCloudUnground);
 		    laserCloudUnground.header.stamp = cloudHeader.stamp;
 		    laserCloudUnground.header.frame_id = cloudHeader.frame_id;
-	    	PubUnGround.publish(laserCloudUnground);
+            PubUnGround->publish(laserCloudUnground);
         }
 
         if(bcluster_)
@@ -307,11 +309,11 @@ public:
 
                     if(PUB)
                     {
-                        sensor_msgs::PointCloud2 laserCloudCluster;
+                        sensor_msgs::msg::PointCloud2 laserCloudCluster;
                         pcl::toROSMsg(*laserCloudOut_clusters, laserCloudCluster);
                         laserCloudCluster.header.stamp = cloudHeader.stamp;
                         laserCloudCluster.header.frame_id = cloudHeader.frame_id;
-                        PubObjectCluster.publish(laserCloudCluster);
+                        PubObjectCluster->publish(laserCloudCluster);
                     }
 
                     pcl::PointCloud<PointType>::Ptr small_range_pc_x(new pcl::PointCloud<PointType>);
@@ -371,9 +373,9 @@ public:
         }
         if(PUB)
         {
-            std_msgs::Int32 RobotState;
+            std_msgs::msg::Int32 RobotState;
             RobotState.data = cur_state;
-            PubState.publish(RobotState);
+            PubState->publish(RobotState);
         }
     }
 };
@@ -383,13 +385,14 @@ public:
 int main(int argc, char** argv) 
 {
 
-    ros::init(argc, argv, "obstacle_detection");
-    
-    ObjectDetector OD;
+    rclcpp::init(argc, argv);
 
-    ROS_INFO("\033[1;32m---->\033[0m obstacle detection Started.");
+    auto object_detector = std::make_shared<ObjectDetector>();
 
-    ros::spin();
+    RCLCPP_INFO(object_detector->get_logger(), "\033[1;32m---->\033[0m obstacle detection Started.");
+
+    rclcpp::spin(object_detector);
+    rclcpp::shutdown();
 
     return 0;
 }

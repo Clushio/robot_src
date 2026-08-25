@@ -1,95 +1,56 @@
-cmake_minimum_required(VERSION 3.0.2)
+cmake_minimum_required(VERSION 3.8)
 project(obstacle_detection)
 
-## Compile as C++11, supported in ROS Kinetic and newer
-set(CMAKE_BUILD_TYPE "Release")
-# set(CMAKE_CXX_FLAGS "-std=c++11 -DEIGEN_DONT_PARALLELIZE")
-set(CMAKE_CXX_STANDARD 14)
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -Wall -g -pthread")
+if(POLICY CMP0074)
+  cmake_policy(SET CMP0074 NEW)
+endif()
 
-find_package(catkin REQUIRED COMPONENTS
-  cv_bridge
-  geometry_msgs
-  message_generation
-  message_runtime
-  nav_msgs
-  pcl_conversions
-  roscpp
-  rospy
-  sensor_msgs
-  std_msgs
-  tf
-  rosbag
-  image_transport
-  visualization_msgs
+if(NOT CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 14)
+endif()
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
+
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(pcl_conversions REQUIRED)
+find_package(PCL REQUIRED COMPONENTS common filters io kdtree registration visualization)
+
+add_library(ground_detector SHARED src/GroundDetector.cpp)
+target_include_directories(ground_detector
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+    ${PCL_INCLUDE_DIRS}
 )
+target_link_libraries(ground_detector ${PCL_LIBRARIES})
+ament_target_dependencies(ground_detector pcl_conversions)
 
-# third library
-find_package(PCL REQUIRED QUIET)
+add_executable(obstacle_detection src/main_ls.cpp)
+target_include_directories(obstacle_detection PRIVATE include ${PCL_INCLUDE_DIRS})
+target_link_libraries(obstacle_detection ground_detector ${PCL_LIBRARIES})
+ament_target_dependencies(obstacle_detection rclcpp sensor_msgs std_msgs pcl_conversions)
 
+add_executable(obstacle_detection_velodyne src/main_velodyne.cpp)
+target_include_directories(obstacle_detection_velodyne PRIVATE include ${PCL_INCLUDE_DIRS})
+target_link_libraries(obstacle_detection_velodyne ground_detector ${PCL_LIBRARIES})
+ament_target_dependencies(obstacle_detection_velodyne rclcpp sensor_msgs std_msgs pcl_conversions)
 
-# ignore warning
-add_definitions(-w)
-
-## Generate added messages and services with any dependencies listed here
-generate_messages(
-  DEPENDENCIES
-  geometry_msgs
-  std_msgs
-  nav_msgs
-  sensor_msgs
+install(TARGETS ground_detector obstacle_detection obstacle_detection_velodyne
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
+install(DIRECTORY include/ DESTINATION include)
+install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
 
-###################################
-## catkin specific configuration ##
-###################################
-## The catkin_package macro generates cmake config files for your package
-## Declare things to be passed to dependent projects
-## INCLUDE_DIRS: uncomment this if your package contains header files
-## LIBRARIES: libraries you create in this project that dependent projects also need
-## CATKIN_DEPENDS: catkin_packages dependent projects also need
-## DEPENDS: system dependencies of this project that dependent projects also need
-catkin_package(
-  INCLUDE_DIRS include
-  DEPENDS PCL
-  CATKIN_DEPENDS cv_bridge geometry_msgs message_generation message_runtime nav_msgs pcl_conversions roscpp rospy sensor_msgs std_msgs tf visualization_msgs
-)
+ament_export_include_directories(include)
+ament_export_libraries(ground_detector)
+ament_export_dependencies(pcl_conversions PCL)
 
-
-###########
-## Build ##
-###########
-
-## Specify additional locations of header files
-## Your package locations should be listed before other locations
-include_directories(
- include
-  ${catkin_INCLUDE_DIRS}
-  ${PCL_INCLUDE_DIRS}
-)
-
-# third library path
-link_directories(
-  include
-  ${PCL_LIBRARY_DIRS}
-)
-
-# my library
-
-add_library(ground_detector SHARED
-src/GroundDetector.cpp
-)
-
-target_link_libraries(ground_detector
-${PCL_LIBRARIES}
-${catkin_LIBRARIES}
-)
-
-## Declare a C++ library
-
-# KVBA SLAM
-add_executable(${PROJECT_NAME} src/main_ls.cpp)
-target_link_libraries(${PROJECT_NAME} ${catkin_LIBRARIES} ${PCL_LIBRARIES} ground_detector)
-
-
-
+ament_package()

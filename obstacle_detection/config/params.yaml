@@ -1,36 +1,37 @@
-object_detector:
+obstacle_detection:
+  ros__parameters:
+    object_detector:
+      # 激光雷达话题名
+      topic: /livox_pcl0
 
-  # 激光雷达话题名
-  topic: /livox_pcl0
+      # 危险停止区域
+      XLowerBoundary1: 0.2
+      XUpperBoundary1: 5.0
+      YLowerBoundary1: -2.0
+      YUpperBoundary1: 2.0
 
-  # 危险停止区域
-  XLowerBoundary1: 0.2
-  XUpperBoundary1: 5
-  YLowerBoundary1: -2
-  YUpperBoundary1: 2
+      # 不可靠减速区域
+      XLowerBoundary2: 0.2
+      XUpperBoundary2: 5.0
+      YLowerBoundary2: -2.0
+      YUpperBoundary2: 2.0
 
-  # 不可靠减速区域
-  XLowerBoundary2: 0.2
-  XUpperBoundary2: 5
-  YLowerBoundary2: -2
-  YUpperBoundary2: 2
+      # Z 方向限制
+      use_z_limit: true
+      ZLowerBoundary: 0.3
+      ZUpperBoundary: 1.0
 
-  # z limit
-  use_z_limit: true
-  ZLowerBoundary: 0.3
-  ZUpperBoundary: 1.
+      # GroundDetector
+      use_ground_detector: false
+      NumSegments: 3
+      SensorHeight: 0.3
+      NumIter: 3
+      NumLpr: 250
+      SeedTH: 0.2
+      DistanceTH: 0.075
 
-  # GroundDectector
-  use_ground_detector: false
-  NumSegments: 3
-  SensorHeight: 0.3
-  NumIter: 3
-  NumLpr: 250
-  SeedTH: 0.2
-  DistanceTH: 0.075
-
-  # DBSCAN
-  use_dbscan_cluster: true
-  NeighbourhoodTH: 0.1
-  MinPts: 8
-  ThreadCount: 4 
+      # DBSCAN
+      use_dbscan_cluster: true
+      NeighbourhoodTH: 0.1
+      MinPts: 8
+      ThreadCount: 4
