@@ -51,6 +51,8 @@ class PotentialCalculator {
             setSize(nx, ny);
         }
 
+        virtual ~PotentialCalculator() = default;
+
         virtual float calculatePotential(float* potential, unsigned char cost, int n, float prev_potential=-1){
 	    
             if(prev_potential < 0){

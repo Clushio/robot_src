@@ -37,24 +37,26 @@
 #include <myglobal_planner/orientation_filter.h>
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/utils.h>
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <angles/angles.h>
 
 namespace myglobal_planner {
 
-void set_angle(geometry_msgs::PoseStamped* pose, double angle)
+void set_angle(geometry_msgs::msg::PoseStamped* pose, double angle)
 {
   tf2::Quaternion q;
   q.setRPY(0, 0, angle);
   tf2::convert(q, pose->pose.orientation);
 }
 
-void OrientationFilter::processPath(const geometry_msgs::PoseStamped& start, 
-                                    std::vector<geometry_msgs::PoseStamped>& path)
+void OrientationFilter::processPath(const geometry_msgs::msg::PoseStamped& start,
+                                    std::vector<geometry_msgs::msg::PoseStamped>& path)
 {
     int n = path.size();
     if (n == 0) return;
     switch(omode_) {
+        case NONE:
+            break;
         case FORWARD:
             for(int i=0;i<n-1;i++){
                 setAngleBasedOnPositionDerivative(path, i);
@@ -86,7 +88,7 @@ void OrientationFilter::processPath(const geometry_msgs::PoseStamped& start,
             for(int i=0;i<n-1;i++){
                 setAngleBasedOnPositionDerivative(path, i);
             }
-            
+
             int i=n-3;
             const double last = tf2::getYaw(path[i].pose.orientation);
             while( i>0 ){
@@ -97,14 +99,14 @@ void OrientationFilter::processPath(const geometry_msgs::PoseStamped& start,
                 else
                     i--;
             }
-            
+
             path[0].pose.orientation = start.pose.orientation;
             interpolate(path, i, n-1);
-            break;           
+            break;
     }
 }
-    
-void OrientationFilter::setAngleBasedOnPositionDerivative(std::vector<geometry_msgs::PoseStamped>& path, int index)
+
+void OrientationFilter::setAngleBasedOnPositionDerivative(std::vector<geometry_msgs::msg::PoseStamped>& path, int index)
 {
   int index0 = std::max(0, index - window_size_);
   int index1 = std::min((int)path.size() - 1, index + window_size_);
@@ -113,12 +115,12 @@ void OrientationFilter::setAngleBasedOnPositionDerivative(std::vector<geometry_m
          y0 = path[index0].pose.position.y,
          x1 = path[index1].pose.position.x,
          y1 = path[index1].pose.position.y;
-         
+
   double angle = atan2(y1-y0,x1-x0);
   set_angle(&path[index], angle);
 }
 
-void OrientationFilter::interpolate(std::vector<geometry_msgs::PoseStamped>& path, 
+void OrientationFilter::interpolate(std::vector<geometry_msgs::msg::PoseStamped>& path,
                                     int start_index, int end_index)
 {
     const double start_yaw = tf2::getYaw(path[start_index].pose.orientation),
@@ -130,6 +132,6 @@ void OrientationFilter::interpolate(std::vector<geometry_msgs::PoseStamped>& pat
         set_angle(&path[i], angle);
     }
 }
-                                   
+
 
 };

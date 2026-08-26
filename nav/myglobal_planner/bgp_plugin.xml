@@ -1,5 +1,5 @@
-<library path="lib/libmyglobal_planner">
-  <class name="myglobal_planner/MyGlobalPlanner" type="myglobal_planner::MyGlobalPlanner" base_class_type="nav_core::BaseGlobalPlanner">
+<library path="myglobal_planner">
+  <class name="myglobal_planner/MyGlobalPlanner" type="myglobal_planner::MyGlobalPlanner" base_class_type="nav2_core::GlobalPlanner">
     <description>
       A implementation of a grid based planner using Dijkstras or A*
     </description>

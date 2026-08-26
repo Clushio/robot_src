@@ -1,52 +1,27 @@
-cmake_minimum_required(VERSION 2.8.3)
+cmake_minimum_required(VERSION 3.8)
 project(myglobal_planner)
 
-find_package(catkin REQUIRED
-  COMPONENTS
-    base_local_planner
-    angles
-    costmap_2d
-    dynamic_reconfigure
-    geometry_msgs
-    nav_core
-    navfn
-    nav_msgs
-    pluginlib
-    roscpp
-    tf2_geometry_msgs
-    tf2_ros
-    tf
-)
+if(NOT CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 17)
+endif()
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-generate_dynamic_reconfigure_options(
-  cfg/GlobalPlanner.cfg
-)
+find_package(ament_cmake REQUIRED)
+find_package(angles REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(nav2_core REQUIRED)
+find_package(nav2_costmap_2d REQUIRED)
+find_package(nav2_util REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(pluginlib REQUIRED)
+find_package(rcl_interfaces REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rclcpp_lifecycle REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
 
-catkin_package(
-  INCLUDE_DIRS include
-  LIBRARIES ${PROJECT_NAME}
-  CATKIN_DEPENDS
-    costmap_2d
-    base_local_planner
-    dynamic_reconfigure
-    geometry_msgs
-    nav_core
-    navfn
-    nav_msgs
-    pluginlib
-    roscpp
-    tf2_ros
-    tf
-)
-
-find_package(OpenCV REQUIRED)
-include_directories(
-    include
-    ${catkin_INCLUDE_DIRS}
-    ${OpenCV_INCLUDE_DIRS}
-)
-
-add_library(${PROJECT_NAME}
+add_library(${PROJECT_NAME} SHARED
   src/quadratic_calculator.cpp
   src/dijkstra.cpp
   src/astar.cpp
@@ -54,24 +29,39 @@ add_library(${PROJECT_NAME}
   src/gradient_path.cpp
   src/orientation_filter.cpp
   src/planner_core.cpp
-
 )
-add_dependencies(${PROJECT_NAME} ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
-target_link_libraries(${PROJECT_NAME} ${catkin_LIBRARIES})
+target_include_directories(${PROJECT_NAME} PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+ament_target_dependencies(${PROJECT_NAME}
+  angles
+  geometry_msgs
+  nav2_core
+  nav2_costmap_2d
+  nav2_util
+  nav_msgs
+  pluginlib
+  rcl_interfaces
+  rclcpp
+  rclcpp_lifecycle
+  tf2
+  tf2_geometry_msgs
+  tf2_ros)
 
-
-
+pluginlib_export_plugin_description_file(nav2_core bgp_plugin.xml)
 
 install(TARGETS ${PROJECT_NAME}
-  ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  RUNTIME DESTINATION ${CATKIN_GLOBAL_BIN_DESTINATION})
+  EXPORT export_${PROJECT_NAME}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
+install(DIRECTORY include/ DESTINATION include)
+install(FILES bgp_plugin.xml DESTINATION share/${PROJECT_NAME})
 
-
-
-install(DIRECTORY include/${PROJECT_NAME}/
-  DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
-  PATTERN ".svn" EXCLUDE)
-
-install(FILES bgp_plugin.xml
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})
+ament_export_include_directories(include)
+ament_export_libraries(${PROJECT_NAME})
+ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
+ament_export_dependencies(
+  angles geometry_msgs nav2_core nav2_costmap_2d nav2_util nav_msgs
+  pluginlib rcl_interfaces rclcpp rclcpp_lifecycle tf2 tf2_geometry_msgs tf2_ros)
+ament_package()
