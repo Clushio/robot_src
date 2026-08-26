@@ -8,6 +8,9 @@ bspline_status_timeout: 0.5
 
 # Tracking-only metrics. Start/final rotations and safety stops are excluded.
 tracking_min_speed: 0.02
+# Do not count distance-to-entry as lateral CTE while projection is clamped to
+# the first endpoint of a newly active reference path.
+reference_entry_projection_epsilon: 1.0e-6
 stop_speed: 0.02
 stop_duration: 0.5
 sharp_turn_omega: 0.3

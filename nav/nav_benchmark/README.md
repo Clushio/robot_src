@@ -44,6 +44,11 @@ regenerate a report or combine sessions.
 - CTE is point-to-polyline distance against `/reference_path`, and is recorded
   only while `/bspline_status` is active, the selected command source is
   `nav`, and measured forward speed exceeds the tracking threshold.
+- Samples whose closest-point projection is still clamped to the first
+  reference-path endpoint are marked `cte_exclusion_reason=reference_entry`.
+  Their raw distance remains in `cte_raw_abs_m`, but they are excluded from
+  task and final CTE statistics because it is distance to the path entrance,
+  not steady-state lateral tracking error.
 - Start/final rotations and collision stops are not counted as normal B-spline
   tracking stops.
 - Tag fine-positioning data is intentionally excluded.

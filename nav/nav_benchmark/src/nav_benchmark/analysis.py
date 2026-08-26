@@ -2,6 +2,7 @@ import csv
 import json
 import os
 import time
+from collections import Counter
 
 from nav_benchmark.metrics import finite, summarize
 from nav_benchmark.storage import atomic_write_json
@@ -46,6 +47,10 @@ def build_summary(directories):
     cte = numeric(
         samples, 'cte_abs_m',
         lambda row: row.get('task_state') == 'running',
+    )
+    cte_exclusion_counts = Counter(
+        row.get('cte_exclusion_reason') for row in samples
+        if row.get('cte_exclusion_reason')
     )
 
     longest_streak = 0
@@ -110,6 +115,7 @@ def build_summary(directories):
             arrived, 'settled_yaw_error_deg'
         )),
         'bspline_cte_m': summarize(cte),
+        'cte_exclusion_counts': dict(sorted(cte_exclusion_counts.items())),
         'observed_replan_count': int(sum(numeric(
             tasks, 'observed_replan_count'
         ))),
@@ -174,6 +180,14 @@ def write_text(path, summary):
             metric(cte, 'rmse', 100.0, ' cm'),
             metric(cte, 'p95', 100.0, ' cm'),
             metric(cte, 'max', 100.0, ' cm'),
+        ),
+        'CTE exclusions: {}'.format(
+            ', '.join(
+                '{}={}'.format(reason, count)
+                for reason, count in summary.get(
+                    'cte_exclusion_counts', {}
+                ).items()
+            ) or 'none'
         ),
         'Observed replans: {}'.format(summary['observed_replan_count']),
         'Collision slowdown/stops: {}/{}'.format(

@@ -86,19 +86,32 @@ def closest_point_on_polyline(x, y, points):
         absolute = math.hypot(offset_x, offset_y)
         cross = dx * (y - ay) - dy * (x - ax)
         signed = math.copysign(absolute, cross) if absolute else 0.0
-        candidate = (absolute, signed, closest_x, closest_y, index)
+        candidate = (
+            absolute, signed, closest_x, closest_y, index, projection,
+        )
         if best is None or candidate[0] < best[0]:
             best = candidate
     if best is None:
         return None
-    absolute, signed, closest_x, closest_y, index = best
+    absolute, signed, closest_x, closest_y, index, projection = best
     return {
         'absolute': absolute,
         'signed': signed,
         'x': closest_x,
         'y': closest_y,
         'segment_index': index,
+        'projection': projection,
     }
+
+
+def is_reference_entry(reference, projection_epsilon=1e-6):
+    """True while the closest point is clamped to the path's first endpoint."""
+    return bool(
+        reference and
+        reference.get('segment_index') == 0 and
+        finite(reference.get('projection')) and
+        reference['projection'] <= max(0.0, float(projection_epsilon))
+    )
 
 
 def parse_robot_positions(path):

@@ -9,6 +9,7 @@ import json
 from nav_benchmark.analysis import generate_report
 from nav_benchmark.metrics import (
     closest_point_on_polyline,
+    is_reference_entry,
     parse_robot_positions,
     percentile,
     resolve_requested_pose,
@@ -31,6 +32,17 @@ class MetricsTest(unittest.TestCase):
         self.assertAlmostEqual(0.2, result['signed'])
         self.assertAlmostEqual(0.5, result['x'])
         self.assertEqual(0, result['segment_index'])
+        self.assertAlmostEqual(0.5, result['projection'])
+
+    def test_reference_entry_is_not_normal_cross_track_error(self):
+        entry = closest_point_on_polyline(
+            -0.2, 0.1, [(0.0, 0.0), (1.0, 0.0)]
+        )
+        tracking = closest_point_on_polyline(
+            0.2, 0.1, [(0.0, 0.0), (1.0, 0.0)]
+        )
+        self.assertTrue(is_reference_entry(entry))
+        self.assertFalse(is_reference_entry(tracking))
 
     def test_signed_cte_changes_side(self):
         above = closest_point_on_polyline(0.5, 0.1, [(0.0, 0.0), (1.0, 0.0)])
@@ -87,7 +99,7 @@ class MetricsTest(unittest.TestCase):
             )
             samples = DurableCsv(
                 os.path.join(directory, 'samples.csv'),
-                ['task_state', 'cte_abs_m'],
+                ['task_state', 'cte_abs_m', 'cte_exclusion_reason'],
                 sync_interval=10.0,
             )
             try:
@@ -102,6 +114,10 @@ class MetricsTest(unittest.TestCase):
                 samples.append({
                     'task_state': 'running', 'cte_abs_m': 0.03,
                 }, force_sync=True)
+                samples.append({
+                    'task_state': 'running',
+                    'cte_exclusion_reason': 'reference_entry',
+                }, force_sync=True)
             finally:
                 tasks.close()
                 samples.close()
@@ -114,6 +130,9 @@ class MetricsTest(unittest.TestCase):
             self.assertEqual(1, summary['tasks_total'])
             self.assertEqual(1.0, summary['success_rate_excluding_canceled'])
             self.assertEqual(0.03, summary['bspline_cte_m']['mean'])
+            self.assertEqual(
+                {'reference_entry': 1}, summary['cte_exclusion_counts']
+            )
 
 
 if __name__ == '__main__':

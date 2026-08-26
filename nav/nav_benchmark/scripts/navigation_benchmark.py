@@ -25,6 +25,7 @@ from nav_benchmark.metrics import (
     closest_point_on_polyline,
     file_fingerprint,
     finite,
+    is_reference_entry,
     nearest_pose,
     parse_robot_positions,
     path_length,
@@ -47,7 +48,8 @@ SAMPLE_FIELDS = [
     'cmd_candidate_vx', 'cmd_candidate_vy', 'cmd_candidate_wz',
     'cmd_output_vx', 'cmd_output_vy', 'cmd_output_wz',
     'topology_phase', 'bspline_status', 'reference_version',
-    'reference_segment', 'reference_x', 'reference_y',
+    'reference_segment', 'reference_projection', 'reference_x', 'reference_y',
+    'cte_raw_signed_m', 'cte_raw_abs_m', 'cte_exclusion_reason',
     'cte_signed_m', 'cte_abs_m',
     'goal_x', 'goal_y', 'goal_yaw_deg',
     'goal_position_error_m', 'goal_yaw_error_deg',
@@ -293,6 +295,11 @@ class NavigationBenchmark:
         self.tracking_min_speed = max(
             0.0, float(rospy.get_param('~tracking_min_speed', 0.02))
         )
+        self.reference_entry_projection_epsilon = max(
+            0.0, float(rospy.get_param(
+                '~reference_entry_projection_epsilon', 1e-6
+            ))
+        )
         self.stop_speed = max(0.0, float(rospy.get_param('~stop_speed', 0.02)))
         self.stop_duration = max(0.1, float(rospy.get_param('~stop_duration', 0.5)))
         self.sharp_omega = max(
@@ -516,6 +523,10 @@ class NavigationBenchmark:
                 'fingerprints': fingerprints,
                 'sample_rate_hz': self.sample_rate,
                 'settle_window_s': self.settle_window,
+                'cte_reference_entry_excluded': True,
+                'cte_reference_entry_projection_epsilon': (
+                    self.reference_entry_projection_epsilon
+                ),
                 'tag_metrics_enabled': False,
             }
         meta['clean_shutdown'] = False
@@ -980,6 +991,7 @@ class NavigationBenchmark:
         )
         reference = None
         tracking = False
+        cte_exclusion_reason = ''
         if (valid and self.bspline_code == 1 and
                 self.bspline_received_wall is not None and
                 time.monotonic() - self.bspline_received_wall <= self.bspline_status_timeout and
@@ -989,6 +1001,10 @@ class NavigationBenchmark:
                 pose[0], pose[1], self.reference_points
             )
             tracking = reference is not None
+            if is_reference_entry(
+                    reference, self.reference_entry_projection_epsilon):
+                tracking = False
+                cte_exclusion_reason = 'reference_entry'
         goal_position_error, goal_yaw_error = self._pose_errors(pose, goal)
         row = {
             'wall_time': iso_time(),
@@ -1022,10 +1038,14 @@ class NavigationBenchmark:
             'bspline_status': self.bspline_code,
             'reference_version': self.reference_version if reference else '',
             'reference_segment': reference['segment_index'] if reference else '',
+            'reference_projection': number(reference['projection']) if reference else '',
             'reference_x': number(reference['x']) if reference else '',
             'reference_y': number(reference['y']) if reference else '',
-            'cte_signed_m': number(reference['signed']) if reference else '',
-            'cte_abs_m': number(reference['absolute']) if reference else '',
+            'cte_raw_signed_m': number(reference['signed']) if reference else '',
+            'cte_raw_abs_m': number(reference['absolute']) if reference else '',
+            'cte_exclusion_reason': cte_exclusion_reason,
+            'cte_signed_m': number(reference['signed']) if tracking else '',
+            'cte_abs_m': number(reference['absolute']) if tracking else '',
             'goal_x': number(goal.get('x')),
             'goal_y': number(goal.get('y')),
             'goal_yaw_deg': number(math.degrees(goal['yaw'])) if finite(goal.get('yaw')) else '',
