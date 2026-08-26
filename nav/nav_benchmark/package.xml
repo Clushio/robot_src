@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>nav_benchmark</name>
+  <version>0.1.0</version>
+  <description>Read-only navigation benchmark logger and offline analysis tools.</description>
+
+  <maintainer email="siat@todo.todo">SIAT</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>cmd_vel_arbiter</depend>
+  <depend>diagnostic_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>rospy</depend>
+  <depend>std_msgs</depend>
+  <depend>tf2_ros</depend>
+
+  <test_depend>python3-nose</test_depend>
+
+  <export/>
+</package>

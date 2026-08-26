@@ -64,6 +64,7 @@ GUI 软件急停 ─────────────────────
 | `script/` | PyQt5 GUI、拓扑构建、地图点位迁移、TCP 服务 | 项目业务代码 |
 | `robot_r/` | 真机 launch 编排、RViz 配置、MID360s/LIO 参数 | 项目集成层 |
 | `nav/x2bot_teleop/` | AutoNAV、点位记录、Tag 精调、手柄转换 | 项目业务代码 |
+| `nav/nav_benchmark/` | 导航验收实时记录与离线汇总 | 只读测试工具 |
 | `nav/jgl_dwa_local_planner/` | DWA、本项目的 B 样条生成和跟踪、代价地图插件 | 深度定制 |
 | `nav/mxb_move_base/` | 定制 move_base | 深度定制 |
 | `nav/myglobal_planner/` | 定制全局规划器 | 深度定制 |

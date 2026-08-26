@@ -1,0 +1,18 @@
+<launch>
+  <arg name="results_root" default="$(env HOME)/maps/nav_benchmark_results" />
+  <arg name="positions_file" default="$(env HOME)/maps/robot_positions.txt" />
+  <arg name="topology_file" default="$(env HOME)/maps/topology.yaml" />
+
+  <node pkg="nav_benchmark"
+        type="navigation_benchmark.py"
+        name="navigation_benchmark"
+        output="screen"
+        respawn="true"
+        respawn_delay="2.0">
+    <rosparam command="load" file="$(find nav_benchmark)/config/benchmark.yaml" />
+    <param name="results_root" value="$(arg results_root)" />
+    <param name="positions_file" value="$(arg positions_file)" />
+    <param name="topology_file" value="$(arg topology_file)" />
+    <param name="repo_path" value="$(find nav_benchmark)/../.." />
+  </node>
+</launch>

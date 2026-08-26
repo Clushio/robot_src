@@ -9,6 +9,7 @@
 |---|---|---|
 | 操作层 | `script/aNAV_ranger.py`、RViz | 启停进程、点位编辑、目标下发、状态显示、软件急停 |
 | 任务层 | `x2bot_teleop/runnav` | 读取点位/拓扑、选路、阻塞边管理、循环任务支撑 |
+| 验收层 | `nav_benchmark/navigation_benchmark.py` | 只读采样、实时落盘、单程与连续运行统计 |
 | 规划层 | `mxb_move_base`、`myglobal_planner`、`jgl_dwa_local_planner` | 全局规划、B 样条参考路径、局部跟踪、代价地图 |
 | 精调层 | `mm3v_serial_reader.py`、`TagCtl` | 读取 Tag，相对 X/Y/Yaw 工位精调 |
 | 定位层 | Livox 驱动、`lio_lite` | 点云/IMU、建图、重定位和 `/Odometry` |
@@ -21,7 +22,8 @@
 - 底盘的 include launch 同时启动 `cmd_vel_arbiter` 和 `collision_monitor`。
 - `robot_r/3startlocation.launch` 启动 MID360s、地图服务器、LIO 定位和可选 RViz。
 - `robot_r/5nav.launch` 启动定制 MoveBase 并加载规划/代价地图参数。
-- `robot_r/3navlocations.launch` 启动 `runnav` 拓扑任务服务。
+- `robot_r/3navlocations.launch` 启动 `runnav` 拓扑任务服务，并自动启动
+  `nav_benchmark` 只读记录器；结果写入 `~/maps/nav_benchmark_results`。
 - GUI 只是编排和交互入口，不替代上述 ROS 节点的职责。
 
 详细 launch 对照见 [`robot_r/README.md`](../robot_r/README.md)。

@@ -1,10 +1,7 @@
 <launch>
-
- 
-
-
   <!-- runnav loads optional startup defaults from ~/maps/autonav_params.yaml. -->
   <node pkg="x2bot_teleop" type="runnav" name="runnav" output="screen" />
 
-
+  <!-- Read-only, crash-resilient benchmark logging follows AutoNAV lifetime. -->
+  <include file="$(find nav_benchmark)/launch/navigation_benchmark.launch" />
 </launch>

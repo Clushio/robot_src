@@ -26,7 +26,8 @@ robot_r/5nav.launch
  └─ mxb_move_base + 全局/局部规划和代价地图
 
 robot_r/3navlocations.launch
- └─ x2bot_teleop/runnav 拓扑任务服务
+ ├─ x2bot_teleop/runnav 拓扑任务服务
+ └─ nav_benchmark/navigation_benchmark.py 实时验收记录器
 ```
 
 底盘必须先于导航启动，因为底盘 launch 同时建立完整速度安全链路。只启动
@@ -39,7 +40,7 @@ robot_r/3navlocations.launch
 | `s2lam.launch` | MID360s 驱动 + LIO 三维建图 | 当前 GUI 建图入口 |
 | `3startlocation.launch` | 静态 TF + MID360s + map_server + LIO 定位 + 可选 RViz | 当前 GUI 定位入口 |
 | `5nav.launch` | 点云转换、定制 MoveBase、代价地图、B 样条局部规划 | 当前导航入口 |
-| `3navlocations.launch` | 启动 `runnav`，提供拓扑任务服务 | MoveBase 就绪后启动 |
+| `3navlocations.launch` | 启动 `runnav` 和自动验收记录器 | MoveBase 就绪后启动 |
 | `3settinglocation.launch` | 启动实车点位记录节点 | 实车采点模式使用 |
 | `4genmap.launch` | `GlobalMap.pcd` 转二维 `/map` + 可选 RViz | 二维地图生成 |
 | `6tagReadAndCtl_mm3v.launch` | MM3V 串口读取 + TagCtl | 当前 Tag 精调入口 |

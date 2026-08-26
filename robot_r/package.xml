@@ -54,6 +54,7 @@
   <depend>roscpp</depend>
   <depend>rviz</depend>
   <exec_depend>collision_monitor</exec_depend>
+  <exec_depend>nav_benchmark</exec_depend>
 
 
   <!-- The export tag contains other, unspecified, tags -->
