@@ -19,6 +19,7 @@ from geometry_msgs.msg import Twist, Vector3Stamped
 from nav_msgs.msg import Odometry, Path
 from std_msgs.msg import Bool, String, UInt8
 
+from nav_benchmark.analysis import generate_report
 from nav_benchmark.metrics import (
     circular_mean,
     closest_point_on_polyline,
@@ -1187,6 +1188,17 @@ class NavigationBenchmark:
                         writer.close()
                     except OSError:
                         pass
+                try:
+                    json_path, text_path = generate_report([self.session_dir])
+                    rospy.loginfo(
+                        'Navigation benchmark final report: %s, %s',
+                        json_path, text_path,
+                    )
+                except (OSError, ValueError) as error:
+                    rospy.logerr(
+                        'Failed to generate navigation benchmark report: %s',
+                        error,
+                    )
 
 
 def main():

@@ -22,12 +22,17 @@ Runtime data is stored outside the source tree:
 ├── events.csv
 ├── paths.csv
 ├── tasks.csv
-└── live_summary.json
+├── live_summary.json
+├── summary.json
+└── summary.txt
 ```
 
 Rows are appended continuously. CSV streams are flushed for every row and
 `fsync` is performed at least once per second and immediately for task/event
-records.
+records. `live_summary.json` is refreshed while the test runs. A normal
+**退出Nav** automatically creates the complete `summary.json` and `summary.txt`
+in the same session directory; the offline command below is only needed to
+regenerate a report or combine sessions.
 
 ## Measurement semantics
 
@@ -45,7 +50,7 @@ records.
 
 ## Offline summary
 
-After the test, summarize the newest session:
+Regenerate the newest session report if needed:
 
 ```bash
 rosrun nav_benchmark analyze_results.py
