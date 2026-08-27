@@ -15,6 +15,7 @@
 #include <nav2_core/global_planner.hpp>
 #include <nav2_costmap_2d/costmap_2d.hpp>
 #include <nav2_costmap_2d/costmap_2d_ros.hpp>
+#include <nav2_msgs/msg/costmap.hpp>
 #include <nav2_util/lifecycle_node.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/path.hpp>
@@ -147,6 +148,8 @@ protected:
   bool flag;
 
 private:
+  void localCostmapCallback(const nav2_msgs::msg::Costmap::SharedPtr message);
+  void refreshLocalCostmap();
   void initializePlannerObjects();
   void resetPlannerObjects();
   void mapToWorld(double mx, double my, double & wx, double & wy);
@@ -187,6 +190,13 @@ private:
   std::shared_ptr<tf2_ros::Buffer> tf_;
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros_;
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> local_costmap_ros_;
+  rclcpp::Subscription<nav2_msgs::msg::Costmap>::SharedPtr local_costmap_sub_;
+  std::mutex local_costmap_update_mutex_;
+  std::shared_ptr<nav2_costmap_2d::Costmap2D> subscribed_local_costmap_;
+  std::shared_ptr<nav2_costmap_2d::Costmap2D> pending_local_costmap_;
+  std::string pending_local_frame_id_;
+  std::string local_costmap_topic_;
+  bool using_subscribed_local_costmap_{false};
   rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::Path>::SharedPtr plan_pub_;
   rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::OccupancyGrid>::SharedPtr
     potential_pub_;

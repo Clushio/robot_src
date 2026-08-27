@@ -29,9 +29,11 @@ planner_server:
   `GlobalPlanner.cfg` 参数改为 `<plugin_id>.<parameter>` ROS2 参数，并通过
   on-set callback 支持运行时更新和范围拒绝。
 - ROS1 `mxb_move_base` 会先用 controller costmap、再用 planner costmap 初始化同一
-  插件。Nav2 标准接口只传入 planner costmap，因此保留公开的
-  `setLocalCostmap()` 扩展；后续迁移的 `mxb_move_base` 会调用它。被标准 Nav2
-  `planner_server` 单独加载时，全局 costmap 同时承担局部障碍检查，算法不会被禁用。
+  插件。Nav2 标准接口只传入 planner costmap，而且 PlannerServer 与 ControllerServer
+  是独立对象，不能跨进程调用插件扩展。ROS2 插件因此订阅
+  `GridBased.local_costmap_topic`（默认 `/local_costmap/costmap_raw`）并在每次规划开始时
+  原子切换到最新局部地图；首帧到达前安全回退到全局 costmap。公开的
+  `setLocalCostmap()` 仍保留给同进程集成和测试。
 - TF1 `TransformListener` 改为 PlannerServer 提供的 TF2 buffer；原 frame 名称取自
   costmap，项目配置仍使用 `map`。
 - 原插件私有 `make_plan` 服务保留为

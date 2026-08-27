@@ -159,6 +159,7 @@ namespace myglobal_planner
     declare("distance_behind_obstacle", 1.0);
     declare("wait_time", 3.0);
     declare("enable_dwa_obstacle_avoidance", false);
+    declare("local_costmap_topic", std::string("/local_costmap/costmap_raw"));
 
     node->get_parameter(prefix + "old_navfn_behavior", old_navfn_behavior_);
     node->get_parameter(prefix + "allow_unknown", allow_unknown_);
@@ -176,6 +177,7 @@ namespace myglobal_planner
     node->get_parameter(prefix + "wait_time", wait_time);
     node->get_parameter(
       prefix + "enable_dwa_obstacle_avoidance", enable_dwa_obstacle_avoidance);
+    node->get_parameter(prefix + "local_costmap_topic", local_costmap_topic_);
     convert_offset_ = old_navfn_behavior_ ? 0.0 : 0.5;
 
     initializePlannerObjects();
@@ -210,6 +212,14 @@ namespace myglobal_planner
       std::bind(
         &MyGlobalPlanner::dynamicParametersCallback, this,
         std::placeholders::_1));
+    if (!local_costmap_topic_.empty()) {
+      local_costmap_sub_ = node->create_subscription<nav2_msgs::msg::Costmap>(
+        local_costmap_topic_,
+        rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable(),
+        std::bind(
+          &MyGlobalPlanner::localCostmapCallback, this,
+          std::placeholders::_1));
+    }
 
     first_line_plan = true;
     iniStart.header.frame_id.clear();
@@ -264,6 +274,64 @@ namespace myglobal_planner
     p_calc_ = nullptr;
   }
 
+  void MyGlobalPlanner::localCostmapCallback(
+      const nav2_msgs::msg::Costmap::SharedPtr message)
+  {
+    const auto &metadata = message->metadata;
+    const std::size_t expected_size =
+      static_cast<std::size_t>(metadata.size_x) * metadata.size_y;
+    if (metadata.size_x == 0U || metadata.size_y == 0U ||
+        metadata.resolution <= 0.0F || message->data.size() != expected_size)
+    {
+      RCLCPP_WARN(
+        logger_, "Ignoring malformed local costmap from %s (%ux%u, %zu cells).",
+        local_costmap_topic_.c_str(), metadata.size_x, metadata.size_y,
+        message->data.size());
+      return;
+    }
+
+    auto costmap = std::make_shared<nav2_costmap_2d::Costmap2D>(
+      metadata.size_x, metadata.size_y, metadata.resolution,
+      metadata.origin.position.x, metadata.origin.position.y);
+    std::copy(
+      message->data.begin(), message->data.end(), costmap->getCharMap());
+
+    std::lock_guard<std::mutex> lock(local_costmap_update_mutex_);
+    pending_local_costmap_ = std::move(costmap);
+    pending_local_frame_id_ = message->header.frame_id;
+  }
+
+  void MyGlobalPlanner::refreshLocalCostmap()
+  {
+    std::shared_ptr<nav2_costmap_2d::Costmap2D> latest;
+    std::string frame_id;
+    {
+      std::lock_guard<std::mutex> lock(local_costmap_update_mutex_);
+      if (!pending_local_costmap_)
+      {
+        return;
+      }
+      latest = std::move(pending_local_costmap_);
+      frame_id = std::move(pending_local_frame_id_);
+    }
+
+    const bool first_message = !using_subscribed_local_costmap_;
+    subscribed_local_costmap_ = std::move(latest);
+    local_costmap_ros_.reset();
+    local_costmap_ = subscribed_local_costmap_.get();
+    if (!frame_id.empty())
+    {
+      local_frame_id_ = std::move(frame_id);
+    }
+    using_subscribed_local_costmap_ = true;
+    if (first_message)
+    {
+      RCLCPP_INFO(
+        logger_, "MyGlobalPlanner now uses local obstacle costmap %s in frame %s.",
+        local_costmap_topic_.c_str(), local_frame_id_.c_str());
+    }
+  }
+
   void MyGlobalPlanner::setLocalCostmap(
       const std::shared_ptr<nav2_costmap_2d::Costmap2DROS> &local_costmap_ros)
   {
@@ -271,9 +339,15 @@ namespace myglobal_planner
       throw std::invalid_argument("MyGlobalPlanner local costmap is invalid");
     }
     std::lock_guard<std::mutex> lock(mutex_);
+    {
+      std::lock_guard<std::mutex> update_lock(local_costmap_update_mutex_);
+      pending_local_costmap_.reset();
+      subscribed_local_costmap_.reset();
+    }
     local_costmap_ros_ = local_costmap_ros;
     local_costmap_ = local_costmap_ros_->getCostmap();
     local_frame_id_ = local_costmap_ros_->getGlobalFrameID();
+    using_subscribed_local_costmap_ = false;
     RCLCPP_INFO(
       logger_, "MyGlobalPlanner local obstacle costmap set to frame %s.",
       local_frame_id_.c_str());
@@ -301,10 +375,14 @@ namespace myglobal_planner
     plan_pub_.reset();
     potential_pub_.reset();
     tmp_costmap_pub_.reset();
+    local_costmap_sub_.reset();
     resetPlannerObjects();
     local_costmap_ = nullptr;
     costmap_ = nullptr;
     local_costmap_ros_.reset();
+    subscribed_local_costmap_.reset();
+    pending_local_costmap_.reset();
+    using_subscribed_local_costmap_ = false;
     costmap_ros_.reset();
     tf_.reset();
     clock_.reset();
@@ -885,6 +963,7 @@ namespace myglobal_planner
                                  const geometry_msgs::msg::PoseStamped &goal,
                                  std::vector<geometry_msgs::msg::PoseStamped> &plan)
   {
+    refreshLocalCostmap();
     //return makePlan(start, goal, default_tolerance_, plan);
     plan.clear();
     const double distance_to_goal = comDistance(start, goal);
@@ -1085,6 +1164,7 @@ namespace myglobal_planner
   bool MyGlobalPlanner::makePlan(const geometry_msgs::msg::PoseStamped &start, const geometry_msgs::msg::PoseStamped &goal,
                                  double tolerance, std::vector<geometry_msgs::msg::PoseStamped> &plan)
     {
+        refreshLocalCostmap();
         (void)tolerance;
         std::lock_guard<std::mutex> lock(mutex_);
         if (!initialized_)
