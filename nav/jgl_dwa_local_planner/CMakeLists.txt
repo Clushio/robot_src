@@ -1,96 +1,112 @@
-cmake_minimum_required(VERSION 2.8.3)
+cmake_minimum_required(VERSION 3.8)
 project(jgl_dwa_local_planner)
 
-find_package(catkin REQUIRED
-        COMPONENTS
-            angles
-            base_local_planner
-            cmake_modules
-            costmap_2d
-            dynamic_reconfigure
-            nav_core
-            nav_msgs
-            pluginlib
-            sensor_msgs
-            std_msgs
-            roscpp
-            tf2
-            tf2_geometry_msgs
-            tf2_ros
-            tf
-            visualization_msgs
-        )
+if(NOT CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 17)
+endif()
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+find_package(ament_cmake REQUIRED)
+find_package(angles REQUIRED)
+find_package(Boost REQUIRED COMPONENTS thread)
+find_package(dwb_core REQUIRED)
+find_package(dwb_plugins REQUIRED)
 find_package(Eigen3 REQUIRED)
-remove_definitions(-DDISABLE_LIBUSB-1.0)
-include_directories(
-    include
-    ${catkin_INCLUDE_DIRS}
-    ${EIGEN3_INCLUDE_DIRS}
-    )
-add_definitions(${EIGEN3_DEFINITIONS})
+find_package(geometry_msgs REQUIRED)
+find_package(nav2_core REQUIRED)
+find_package(nav2_costmap_2d REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(pluginlib REQUIRED)
+find_package(rcl_interfaces REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rclcpp_lifecycle REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(visualization_msgs REQUIRED)
 
-# dynamic reconfigure
-generate_dynamic_reconfigure_options(
-    cfg/DWAPlanner.cfg
-)
+add_library(${PROJECT_NAME} SHARED
+  src/dwa_planner_ros.cpp
+  src/trajectory_generator.cpp
+  src/reference_path_manager.cpp
+  src/path_follower.cpp
+  src/speedPlan.cpp
+  src/pursuit.cpp
+  src/decay_obstacle_layer.cpp
+  src/blind_clear_layer.cpp)
+target_include_directories(${PROJECT_NAME} PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+  ${EIGEN3_INCLUDE_DIRS})
+ament_target_dependencies(${PROJECT_NAME}
+  angles
+  dwb_core
+  dwb_plugins
+  geometry_msgs
+  nav2_core
+  nav2_costmap_2d
+  nav_msgs
+  pluginlib
+  rcl_interfaces
+  rclcpp
+  rclcpp_lifecycle
+  sensor_msgs
+  std_msgs
+  tf2
+  tf2_geometry_msgs
+  tf2_ros
+  visualization_msgs)
+target_link_libraries(${PROJECT_NAME} Boost::thread)
 
-catkin_package(
-    INCLUDE_DIRS include
-    LIBRARIES jgl_dwa_local_planner
-    CATKIN_DEPENDS
-        base_local_planner
-        dynamic_reconfigure
-        nav_msgs
-        pluginlib
-        sensor_msgs
-        std_msgs
-        roscpp
-        tf2
-        tf2_ros
-        tf
-        visualization_msgs
-)
+pluginlib_export_plugin_description_file(nav2_core blp_plugin.xml)
+pluginlib_export_plugin_description_file(nav2_costmap_2d costmap_plugin.xml)
 
-add_library(jgl_dwa_local_planner 
-	src/dwa_planner.cpp 
-	src/dwa_planner_ros.cpp
-	src/trajectory_generator.cpp
-	src/reference_path_manager.cpp
-	src/path_follower.cpp
-	src/speedPlan.cpp
-	src/pursuit.cpp
-	src/decay_obstacle_layer.cpp
-	src/blind_clear_layer.cpp)
-add_dependencies(jgl_dwa_local_planner ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
-target_link_libraries(jgl_dwa_local_planner ${catkin_LIBRARIES})
+install(TARGETS ${PROJECT_NAME}
+  EXPORT export_${PROJECT_NAME}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
+install(DIRECTORY include/${PROJECT_NAME}/ DESTINATION include/${PROJECT_NAME}
+  PATTERN "dwa_planner.h" EXCLUDE)
+install(FILES blp_plugin.xml costmap_plugin.xml
+  DESTINATION share/${PROJECT_NAME})
+install(FILES
+  param/dwa_local_planner_params.yaml
+  param/controller_server_example.yaml
+  DESTINATION share/${PROJECT_NAME}/param)
 
-if(CATKIN_ENABLE_TESTING)
-  catkin_add_gtest(trajectory_generator_test test/trajectory_generator_test.cpp)
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+
+  ament_add_gtest(trajectory_generator_test test/trajectory_generator_test.cpp)
   if(TARGET trajectory_generator_test)
-    set_target_properties(trajectory_generator_test PROPERTIES
-      COMPILE_FLAGS "-DJGL_DWA_LOCAL_PLANNER_ENABLE_TEST_ACCESS")
-    target_link_libraries(trajectory_generator_test
-      jgl_dwa_local_planner
-      ${catkin_LIBRARIES})
+    target_compile_definitions(trajectory_generator_test PRIVATE
+      JGL_DWA_LOCAL_PLANNER_ENABLE_TEST_ACCESS)
+    target_link_libraries(trajectory_generator_test ${PROJECT_NAME})
+    ament_target_dependencies(trajectory_generator_test
+      geometry_msgs nav_msgs rclcpp tf2 tf2_geometry_msgs)
   endif()
-  catkin_add_gtest(terminal_yaw_controller_test
+
+  ament_add_gtest(terminal_yaw_controller_test
     test/terminal_yaw_controller_test.cpp)
-  catkin_add_gtest(reference_obstacle_policy_test
+  if(TARGET terminal_yaw_controller_test)
+    target_include_directories(terminal_yaw_controller_test PRIVATE include)
+  endif()
+
+  ament_add_gtest(reference_obstacle_policy_test
     test/reference_obstacle_policy_test.cpp)
+  if(TARGET reference_obstacle_policy_test)
+    target_include_directories(reference_obstacle_policy_test PRIVATE include)
+  endif()
 endif()
 
-install(TARGETS jgl_dwa_local_planner
-       ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-       LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-       RUNTIME DESTINATION ${CATKIN_GLOBAL_BIN_DESTINATION}
-       )
-
-install(FILES blp_plugin.xml costmap_plugin.xml
-    DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
-)
-
-install(DIRECTORY include/${PROJECT_NAME}/
-  DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
-  PATTERN ".svn" EXCLUDE
-)
+ament_export_include_directories(include)
+ament_export_libraries(${PROJECT_NAME})
+ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
+ament_export_dependencies(
+  angles dwb_core dwb_plugins geometry_msgs nav2_core nav2_costmap_2d
+  nav_msgs pluginlib rcl_interfaces rclcpp rclcpp_lifecycle sensor_msgs std_msgs
+  tf2 tf2_geometry_msgs tf2_ros visualization_msgs)
+ament_package()

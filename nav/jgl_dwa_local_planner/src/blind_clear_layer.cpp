@@ -3,11 +3,10 @@
 #include <algorithm>
 #include <cmath>
 
-#include <costmap_2d/cost_values.h>
-#include <pluginlib/class_list_macros.h>
-#include <ros/ros.h>
+#include <nav2_costmap_2d/cost_values.hpp>
+#include <pluginlib/class_list_macros.hpp>
 
-PLUGINLIB_EXPORT_CLASS(jgl_dwa_local_planner::BlindClearLayer, costmap_2d::Layer)
+PLUGINLIB_EXPORT_CLASS(jgl_dwa_local_planner::BlindClearLayer, nav2_costmap_2d::Layer)
 
 namespace jgl_dwa_local_planner
 {
@@ -25,15 +24,24 @@ BlindClearLayer::BlindClearLayer()
 
 void BlindClearLayer::onInitialize()
 {
-  ros::NodeHandle nh("~/" + name_);
+  auto node = node_.lock();
+  if (!node)
+  {
+    throw std::runtime_error("BlindClearLayer lifecycle node expired");
+  }
 
   double min_angle_deg = -110.0;
   double max_angle_deg = 110.0;
-  nh.param("enabled", enabled_, true);
-  nh.param("min_angle_deg", min_angle_deg, min_angle_deg);
-  nh.param("max_angle_deg", max_angle_deg, max_angle_deg);
-  nh.param("clear_range", clear_range_, clear_range_);
-  nh.param("keep_radius", keep_radius_, keep_radius_);
+  declareParameter("enabled", rclcpp::ParameterValue(true));
+  declareParameter("min_angle_deg", rclcpp::ParameterValue(min_angle_deg));
+  declareParameter("max_angle_deg", rclcpp::ParameterValue(max_angle_deg));
+  declareParameter("clear_range", rclcpp::ParameterValue(clear_range_));
+  declareParameter("keep_radius", rclcpp::ParameterValue(keep_radius_));
+  node->get_parameter(name_ + ".enabled", enabled_);
+  node->get_parameter(name_ + ".min_angle_deg", min_angle_deg);
+  node->get_parameter(name_ + ".max_angle_deg", max_angle_deg);
+  node->get_parameter(name_ + ".clear_range", clear_range_);
+  node->get_parameter(name_ + ".keep_radius", keep_radius_);
 
   min_angle_ = min_angle_deg * M_PI / 180.0;
   max_angle_ = max_angle_deg * M_PI / 180.0;
@@ -63,7 +71,7 @@ void BlindClearLayer::updateBounds(double robot_x, double robot_y, double robot_
   *max_y = std::max(*max_y, robot_y_ + range);
 }
 
-void BlindClearLayer::updateCosts(costmap_2d::Costmap2D& master_grid, int min_i, int min_j,
+void BlindClearLayer::updateCosts(nav2_costmap_2d::Costmap2D& master_grid, int min_i, int min_j,
                                   int max_i, int max_j)
 {
   if (!enabled_)
@@ -87,7 +95,7 @@ void BlindClearLayer::updateCosts(costmap_2d::Costmap2D& master_grid, int min_i,
       master_grid.mapToWorld(i, j, wx, wy);
       if (isInBlindZone(wx, wy))
       {
-        master_grid.setCost(i, j, costmap_2d::FREE_SPACE);
+        master_grid.setCost(i, j, nav2_costmap_2d::FREE_SPACE);
       }
     }
   }

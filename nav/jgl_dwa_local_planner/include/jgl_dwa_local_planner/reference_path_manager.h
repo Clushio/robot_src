@@ -3,9 +3,10 @@
 
 #include <boost/thread/mutex.hpp>
 
-#include <geometry_msgs/PoseStamped.h>
-#include <nav_msgs/Path.h>
-#include <ros/ros.h>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <nav_msgs/msg/path.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <rclcpp_lifecycle/lifecycle_node.hpp>
 
 #include <vector>
 
@@ -17,15 +18,17 @@ class ReferencePathManager
 public:
   ReferencePathManager();
 
-  void initialize(ros::NodeHandle &node_nh, ros::NodeHandle &private_nh);
+  void initialize(
+      const rclcpp_lifecycle::LifecycleNode::SharedPtr &node,
+      const std::string &parameter_prefix);
 
   bool hasWaypoints() const;
-  std::vector<geometry_msgs::PoseStamped> waypoints() const;
+  std::vector<geometry_msgs::msg::PoseStamped> waypoints() const;
   int topologyVersion() const;
 
   bool hasValidPath() const;
-  nav_msgs::Path referencePath() const;
-  void setReferencePath(const nav_msgs::Path &path);
+  nav_msgs::msg::Path referencePath() const;
+  void setReferencePath(const nav_msgs::msg::Path &path);
   void invalidate();
 
   int pathVersion() const;
@@ -36,38 +39,40 @@ public:
   bool needRegenerate() const;
   void markRegenerateAttempt();
 
-  int goalIndex(const geometry_msgs::PoseStamped &goal) const;
-  bool isMiddleGoal(const geometry_msgs::PoseStamped &goal, int *goal_index) const;
+  int goalIndex(const geometry_msgs::msg::PoseStamped &goal) const;
+  bool isMiddleGoal(const geometry_msgs::msg::PoseStamped &goal, int *goal_index) const;
   bool isTerminalReferenceGoal(int goal_index) const;
-  bool referenceProgressReached(const geometry_msgs::PoseStamped &goal,
-                                const geometry_msgs::PoseStamped &current_pose,
+  bool referenceProgressReached(const geometry_msgs::msg::PoseStamped &goal,
+                                const geometry_msgs::msg::PoseStamped &current_pose,
                                 double pass_distance,
                                 unsigned int *goal_path_index,
                                 double *remaining_reference_distance,
                                 double *goal_distance) const;
-  double distanceToReference(const geometry_msgs::PoseStamped &pose,
+  double distanceToReference(const geometry_msgs::msg::PoseStamped &pose,
                              unsigned int *nearest_index) const;
 
 private:
-  void topologyCallback(const nav_msgs::Path::ConstPtr &msg);
-  bool sameTopology(const std::vector<geometry_msgs::PoseStamped> &a,
-                    const std::vector<geometry_msgs::PoseStamped> &b) const;
-  double poseDistance(const geometry_msgs::PoseStamped &a,
-                      const geometry_msgs::PoseStamped &b) const;
+  void topologyCallback(const nav_msgs::msg::Path::SharedPtr msg);
+  bool sameTopology(const std::vector<geometry_msgs::msg::PoseStamped> &a,
+                    const std::vector<geometry_msgs::msg::PoseStamped> &b) const;
+  double poseDistance(const geometry_msgs::msg::PoseStamped &a,
+                      const geometry_msgs::msg::PoseStamped &b) const;
   double pathDistance(unsigned int from_index, unsigned int to_index) const;
 
-  ros::Subscriber topology_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr topology_sub_;
+  rclcpp::Clock::SharedPtr clock_;
+  rclcpp::Logger logger_{rclcpp::get_logger("ReferencePathManager")};
   mutable boost::mutex mutex_;
 
-  std::vector<geometry_msgs::PoseStamped> topo_waypoints_;
-  nav_msgs::Path reference_path_;
+  std::vector<geometry_msgs::msg::PoseStamped> topo_waypoints_;
+  nav_msgs::msg::Path reference_path_;
   bool have_reference_path_;
   bool topology_changed_;
   int topology_version_;
   int path_version_;
   unsigned int current_path_index_;
-  ros::Time last_regenerate_attempt_;
-  ros::Time last_topology_stamp_;
+  rclcpp::Time last_regenerate_attempt_;
+  rclcpp::Time last_topology_stamp_;
 
   double path_regenerate_cooldown_;
   double waypoint_match_tolerance_;

@@ -39,125 +39,35 @@
 #include <Eigen/Core>
 #include <algorithm>
 #include <cmath>
+#include <ctime>
+#include <fstream>
+#include <iomanip>
 #include <limits>
+#include <sstream>
+#include <stdexcept>
 
-#include <ros/console.h>
+#include <pluginlib/class_list_macros.hpp>
 
-#include <pluginlib/class_list_macros.h>
-
-#include <base_local_planner/goal_functions.h>
-#include <costmap_2d/cost_values.h>
-#include <nav_msgs/Path.h>
+#include <nav2_costmap_2d/cost_values.hpp>
+#include <nav_msgs/msg/path.hpp>
 #include <tf2/utils.h>
 
-#include <nav_core/parameter_magic.h>
-#include <geometry_msgs/Quaternion.h>
+#include <geometry_msgs/msg/quaternion.hpp>
+#include <jgl_dwa_local_planner/parameter_utils.h>
 #include <math.h>
 
 
 
 #define PI 3.1415926
 
-//register this planner as a BaseLocalPlanner plugin
-PLUGINLIB_EXPORT_CLASS(jgl_dwa_local_planner::DWAPlannerROS, nav_core::BaseLocalPlanner)
+PLUGINLIB_EXPORT_CLASS(jgl_dwa_local_planner::DWAPlannerROS, nav2_core::Controller)
 
 namespace jgl_dwa_local_planner
 {
 
-  void DWAPlannerROS::reconfigureCB(DWAPlannerConfig &config, uint32_t level)
+  DWAPlannerROS::DWAPlannerROS()
   {
-    if (setup_ && config.restore_defaults)
-    {
-      config = default_config_;
-      config.restore_defaults = false;
-    }
-    if (!setup_)
-    {
-      default_config_ = config;
-      setup_ = true;
-    }
-
-    startrotangle = config.jgl_rot_start_angle;
-    stoprotangle = config.jgl_rot_stop_angle;
-    yaw_goal_tolerance=config.yaw_goal_tolerance;
-    xy_goal_tolerance=config.xy_goal_tolerance;
-    max_vel_x=config.max_vel_x;
-    brake_distance=config.brake_distance;
-    lfc=config.lfc;
-    forwNum=config.forwNum;
-
-    pid_PA = config.pid_PA;
-    pid_PB = config.pid_PB;
-
-    frontdis_X = config.frontdis_X;
-
-    state4counter = 5;
-    state5counter = 5;
-
-                
-    xdis = xy_goal_tolerance;
-    angle_err_H = yaw_goal_tolerance;
-
-    // update generic local planner params
-    base_local_planner::LocalPlannerLimits limits;
-    limits.max_vel_trans = config.max_vel_trans;
-    limits.min_vel_trans = config.min_vel_trans;
-    limits.max_vel_x = config.max_vel_x;
-    limits.min_vel_x = config.min_vel_x;
-    limits.max_vel_y = config.max_vel_y;
-    limits.min_vel_y = config.min_vel_y;
-    limits.max_vel_theta = config.max_vel_theta;
-    limits.min_vel_theta = config.min_vel_theta;
-    limits.acc_lim_x = config.acc_lim_x;
-    limits.acc_lim_y = config.acc_lim_y;
-    limits.acc_lim_theta = config.acc_lim_theta;
-    limits.acc_lim_trans = config.acc_lim_trans;
-    limits.xy_goal_tolerance = config.xy_goal_tolerance;
-    limits.yaw_goal_tolerance = config.yaw_goal_tolerance;
-    limits.prune_plan = config.prune_plan;
-    limits.trans_stopped_vel = config.trans_stopped_vel;
-    limits.theta_stopped_vel = config.theta_stopped_vel;
-    planner_util_.reconfigureCB(limits, config.restore_defaults);
-
-    // update dwa specific configuration
-    ROS_WARN_NAMED("jgl_dwa_local_planner", "start angle >%f and stop angle <%f is set", startrotangle, stoprotangle);
-    dp_->reconfigure(config);
-  }
-
-  DWAPlannerROS::DWAPlannerROS() : initialized_(false),
-                                   odom_helper_("odom"), setup_(false)
-  {
-    useLine = 0;
-    goal_yaw_err = 0.0;
-    yaw_goal_tolerance = 0.0;
-    xy_goal_tolerance = 0.0;
-    status = 0;
-    is_start_rotating = false;
-    state4counter = 0;
-    state5counter = 0;
-    lastz = 1;
-    enable_bspline_reference_path_ = false;
-    reference_safe_distance_ = 0.25;
-    reference_fallback_boundary_distance_ = 0.15;
-    reference_middle_pass_distance_ = 0.25;
-    reference_terminal_xy_tolerance_ = 0.08;
-    obstacle_wait_time_ = 10.0;
-    reference_obstacle_slowdown_distance_ = 1.0;
-    reference_obstacle_stop_distance_ = 0.7;
-    path_deviation_replan_threshold_ = 0.60;
     fixed_route_mode_.store(false);
-    reference_obstacle_start_ = ros::Time(0);
-    current_topology_goal_index_ = -1;
-    legacy_line_forced_goal_index_ = -1;
-    reference_goal_reached_ = false;
-    reference_path_mode_ = TrajectoryGenerator::PATH_MODE_INVALID;
-    dsrv_ = NULL;
-    reference_job_running_ = false;
-    reference_job_result_ready_ = false;
-    reference_job_result_success_ = false;
-    reference_job_topology_version_ = -1;
-    reference_job_failed_topology_version_ = -1;
-    reference_job_path_mode_ = TrajectoryGenerator::PATH_MODE_INVALID;
   }
 
   void  DWAPlannerROS::logToFile(const std::string& message, const std::string& filename) {
@@ -167,7 +77,7 @@ namespace jgl_dwa_local_planner
         logfile << message << std::endl;
         logfile.close();
     } else {
-        ROS_ERROR("Unable to open log file: %s", filename.c_str());
+        RCLCPP_ERROR(logger_, "Unable to open log file: %s", filename.c_str());
     }
 }
   // 获取当前时间戳并格式化为字符串
@@ -179,7 +89,7 @@ namespace jgl_dwa_local_planner
       return oss.str();
   }
 
-  void DWAPlannerROS::stopCmd(geometry_msgs::Twist &cmd_vel) const
+  void DWAPlannerROS::stopCmd(geometry_msgs::msg::Twist &cmd_vel) const
   {
     cmd_vel.linear.x = 0.0;
     cmd_vel.linear.y = 0.0;
@@ -191,13 +101,13 @@ namespace jgl_dwa_local_planner
 
   void DWAPlannerROS::publishReferenceStatus(ReferenceStatus status)
   {
-    geometry_msgs::Vector3Stamped message;
-    message.header.stamp = ros::Time::now();
+    geometry_msgs::msg::Vector3Stamped message;
+    message.header.stamp = clock_->now();
     message.header.frame_id = "map";
     message.vector.x = static_cast<double>(reference_path_manager_.topologyVersion());
     message.vector.y = static_cast<double>(current_topology_goal_index_);
     message.vector.z = static_cast<double>(status);
-    reference_status_pub_.publish(message);
+    reference_status_pub_->publish(message);
   }
 
   void DWAPlannerROS::updateLineGoalRelativeState()
@@ -208,8 +118,8 @@ namespace jgl_dwa_local_planner
     }
 
     computeRelativePosition(current_pose_, linePath.back());
-    const double goal_yaw = tf::getYaw(linePath.back().pose.orientation);
-    const double robot_yaw = tf::getYaw(current_pose_.pose.orientation);
+    const double goal_yaw = tf2::getYaw(linePath.back().pose.orientation);
+    const double robot_yaw = tf2::getYaw(current_pose_.pose.orientation);
     goal_yaw_err = goal_yaw - robot_yaw;
     if (goal_yaw_err <= -PI)
     {
@@ -275,7 +185,7 @@ namespace jgl_dwa_local_planner
   }
 
   bool DWAPlannerROS::referenceGenerationUsefulForCurrentGoal(
-      const std::vector<geometry_msgs::PoseStamped> &waypoints) const
+      const std::vector<geometry_msgs::msg::PoseStamped> &waypoints) const
   {
     if (reference_goal_reached_ || linePath.empty() || waypoints.size() < 4)
     {
@@ -304,7 +214,7 @@ namespace jgl_dwa_local_planner
   }
 
   bool DWAPlannerROS::startReferencePathJob(
-      const std::vector<geometry_msgs::PoseStamped> &waypoints,
+      const std::vector<geometry_msgs::msg::PoseStamped> &waypoints,
       int topology_version)
   {
     if (waypoints.size() < 4)
@@ -349,16 +259,16 @@ namespace jgl_dwa_local_planner
     reference_job_thread_ =
         boost::thread(&DWAPlannerROS::referencePathGenerationThread,
                       this, waypoints, topology_version);
-    ROS_INFO("JGL reference path: started async generation for topology version %d with %zu waypoints.",
+    RCLCPP_INFO(logger_, "JGL reference path: started async generation for topology version %d with %zu waypoints.",
              topology_version, waypoints.size());
     return true;
   }
 
   void DWAPlannerROS::referencePathGenerationThread(
-      std::vector<geometry_msgs::PoseStamped> waypoints,
+      std::vector<geometry_msgs::msg::PoseStamped> waypoints,
       int topology_version)
   {
-    nav_msgs::Path reference_path;
+    nav_msgs::msg::Path reference_path;
     const bool success = trajectory_generator_.generate(waypoints, reference_path);
     const TrajectoryGenerator::PathMode path_mode =
         success ? trajectory_generator_.lastPathMode()
@@ -382,7 +292,7 @@ namespace jgl_dwa_local_planner
     bool ready = false;
     bool success = false;
     int job_topology_version = -1;
-    nav_msgs::Path reference_path;
+    nav_msgs::msg::Path reference_path;
     TrajectoryGenerator::PathMode path_mode =
         TrajectoryGenerator::PATH_MODE_INVALID;
     std::vector<int> fallback_segments;
@@ -415,16 +325,16 @@ namespace jgl_dwa_local_planner
 
     if (job_topology_version != current_topology_version)
     {
-      ROS_WARN("JGL reference path: discard stale async result for topology version %d, current version is %d.",
+      RCLCPP_WARN(logger_, "JGL reference path: discard stale async result for topology version %d, current version is %d.",
                job_topology_version, current_topology_version);
       return false;
     }
 
-    const std::vector<geometry_msgs::PoseStamped> current_waypoints =
+    const std::vector<geometry_msgs::msg::PoseStamped> current_waypoints =
         reference_path_manager_.waypoints();
     if (!referenceGenerationUsefulForCurrentGoal(current_waypoints))
     {
-      ROS_INFO("JGL reference path: discard async result because current topology goal no longer needs a reference path.");
+      RCLCPP_INFO(logger_, "JGL reference path: discard async result because current topology goal no longer needs a reference path.");
       return false;
     }
 
@@ -432,7 +342,7 @@ namespace jgl_dwa_local_planner
     {
       boost::mutex::scoped_lock lock(reference_job_mutex_);
       reference_job_failed_topology_version_ = job_topology_version;
-      ROS_ERROR("JGL reference path: async generation failed for topology version %d.",
+      RCLCPP_ERROR(logger_, "JGL reference path: async generation failed for topology version %d.",
                 job_topology_version);
       return false;
     }
@@ -445,9 +355,9 @@ namespace jgl_dwa_local_planner
     double nearest_distance = 0.0;
     unsigned int nearest_index = 0;
     syncReferencePathIndex(&nearest_distance, &nearest_index);
-    reference_path_pub_.publish(reference_path);
+    reference_path_pub_->publish(reference_path);
     publishReferencePathMarker(reference_path, reference_path_mode_);
-    ROS_INFO("JGL reference path: published /reference_path version %d mode=%s samples=%zu init_idx=%u init_dist=%.3f.",
+    RCLCPP_INFO(logger_, "JGL reference path: published /reference_path version %d mode=%s samples=%zu init_idx=%u init_dist=%.3f.",
              reference_path_manager_.pathVersion(),
              referencePathModeName(reference_path_mode_),
              reference_path.poses.size(),
@@ -463,7 +373,7 @@ namespace jgl_dwa_local_planner
     {
       return;
     }
-    const std::vector<geometry_msgs::PoseStamped> waypoints =
+    const std::vector<geometry_msgs::msg::PoseStamped> waypoints =
         reference_path_manager_.waypoints();
     if (!referenceGenerationUsefulForCurrentGoal(waypoints))
     {
@@ -536,16 +446,16 @@ namespace jgl_dwa_local_planner
     return false;
   }
 
-  void DWAPlannerROS::publishReferencePathMarker(const nav_msgs::Path &path,
+  void DWAPlannerROS::publishReferencePathMarker(const nav_msgs::msg::Path &path,
                                                  TrajectoryGenerator::PathMode path_mode) const
   {
-    visualization_msgs::Marker marker;
+    visualization_msgs::msg::Marker marker;
     marker.header = path.header;
-    marker.header.stamp = ros::Time::now();
+    marker.header.stamp = clock_->now();
     marker.ns = "jgl_reference_path";
     marker.id = 0;
-    marker.type = visualization_msgs::Marker::LINE_STRIP;
-    marker.action = visualization_msgs::Marker::ADD;
+    marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
+    marker.action = visualization_msgs::msg::Marker::ADD;
     marker.pose.orientation.w = 1.0;
     marker.scale.x = 0.06;
     marker.color.a = 1.0;
@@ -571,13 +481,13 @@ namespace jgl_dwa_local_planner
     marker.points.reserve(path.poses.size());
     for (unsigned int i = 0; i < path.poses.size(); ++i)
     {
-      geometry_msgs::Point point;
+      geometry_msgs::msg::Point point;
       point.x = path.poses[i].pose.position.x;
       point.y = path.poses[i].pose.position.y;
       point.z = path.poses[i].pose.position.z + 0.03;
       marker.points.push_back(point);
     }
-    reference_path_marker_pub_.publish(marker);
+    reference_path_marker_pub_->publish(marker);
   }
 
   bool DWAPlannerROS::referencePathCanFollowGoal(int goal_index) const
@@ -622,7 +532,7 @@ namespace jgl_dwa_local_planner
   }
 
   bool DWAPlannerROS::referenceEntryHeadingAligned(
-      const nav_msgs::Path &reference_path,
+      const nav_msgs::msg::Path &reference_path,
       double *heading_error) const
   {
     if (heading_error != NULL)
@@ -669,8 +579,8 @@ namespace jgl_dwa_local_planner
       return true;
     }
 
-    const geometry_msgs::PoseStamped &from = reference_path.poses[current_index];
-    const geometry_msgs::PoseStamped &to = reference_path.poses[tangent_index];
+    const geometry_msgs::msg::PoseStamped &from = reference_path.poses[current_index];
+    const geometry_msgs::msg::PoseStamped &to = reference_path.poses[tangent_index];
     const double dx = to.pose.position.x - from.pose.position.x;
     const double dy = to.pose.position.y - from.pose.position.y;
     if (std::hypot(dx, dy) < 1e-4)
@@ -679,7 +589,7 @@ namespace jgl_dwa_local_planner
     }
 
     const double path_yaw = std::atan2(dy, dx);
-    const double robot_yaw = tf::getYaw(current_pose_.pose.orientation);
+    const double robot_yaw = tf2::getYaw(current_pose_.pose.orientation);
     double error = path_yaw - robot_yaw;
     if (error <= -PI)
     {
@@ -711,7 +621,7 @@ namespace jgl_dwa_local_planner
     path_follower_.reset();
     if (status != 1)
     {
-      ROS_WARN("JGL reference path: fallback to legacy rotate-line controller, reset line status to rotate. reason=%s",
+      RCLCPP_WARN(logger_, "JGL reference path: fallback to legacy rotate-line controller, reset line status to rotate. reason=%s",
                reason == NULL ? "unknown" : reason);
     }
     status = 1;
@@ -763,7 +673,7 @@ namespace jgl_dwa_local_planner
             current_topology_goal_index_);
     if (terminal_goal)
     {
-      const nav_msgs::Path reference_path =
+      const nav_msgs::msg::Path reference_path =
           reference_path_manager_.referencePath();
       const double direct_goal_distance =
           std::hypot(current_pose_.pose.position.x -
@@ -817,8 +727,8 @@ namespace jgl_dwa_local_planner
     if (referenceGoalExitsToFallback(current_topology_goal_index_) &&
         reached_goal_distance > reference_fallback_boundary_distance_)
     {
-      ROS_INFO_THROTTLE(
-          1.0,
+      RCLCPP_INFO_THROTTLE(
+          logger_, *clock_, 1000,
           "JGL reference path: goal_idx=%d is before fallback; wait for direct distance %.3f <= %.3f before switching to legacy rotate-line.",
           current_topology_goal_index_,
           reached_goal_distance,
@@ -829,7 +739,7 @@ namespace jgl_dwa_local_planner
     return true;
   }
 
-  bool DWAPlannerROS::costmapPointBlocked(costmap_2d::Costmap2D *costmap,
+  bool DWAPlannerROS::costmapPointBlocked(nav2_costmap_2d::Costmap2D *costmap,
                                           unsigned int mx, unsigned int my,
                                           int radius_cells) const
   {
@@ -854,8 +764,8 @@ namespace jgl_dwa_local_planner
         }
 
         const unsigned char cost = costmap->getCost(x, y);
-        if (cost != costmap_2d::NO_INFORMATION &&
-            cost >= costmap_2d::INSCRIBED_INFLATED_OBSTACLE)
+        if (cost != nav2_costmap_2d::NO_INFORMATION &&
+            cost >= nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE)
         {
           return true;
         }
@@ -865,7 +775,7 @@ namespace jgl_dwa_local_planner
   }
 
   bool DWAPlannerROS::referencePathObstacleDistance(
-      const nav_msgs::Path &path, double &obstacle_distance)
+      const nav_msgs::msg::Path &path, double &obstacle_distance)
   {
     obstacle_distance = std::numeric_limits<double>::infinity();
     if (path.poses.empty() || costmap_ros_ == NULL || costmap_ros_->getCostmap() == NULL)
@@ -873,7 +783,7 @@ namespace jgl_dwa_local_planner
       return false;
     }
 
-    costmap_2d::Costmap2D *costmap = costmap_ros_->getCostmap();
+    nav2_costmap_2d::Costmap2D *costmap = costmap_ros_->getCostmap();
     const double resolution = std::max(0.01, costmap->getResolution());
     const int radius_cells =
         static_cast<int>(std::ceil(reference_safe_distance_ / resolution));
@@ -883,7 +793,7 @@ namespace jgl_dwa_local_planner
     index = std::min(index, static_cast<unsigned int>(path.poses.size() - 1));
 
     double walked = 0.0;
-    geometry_msgs::PoseStamped previous = current_pose_;
+    geometry_msgs::msg::PoseStamped previous = current_pose_;
     for (unsigned int i = index; i < path.poses.size(); ++i)
     {
       walked += comDistance(previous, path.poses[i]);
@@ -934,14 +844,14 @@ namespace jgl_dwa_local_planner
       }
     }
 
-    costmap_2d::Costmap2D *costmap = costmap_ros_->getCostmap();
+    nav2_costmap_2d::Costmap2D *costmap = costmap_ros_->getCostmap();
     const double resolution = std::max(0.01, costmap->getResolution());
     const int radius_cells =
         static_cast<int>(std::ceil(reference_safe_distance_ / resolution));
     const double check_distance =
         std::max(1.0, path_follower_.lookaheadDistance() * 2.0);
     double walked = 0.0;
-    geometry_msgs::PoseStamped previous = current_pose_;
+    geometry_msgs::msg::PoseStamped previous = current_pose_;
     for (unsigned int i = nearest_index; i < linePath.size(); ++i)
     {
       walked += comDistance(previous, linePath[i]);
@@ -963,16 +873,16 @@ namespace jgl_dwa_local_planner
   }
 
   void DWAPlannerROS::fixedRouteModeCallback(
-      const std_msgs::Bool::ConstPtr &mode)
+      const std_msgs::msg::Bool::SharedPtr mode)
   {
     fixed_route_mode_.store(mode->data);
     if (!mode->data)
     {
-      reference_obstacle_start_ = ros::Time(0);
+      reference_obstacle_start_ = rclcpp::Time(0, 0, clock_->get_clock_type());
     }
   }
 
-  bool DWAPlannerROS::computeReferenceVelocityCommands(geometry_msgs::Twist &cmd_vel,
+  bool DWAPlannerROS::computeReferenceVelocityCommands(geometry_msgs::msg::Twist &cmd_vel,
                                                        bool &hard_failure)
   {
     hard_failure = false;
@@ -988,7 +898,7 @@ namespace jgl_dwa_local_planner
       if (generation_pending)
       {
         stopCmd(cmd_vel);
-        ROS_INFO_THROTTLE(1.0,
+        RCLCPP_INFO_THROTTLE(logger_, *clock_, 1000,
                           "JGL reference path: async generation is still running, wait at topology goal idx=%d.",
                           current_topology_goal_index_);
         return true;
@@ -997,7 +907,7 @@ namespace jgl_dwa_local_planner
       {
         stopCmd(cmd_vel);
         hard_failure = true;
-        ROS_ERROR_THROTTLE(1.0,
+        RCLCPP_ERROR_THROTTLE(logger_, *clock_, 1000,
                            "JGL reference path: async generation failed for topology version %d, keep stopped.",
                            reference_path_manager_.topologyVersion());
         return false;
@@ -1008,14 +918,14 @@ namespace jgl_dwa_local_planner
     if (!referencePathCanFollowGoal(current_topology_goal_index_))
     {
       forceLegacyLineRotate("polyline_fallback_near_goal");
-      ROS_INFO_THROTTLE(1.0,
+      RCLCPP_INFO_THROTTLE(logger_, *clock_, 1000,
                         "JGL reference path: goal_idx=%d uses legacy rotate-line controller because reference mode=%s has fallback polyline nearby.",
                         current_topology_goal_index_,
                         referencePathModeName(reference_path_mode_));
       return false;
     }
 
-    nav_msgs::Path reference_path = reference_path_manager_.referencePath();
+    nav_msgs::msg::Path reference_path = reference_path_manager_.referencePath();
     if (reference_path.poses.size() < 2)
     {
       return false;
@@ -1044,7 +954,7 @@ namespace jgl_dwa_local_planner
       stopCmd(cmd_vel);
       publishReferenceStatus(REFERENCE_PATH_DEVIATED);
       hard_failure = true;
-      ROS_WARN_THROTTLE(1.0,
+      RCLCPP_WARN_THROTTLE(logger_, *clock_, 1000,
                         "JGL reference path: robot is %.3f m away from reference path at nearest idx=%u, threshold=%.3f. Stop instead of chasing a far reference.",
                         distance_to_reference,
                         nearest_reference_index,
@@ -1057,7 +967,7 @@ namespace jgl_dwa_local_planner
                                       &reference_entry_heading_error))
     {
       forceLegacyLineRotate("reference_entry_heading_misaligned");
-      ROS_WARN_THROTTLE(1.0,
+      RCLCPP_WARN_THROTTLE(logger_, *clock_, 1000,
                         "JGL reference path: entry heading error %.3f rad is too large, use legacy rotate-line before reference tracking.",
                         reference_entry_heading_error);
       return false;
@@ -1073,15 +983,15 @@ namespace jgl_dwa_local_planner
       publishReferenceStatus(REFERENCE_PASSED);
       if (terminal_reference_goal)
       {
-        ROS_INFO_THROTTLE(
-            1.0,
+        RCLCPP_INFO_THROTTLE(
+            logger_, *clock_, 1000,
             "JGL reference path: terminal goal idx=%d reached by base_link XY distance %.3f <= %.3f.",
             current_topology_goal_index_, direct_goal_distance,
             reference_terminal_xy_tolerance_);
       }
       else
       {
-        ROS_INFO_THROTTLE(1.0,
+        RCLCPP_INFO_THROTTLE(logger_, *clock_, 1000,
                           "JGL reference path: pass-through goal idx=%d reached; keep following without stopping "
                           "(path_idx=%u target_path_idx=%u remain=%.3f direct_dist=%.3f).",
                           current_topology_goal_index_,
@@ -1099,26 +1009,26 @@ namespace jgl_dwa_local_planner
                                       reference_obstacle_distance);
     if (reference_obstacle_ahead)
     {
-      if (reference_obstacle_start_.isZero())
+      if (reference_obstacle_start_.nanoseconds() == 0)
       {
-        reference_obstacle_start_ = ros::Time::now();
-        ROS_WARN("JGL reference path: obstacle %.3f m ahead on path, enter staged slowdown.",
+        reference_obstacle_start_ = clock_->now();
+        RCLCPP_WARN(logger_, "JGL reference path: obstacle %.3f m ahead on path, enter staged slowdown.",
                  reference_obstacle_distance);
       }
 
-      if ((ros::Time::now() - reference_obstacle_start_).toSec() >=
+      if ((clock_->now() - reference_obstacle_start_).seconds() >=
           obstacle_wait_time_)
       {
         stopCmd(cmd_vel);
         hard_failure = true;
-        ROS_WARN_THROTTLE(1.0,
+        RCLCPP_WARN_THROTTLE(logger_, *clock_, 1000,
                           "JGL reference path: obstacle wait timeout, keep stopped and let topology replan.");
         return false;
       }
     }
     else
     {
-      reference_obstacle_start_ = ros::Time(0);
+      reference_obstacle_start_ = rclcpp::Time(0, 0, clock_->get_clock_type());
     }
 
     unsigned int new_index = reference_path_manager_.currentPathIndex();
@@ -1150,8 +1060,8 @@ namespace jgl_dwa_local_planner
         path_follower_.reset();
         stopCmd(cmd_vel);
       }
-      ROS_WARN_THROTTLE(
-          0.5,
+      RCLCPP_WARN_THROTTLE(
+          logger_, *clock_, 500,
           "JGL reference path: obstacle distance=%.3f m, candidate speed scale=%.2f.",
           reference_obstacle_distance, obstacle_scale);
     }
@@ -1163,7 +1073,7 @@ namespace jgl_dwa_local_planner
       publishReferenceStatus(REFERENCE_PASSED);
     }
 
-    std::vector<geometry_msgs::PoseStamped> local_reference;
+    std::vector<geometry_msgs::msg::PoseStamped> local_reference;
     const unsigned int start_index = reference_path_manager_.currentPathIndex();
     const unsigned int end_index =
         std::min(static_cast<unsigned int>(reference_path.poses.size()),
@@ -1174,161 +1084,309 @@ namespace jgl_dwa_local_planner
     }
     publishLocalPlan(local_reference);
 
-    ROS_INFO_THROTTLE(0.5,
+    RCLCPP_INFO_THROTTLE(logger_, *clock_, 500,
                       "JGL reference path: follow idx=%u goal_idx=%d v=%.3f w=%.3f curv=%.3f.",
                       reference_path_manager_.currentPathIndex(),
                       current_topology_goal_index_,
                       cmd_vel.linear.x, cmd_vel.angular.z, curvature);
     return true;
   }
+  rcl_interfaces::msg::SetParametersResult DWAPlannerROS::onSetParameters(
+      const std::vector<rclcpp::Parameter> &parameters)
+  {
+    rcl_interfaces::msg::SetParametersResult result;
+    result.successful = true;
 
+    const auto key = [this](const std::string &parameter) {
+        return plugin_name_ + "." + parameter;
+      };
+    double new_max_vel_x = max_vel_x;
+    double new_brake_distance = brake_distance;
+    double new_lfc = lfc;
+    double new_forw_num = forwNum;
+    double new_pid_pa = pid_PA;
+    double new_pid_pb = pid_PB;
+    double new_front_distance = frontdis_X;
+    double new_start_angle = startrotangle;
+    double new_stop_angle = stoprotangle;
+    double new_yaw_tolerance = yaw_goal_tolerance;
+    double new_xy_tolerance = xy_goal_tolerance;
 
-  void DWAPlannerROS::initialize(
-    std::string name,
-    tf2_ros::Buffer *tf,
-    costmap_2d::Costmap2DROS *costmap_ros)
-{
-    if (!isInitialized()) {
-
-        ros::NodeHandle private_nh("~/" + name);
-        g_plan_pub_ = private_nh.advertise<nav_msgs::Path>("global_plan", 1);
-        l_plan_pub_ = private_nh.advertise<nav_msgs::Path>("local_plan", 1);
-        tf_ = tf;
-        costmap_ros_ = costmap_ros;
-        costmap_ros_->getRobotPose(current_pose_);
-
-        
-        private_nh.param("max_vel_x", max_vel_x, 0.4);
-        private_nh.param("brake_distance", brake_distance, 1.0);
-        private_nh.param("lfc", lfc, 0.3);
-        private_nh.param("forwNum", forwNum, 0.1);
-        private_nh.param("back_distance", back_distance, 2.5);
-
-        private_nh.param("pid_PA", pid_PA, 0.7);
-        private_nh.param("pid_PB", pid_PB, 0.2);
-        private_nh.param("frontdis_X", frontdis_X, 0.02);
-        private_nh.param("enable_bspline_reference_path",
-                         enable_bspline_reference_path_, false);
-        private_nh.param("safe_distance", reference_safe_distance_, 0.25);
-        private_nh.param("reference_fallback_boundary_distance",
-                         reference_fallback_boundary_distance_, 0.15);
-        private_nh.param("reference_middle_pass_distance",
-                         reference_middle_pass_distance_, 0.25);
-        private_nh.param("reference_terminal_xy_tolerance",
-                         reference_terminal_xy_tolerance_, 0.08);
-        private_nh.param("obstacle_wait_time", obstacle_wait_time_, 10.0);
-        private_nh.param("obstacle_slowdown_distance",
-                         reference_obstacle_slowdown_distance_, 1.0);
-        private_nh.param("obstacle_stop_distance",
-                         reference_obstacle_stop_distance_, 0.7);
-        private_nh.param("path_deviation_replan_threshold",
-                         path_deviation_replan_threshold_, 0.60);
-        double terminal_yaw_tolerance = 0.04;
-        double terminal_yaw_kp = 1.2;
-        double terminal_yaw_max_speed = 0.25;
-        double terminal_yaw_min_speed = 0.06;
-        int terminal_yaw_stable_cycles = 3;
-        private_nh.param("terminal_yaw_tolerance",
-                         terminal_yaw_tolerance, terminal_yaw_tolerance);
-        private_nh.param("terminal_yaw_kp",
-                         terminal_yaw_kp, terminal_yaw_kp);
-        private_nh.param("terminal_yaw_max_speed",
-                         terminal_yaw_max_speed, terminal_yaw_max_speed);
-        private_nh.param("terminal_yaw_min_speed",
-                         terminal_yaw_min_speed, terminal_yaw_min_speed);
-        private_nh.param("terminal_yaw_stable_cycles",
-                         terminal_yaw_stable_cycles,
-                         terminal_yaw_stable_cycles);
-        terminal_yaw_controller_.configure(
-            terminal_yaw_tolerance, terminal_yaw_kp,
-            terminal_yaw_max_speed, terminal_yaw_min_speed,
-            terminal_yaw_stable_cycles);
-        reference_safe_distance_ = std::max(0.0, reference_safe_distance_);
-        reference_fallback_boundary_distance_ =
-            std::max(0.02, reference_fallback_boundary_distance_);
-        reference_middle_pass_distance_ =
-            std::max(0.02, reference_middle_pass_distance_);
-        reference_terminal_xy_tolerance_ =
-            std::max(0.01, reference_terminal_xy_tolerance_);
-        obstacle_wait_time_ = std::max(0.0, obstacle_wait_time_);
-        reference_obstacle_stop_distance_ =
-            std::max(0.0, reference_obstacle_stop_distance_);
-        reference_obstacle_slowdown_distance_ =
-            std::max(reference_obstacle_stop_distance_ + 0.01,
-                     reference_obstacle_slowdown_distance_);
-        path_deviation_replan_threshold_ =
-            std::max(0.05, path_deviation_replan_threshold_);
-        //private_nh.param("back_distance", back_distance, 2.5);
-
-        ros::NodeHandle node_nh;
-        reference_path_pub_ = node_nh.advertise<nav_msgs::Path>("/reference_path", 1, true);
-        reference_path_marker_pub_ =
-            node_nh.advertise<visualization_msgs::Marker>("/reference_path_marker", 1, true);
-        reference_status_pub_ =
-            node_nh.advertise<geometry_msgs::Vector3Stamped>("/bspline_status", 1, false);
-        fixed_route_mode_sub_ = node_nh.subscribe<std_msgs::Bool>(
-            "/anav/fixed_route_mode", 1,
-            &DWAPlannerROS::fixedRouteModeCallback, this);
-        trajectory_generator_.initialize(private_nh, node_nh);
-        reference_path_manager_.initialize(node_nh, private_nh);
-        path_follower_.loadParams(private_nh);
-
-      // make sure to update the costmap we'll use for this cycle
-      costmap_2d::Costmap2D* costmap = costmap_ros_->getCostmap();
-
-      planner_util_.initialize(tf, costmap, costmap_ros_->getGlobalFrameID());
-
-      //create the actual planner that we'll use.. it'll configure itself from the parameter server
-      dp_ = boost::shared_ptr<DWAPlanner>(new DWAPlanner(name, &planner_util_));
-
-      if( private_nh.getParam( "odom_topic", odom_topic_ ))
+    for (const auto &parameter : parameters)
+    {
+      const auto &name = parameter.get_name();
+      if (name == key("max_vel_x"))
       {
-        odom_helper_.setOdomTopic( odom_topic_ );
+        new_max_vel_x = parameter.as_double();
       }
-      
-      initialized_ = true;
-      state4counter = 5;
-      state5counter = 3;
-
-      //pid_PA = config.pid_PA;
-      //pid_PB = config.pid_PB;
-      logfilename = "/home/nav/maps/testrecordgoal"+getCurrentTimestamp()+".txt";
-
-
-            
-      xdis = xy_goal_tolerance;
-      angle_err_H = yaw_goal_tolerance;
-
-      // Warn about deprecated parameters -- remove this block in N-turtle
-      nav_core::warnRenamedParameter(private_nh, "max_vel_trans", "max_trans_vel");
-      nav_core::warnRenamedParameter(private_nh, "min_vel_trans", "min_trans_vel");
-      nav_core::warnRenamedParameter(private_nh, "max_vel_theta", "max_rot_vel");
-      nav_core::warnRenamedParameter(private_nh, "min_vel_theta", "min_rot_vel");
-      nav_core::warnRenamedParameter(private_nh, "acc_lim_trans", "acc_limit_trans");
-      nav_core::warnRenamedParameter(private_nh, "theta_stopped_vel", "rot_stopped_vel");
-
-      dsrv_ = new dynamic_reconfigure::Server<DWAPlannerConfig>(private_nh);
-      dynamic_reconfigure::Server<DWAPlannerConfig>::CallbackType cb = boost::bind(&DWAPlannerROS::reconfigureCB, this, _1, _2);
-      dsrv_->setCallback(cb);
-
-        double max_acc=max_vel_x*max_vel_x/(2*brake_distance);
-        sp = new SpeedPlan(max_vel_x, max_acc);
-        ps = new Pursuit(forwNum, lfc);
-        lastz=1;
+      else if (name == key("brake_distance"))
+      {
+        new_brake_distance = parameter.as_double();
+      }
+      else if (name == key("lfc"))
+      {
+        new_lfc = parameter.as_double();
+      }
+      else if (name == key("forwNum"))
+      {
+        new_forw_num = parameter.as_double();
+      }
+      else if (name == key("pid_PA"))
+      {
+        new_pid_pa = parameter.as_double();
+      }
+      else if (name == key("pid_PB"))
+      {
+        new_pid_pb = parameter.as_double();
+      }
+      else if (name == key("frontdis_X"))
+      {
+        new_front_distance = parameter.as_double();
+      }
+      else if (name == key("jgl_rot_start_angle"))
+      {
+        new_start_angle = parameter.as_double();
+      }
+      else if (name == key("jgl_rot_stop_angle"))
+      {
+        new_stop_angle = parameter.as_double();
+      }
+      else if (name == key("yaw_goal_tolerance"))
+      {
+        new_yaw_tolerance = parameter.as_double();
+      }
+      else if (name == key("xy_goal_tolerance"))
+      {
+        new_xy_tolerance = parameter.as_double();
+      }
     }
-    else {
-        ROS_WARN("This planner has already been initialized, doing nothing.");
+
+    if (new_max_vel_x <= 0.0 || new_brake_distance <= 0.0 ||
+        new_lfc < 0.1 || new_forw_num < 0.1 || new_forw_num > 0.5 ||
+        new_pid_pa < 0.0 || new_pid_pb < 0.0 || new_front_distance < 0.0 ||
+        new_start_angle < 0.0 || new_stop_angle < 0.0 ||
+        new_yaw_tolerance < 0.0 || new_xy_tolerance < 0.0)
+    {
+      result.successful = false;
+      result.reason = "JGL controller parameter is outside the ROS1-compatible range";
+      return result;
     }
-}
- bool DWAPlannerROS::setPlan(const std::vector<geometry_msgs::PoseStamped> &orig_global_plan)
+
+    std::lock_guard<std::mutex> lock(control_parameter_mutex_);
+    const bool pursuit_changed = new_lfc != lfc || new_forw_num != forwNum;
+    const bool speed_changed =
+      new_max_vel_x != max_vel_x || new_brake_distance != brake_distance;
+    max_vel_x = new_max_vel_x;
+    brake_distance = new_brake_distance;
+    lfc = new_lfc;
+    forwNum = new_forw_num;
+    pid_PA = new_pid_pa;
+    pid_PB = new_pid_pb;
+    frontdis_X = new_front_distance;
+    startrotangle = new_start_angle;
+    stoprotangle = new_stop_angle;
+    yaw_goal_tolerance = new_yaw_tolerance;
+    xy_goal_tolerance = new_xy_tolerance;
+    xdis = xy_goal_tolerance;
+    angle_err_H = yaw_goal_tolerance;
+    state4counter = 5;
+    state5counter = 5;
+
+    if (speed_changed)
+    {
+      const double max_acc = max_vel_x * max_vel_x /
+        (2.0 * std::max(0.01, brake_distance));
+      sp = std::make_unique<SpeedPlan>(max_vel_x, max_acc);
+    }
+    if (pursuit_changed)
+    {
+      ps = std::make_unique<Pursuit>(forwNum, lfc);
+    }
+    return result;
+  }
+
+  void DWAPlannerROS::configure(
+      const rclcpp_lifecycle::LifecycleNode::WeakPtr &parent,
+      std::string name,
+      std::shared_ptr<tf2_ros::Buffer> tf,
+      std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros)
+  {
+    parent_ = parent;
+    node_ = parent.lock();
+    if (!node_)
+    {
+      throw std::runtime_error("DWAPlannerROS lifecycle node expired");
+    }
+    plugin_name_ = std::move(name);
+    tf_ = std::move(tf);
+    costmap_ros_ = std::move(costmap_ros);
+    clock_ = node_->get_clock();
+    logger_ = node_->get_logger();
+
+    const auto key = [this](const std::string &parameter) {
+        return plugin_name_ + "." + parameter;
+      };
+    max_vel_x = declareOrGet(node_, key("max_vel_x"), 0.4);
+    brake_distance = declareOrGet(node_, key("brake_distance"), 1.0);
+    lfc = declareOrGet(node_, key("lfc"), 0.3);
+    forwNum = declareOrGet(node_, key("forwNum"), 0.1);
+    back_distance = declareOrGet(node_, key("back_distance"), 2.5);
+    pid_PA = declareOrGet(node_, key("pid_PA"), 0.7);
+    pid_PB = declareOrGet(node_, key("pid_PB"), 0.2);
+    frontdis_X = declareOrGet(node_, key("frontdis_X"), 0.02);
+    startrotangle = declareOrGet(node_, key("jgl_rot_start_angle"), 30.0);
+    stoprotangle = declareOrGet(node_, key("jgl_rot_stop_angle"), 15.0);
+    yaw_goal_tolerance = declareOrGet(node_, key("yaw_goal_tolerance"), 0.025);
+    xy_goal_tolerance = declareOrGet(node_, key("xy_goal_tolerance"), 0.03);
+    enable_bspline_reference_path_ = declareOrGet(
+        node_, key("enable_bspline_reference_path"), false);
+    reference_safe_distance_ = declareOrGet(node_, key("safe_distance"), 0.25);
+    reference_fallback_boundary_distance_ = declareOrGet(
+        node_, key("reference_fallback_boundary_distance"), 0.15);
+    reference_middle_pass_distance_ = declareOrGet(
+        node_, key("reference_middle_pass_distance"), 0.25);
+    reference_terminal_xy_tolerance_ = declareOrGet(
+        node_, key("reference_terminal_xy_tolerance"), 0.08);
+    obstacle_wait_time_ = declareOrGet(node_, key("obstacle_wait_time"), 10.0);
+    reference_obstacle_slowdown_distance_ = declareOrGet(
+        node_, key("obstacle_slowdown_distance"), 1.0);
+    reference_obstacle_stop_distance_ = declareOrGet(
+        node_, key("obstacle_stop_distance"), 0.7);
+    path_deviation_replan_threshold_ = declareOrGet(
+        node_, key("path_deviation_replan_threshold"), 0.60);
+    fixed_route_mode_.store(declareOrGet(node_, key("fixed_route_mode"), false));
+
+    const double terminal_yaw_tolerance = declareOrGet(
+        node_, key("terminal_yaw_tolerance"), 0.04);
+    const double terminal_yaw_kp = declareOrGet(node_, key("terminal_yaw_kp"), 1.2);
+    const double terminal_yaw_max_speed = declareOrGet(
+        node_, key("terminal_yaw_max_speed"), 0.25);
+    const double terminal_yaw_min_speed = declareOrGet(
+        node_, key("terminal_yaw_min_speed"), 0.06);
+    const int terminal_yaw_stable_cycles = declareOrGet(
+        node_, key("terminal_yaw_stable_cycles"), 3);
+    terminal_yaw_controller_.configure(
+        terminal_yaw_tolerance, terminal_yaw_kp,
+        terminal_yaw_max_speed, terminal_yaw_min_speed,
+        terminal_yaw_stable_cycles);
+
+    reference_safe_distance_ = std::max(0.0, reference_safe_distance_);
+    reference_fallback_boundary_distance_ =
+        std::max(0.02, reference_fallback_boundary_distance_);
+    reference_middle_pass_distance_ = std::max(0.02, reference_middle_pass_distance_);
+    reference_terminal_xy_tolerance_ =
+        std::max(0.01, reference_terminal_xy_tolerance_);
+    obstacle_wait_time_ = std::max(0.0, obstacle_wait_time_);
+    reference_obstacle_stop_distance_ =
+        std::max(0.0, reference_obstacle_stop_distance_);
+    reference_obstacle_slowdown_distance_ = std::max(
+        reference_obstacle_stop_distance_ + 0.01,
+        reference_obstacle_slowdown_distance_);
+    path_deviation_replan_threshold_ =
+        std::max(0.05, path_deviation_replan_threshold_);
+
+    g_plan_pub_ = node_->create_publisher<nav_msgs::msg::Path>(
+        plugin_name_ + "/global_plan", rclcpp::QoS(1));
+    l_plan_pub_ = node_->create_publisher<nav_msgs::msg::Path>(
+        plugin_name_ + "/local_plan", rclcpp::QoS(1));
+    const auto latched_qos = rclcpp::QoS(1).transient_local().reliable();
+    reference_path_pub_ = node_->create_publisher<nav_msgs::msg::Path>(
+        "/reference_path", latched_qos);
+    reference_path_marker_pub_ =
+        node_->create_publisher<visualization_msgs::msg::Marker>(
+            "/reference_path_marker", latched_qos);
+    reference_status_pub_ =
+        node_->create_publisher<geometry_msgs::msg::Vector3Stamped>(
+            "/bspline_status", rclcpp::QoS(1));
+    fixed_route_mode_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
+        "/anav/fixed_route_mode", rclcpp::QoS(1),
+        std::bind(&DWAPlannerROS::fixedRouteModeCallback, this,
+                  std::placeholders::_1));
+
+    trajectory_generator_.initialize(node_, plugin_name_);
+    reference_path_manager_.initialize(node_, plugin_name_);
+    path_follower_.loadParams(node_, plugin_name_);
+
+    // base_local_planner has no ROS2 port. Nav2 DWB is its official successor;
+    // delegate only the sampling-DWA branch while retaining all project-specific
+    // z-mode, topology, B-spline and pure-pursuit behavior in this wrapper.
+    declareOrGet(node_, key("trajectory_generator_name"),
+                 std::string("dwb_plugins::StandardTrajectoryGenerator"));
+    declareOrGet(node_, key("critics"), std::vector<std::string>{
+        "RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign",
+        "PathAlign", "PathDist", "GoalDist"});
+    dwb_planner_ = std::make_unique<dwb_core::DWBLocalPlanner>();
+    dwb_planner_->configure(parent_, plugin_name_, tf_, costmap_ros_);
+
+    const double max_acc = max_vel_x * max_vel_x /
+        (2.0 * std::max(0.01, brake_distance));
+    sp = std::make_unique<SpeedPlan>(max_vel_x, max_acc);
+    ps = std::make_unique<Pursuit>(forwNum, lfc);
+    state4counter = 5;
+    state5counter = 5;
+    xdis = xy_goal_tolerance;
+    angle_err_H = yaw_goal_tolerance;
+    reference_obstacle_start_ = rclcpp::Time(0, 0, clock_->get_clock_type());
+    begin = rclcpp::Time(0, 0, clock_->get_clock_type());
+    logfilename = "/tmp/testrecordgoal" + getCurrentTimestamp() + ".txt";
+    // ROS2 parameters replace the ROS1 dynamic_reconfigure server for the
+    // project-specific control gains and tolerances. DWB owns its standard
+    // sampling parameters through its own callback.
+    parameter_callback_handle_ = node_->add_on_set_parameters_callback(
+        std::bind(&DWAPlannerROS::onSetParameters, this, std::placeholders::_1));
+    initialized_ = true;
+  }
+
+  void DWAPlannerROS::activate()
+  {
+    g_plan_pub_->on_activate();
+    l_plan_pub_->on_activate();
+    reference_path_pub_->on_activate();
+    reference_path_marker_pub_->on_activate();
+    reference_status_pub_->on_activate();
+    dwb_planner_->activate();
+  }
+
+  void DWAPlannerROS::deactivate()
+  {
+    dwb_planner_->deactivate();
+    g_plan_pub_->on_deactivate();
+    l_plan_pub_->on_deactivate();
+    reference_path_pub_->on_deactivate();
+    reference_path_marker_pub_->on_deactivate();
+    reference_status_pub_->on_deactivate();
+  }
+
+  void DWAPlannerROS::cleanup()
+  {
+    waitForReferencePathJob();
+    if (dwb_planner_)
+    {
+      dwb_planner_->cleanup();
+    }
+    parameter_callback_handle_.reset();
+    dwb_planner_.reset();
+    fixed_route_mode_sub_.reset();
+    g_plan_pub_.reset();
+    l_plan_pub_.reset();
+    reference_path_pub_.reset();
+    reference_path_marker_pub_.reset();
+    reference_status_pub_.reset();
+    sp.reset();
+    ps.reset();
+    initialized_ = false;
+  }
+ void DWAPlannerROS::setPlan(const nav_msgs::msg::Path &path)
 {
-    bool fixed_route_parameter = false;
-    ros::param::param("/anav/fixed_route_mode", fixed_route_parameter, false);
-    fixed_route_mode_.store(fixed_route_parameter);
     if (!isInitialized()) {
-        ROS_ERROR("This planner has not been initialized, please call initialize() before using this planner");
-        return false;
+        throw std::runtime_error(
+            "DWAPlannerROS has not been configured");
     }
+    if (path.poses.empty()) {
+        throw std::invalid_argument("DWAPlannerROS received an empty plan");
+    }
+    global_plan_ = path;
+    const auto &orig_global_plan = global_plan_.poses;
     //add by mxb
     if((lastz>0&&orig_global_plan[0].pose.position.z==0)||(lastz==-1&&orig_global_plan[0].pose.position.z<=0))//modify to back up
     {
@@ -1358,8 +1416,8 @@ namespace jgl_dwa_local_planner
         }
       }
       linePath.clear();
-      for (int j = 0; j < orig_global_plan.size(); j++) {
-          geometry_msgs::PoseStamped pose = orig_global_plan[j];
+      for (std::size_t j = 0; j < orig_global_plan.size(); j++) {
+          geometry_msgs::msg::PoseStamped pose = orig_global_plan[j];
           // In fixed-route mode obstacle stopping is decided continuously by
           // fixedRouteBlocked().  A z==2 marker is only a snapshot written by
           // the global planner when this plan was created.  Keeping that
@@ -1375,43 +1433,40 @@ namespace jgl_dwa_local_planner
       {
         useLine = 1;
         lastz = 1;
-        ROS_WARN("Fixed route: discarded a stale global-planner WAIT marker; "
+        RCLCPP_WARN(logger_, "Fixed route: discarded a stale global-planner WAIT marker; "
                  "live costmap obstacle checking remains active on the locked path.");
       }
       current_topology_goal_index_ = reference_path_manager_.goalIndex(linePath.back());
-      reference_obstacle_start_ = ros::Time(0);
+      reference_obstacle_start_ = rclcpp::Time(0, 0, clock_->get_clock_type());
         std::cout<<"plan points()=  "<<linePath.size()<<std::endl;
     }
     else
     {
       current_topology_goal_index_ = -1;
-      reference_obstacle_start_ = ros::Time(0);
+      reference_obstacle_start_ = rclcpp::Time(0, 0, clock_->get_clock_type());
       reference_goal_reached_ = false;
       legacy_line_forced_goal_index_ = -1;
       terminal_yaw_controller_.reset();
     }
-    //when we get a new plan, we also want to clear any latch we may have on goal tolerances
-    latchedStopRotateController_.resetLatching();
-
-    ROS_INFO("Got new plan");
-  
-    return dp_->setPlan(orig_global_plan);
+    RCLCPP_INFO(logger_, "Got new plan");
+    dwb_planner_->setPlan(global_plan_);
 }
 
- bool DWAPlannerROS::lineComputeVelocityCommands_modJGL(std::vector<geometry_msgs::PoseStamped> linePath, geometry_msgs::Twist &cmd_vel)
+ bool DWAPlannerROS::lineComputeVelocityCommands_modJGL(std::vector<geometry_msgs::msg::PoseStamped> linePath, geometry_msgs::msg::Twist &cmd_vel)
  {
+    (void)linePath;
     stopCmd(cmd_vel);
     return false;
  }
    
-void DWAPlannerROS::computeRelativePosition(const geometry_msgs::PoseStamped& p, const geometry_msgs::PoseStamped& q)
+void DWAPlannerROS::computeRelativePosition(const geometry_msgs::msg::PoseStamped& p, const geometry_msgs::msg::PoseStamped& q)
 {
     // 导航路径是二维的，position.z 被全局规划器用作控制模式标记
     // (1: 纯追踪, 2: 停止等待)。不能将该 z 值和实车 roll/pitch 参与
     // 三维旋转，否则会在 Qtar.x/y 中产生虚假的终点距离。
     const double dx = q.pose.position.x - p.pose.position.x;
     const double dy = q.pose.position.y - p.pose.position.y;
-    const double robot_yaw = tf::getYaw(p.pose.orientation);
+    const double robot_yaw = tf2::getYaw(p.pose.orientation);
     const double cos_yaw = std::cos(robot_yaw);
     const double sin_yaw = std::sin(robot_yaw);
 
@@ -1430,17 +1485,13 @@ void DWAPlannerROS::computeRelativePosition(const geometry_msgs::PoseStamped& p,
 bool DWAPlannerROS::isGoalReached()
 {
     if (!isInitialized()) {
-        ROS_ERROR("This planner has not been initialized, please call initialize() before using this planner");
-        return false;
-    }
-    if (!costmap_ros_->getRobotPose(current_pose_)) {
-        ROS_ERROR("Could not get robot pose");
+        RCLCPP_ERROR(logger_, "This planner has not been initialized, please call initialize() before using this planner");
         return false;
     }
     //pure oursuit 判断是否到达目标点，包括距离和角度
 
     if (useLine>0) {
-        ROS_INFO_STREAM("distance to goal:" << comDistance(current_pose_,linePath.back()) );
+        RCLCPP_INFO_STREAM(logger_, "distance to goal:" << comDistance(current_pose_,linePath.back()) );
         if (shouldUseReferencePath() &&
             reference_path_manager_.hasValidPath() &&
             referencePathCanFollowGoal(current_topology_goal_index_))
@@ -1452,7 +1503,7 @@ bool DWAPlannerROS::isGoalReached()
         }
         if (reference_goal_reached_)
         {
-            ROS_INFO("Goal reached by reference path progress");
+            RCLCPP_INFO(logger_, "Goal reached by reference path progress");
             return true;
         }
         unsigned int goal_path_index = 0;
@@ -1463,7 +1514,7 @@ bool DWAPlannerROS::isGoalReached()
                                  &direct_goal_distance))
         {
             reference_goal_reached_ = true;
-            ROS_INFO("Goal reached by reference path progress "
+            RCLCPP_INFO(logger_, "Goal reached by reference path progress "
                      "(path_idx=%u target_path_idx=%u remain=%.3f direct_dist=%.3f)",
                      reference_path_manager_.currentPathIndex(),
                      goal_path_index,
@@ -1476,7 +1527,7 @@ bool DWAPlannerROS::isGoalReached()
         // noise while the chassis is still settling.
         if (status ==3) {
 
-            ROS_INFO("Goal reached by rotation");
+            RCLCPP_INFO(logger_, "Goal reached by rotation");
             std::stringstream ss1;
             ss1<<"goal: x="<<linePath.back().pose.position.x<<" y="<<linePath.back().pose.position.y<<std::endl;
             ss1<<"stop cmd at: x="<<current_pose_.pose.position.x<<" y="<<current_pose_.pose.position.y<<std::endl;
@@ -1492,112 +1543,38 @@ bool DWAPlannerROS::isGoalReached()
             return false;
         }
     }
-    else {
-        if (latchedStopRotateController_.isGoalReached(&planner_util_, odom_helper_, current_pose_)) {
-            ROS_INFO("Goal reached");
-            return true;
-        }
-        else {
-            return false;
-        }
+    if (!goal_checker_ || global_plan_.poses.empty()) {
+        return false;
     }
+    return goal_checker_->isGoalReached(
+        current_pose_.pose, global_plan_.poses.back().pose, current_velocity_);
 }
 
 
-  void DWAPlannerROS::publishLocalPlan(std::vector<geometry_msgs::PoseStamped> &path)
+  void DWAPlannerROS::publishLocalPlan(std::vector<geometry_msgs::msg::PoseStamped> &path)
   {
-    base_local_planner::publishPlan(path, l_plan_pub_);
+    nav_msgs::msg::Path message;
+    message.header.stamp = clock_->now();
+    message.header.frame_id = costmap_ros_->getGlobalFrameID();
+    message.poses = path;
+    l_plan_pub_->publish(message);
   }
 
-  void DWAPlannerROS::publishGlobalPlan(std::vector<geometry_msgs::PoseStamped> &path)
+  void DWAPlannerROS::publishGlobalPlan(std::vector<geometry_msgs::msg::PoseStamped> &path)
   {
-    base_local_planner::publishPlan(path, g_plan_pub_);
+    nav_msgs::msg::Path message;
+    message.header.stamp = clock_->now();
+    message.header.frame_id = costmap_ros_->getGlobalFrameID();
+    message.poses = path;
+    g_plan_pub_->publish(message);
   }
 
   DWAPlannerROS::~DWAPlannerROS()
   {
-    //make sure to clean things up
     waitForReferencePathJob();
-    delete dsrv_;
   }
 
-  bool DWAPlannerROS::dwaComputeVelocityCommands(geometry_msgs::PoseStamped &global_pose, geometry_msgs::Twist &cmd_vel)
-  {
-    // dynamic window sampling approach to get useful velocity commands
-    if (!isInitialized())
-    {
-      ROS_ERROR("This planner has not been initialized, please call initialize() before using this planner");
-      return false;
-    }
-
-    geometry_msgs::PoseStamped robot_vel;
-    odom_helper_.getRobotVel(robot_vel);
-
-    /* For timing uncomment
-    struct timeval start, end;
-    double start_t, end_t, t_diff;
-    gettimeofday(&start, NULL);
-    */
-
-    //compute what trajectory to drive along
-    geometry_msgs::PoseStamped drive_cmds;
-    drive_cmds.header.frame_id = costmap_ros_->getBaseFrameID();
-
-    // call with updated footprint
-    base_local_planner::Trajectory path = dp_->findBestPath(global_pose, robot_vel, drive_cmds);
-    ROS_ERROR("Best: %.2f, %.2f, %.2f, %.2f", path.xv_, path.yv_, path.thetav_, path.cost_);
-
-    /* For timing uncomment
-    gettimeofday(&end, NULL);
-    start_t = start.tv_sec + double(start.tv_usec) / 1e6;
-    end_t = end.tv_sec + double(end.tv_usec) / 1e6;
-    t_diff = end_t - start_t;
-    ROS_INFO("Cycle time: %.9f", t_diff);
-    */
-
-    //pass along drive commands
-    cmd_vel.linear.x = drive_cmds.pose.position.x;
-    cmd_vel.linear.y = drive_cmds.pose.position.y;
-    cmd_vel.angular.z = tf2::getYaw(drive_cmds.pose.orientation);
-
-    //if we cannot move... tell someone
-    std::vector<geometry_msgs::PoseStamped> local_plan;
-    if (path.cost_ < 0)
-    {
-      ROS_DEBUG_NAMED("jgl_dwa_local_planner", "The dwa local planner failed to find a valid plan, cost functions discarded all candidates. This can mean there is an obstacle too close to the robot.");
-      local_plan.clear();
-      publishLocalPlan(local_plan);
-      return false;
-    }
-
-    ROS_INFO("A valid velocity command of (%.2f, %.2f, %.2f) was found for this cycle.",
-                    cmd_vel.linear.x, cmd_vel.linear.y, cmd_vel.angular.z);
-
-    // Fill out the local plan
-    for (unsigned int i = 0; i < path.getPointsSize(); ++i)
-    {
-      double p_x, p_y, p_th;
-      path.getPoint(i, p_x, p_y, p_th);
-
-      geometry_msgs::PoseStamped p;
-      p.header.frame_id = costmap_ros_->getGlobalFrameID();
-      p.header.stamp = ros::Time::now();
-      p.pose.position.x = p_x;
-      p.pose.position.y = p_y;
-      p.pose.position.z = 0.0;
-      tf2::Quaternion q;
-      q.setRPY(0, 0, p_th);
-      tf2::convert(q, p.pose.orientation);
-      local_plan.push_back(p);
-    }
-
-    //publish information to the visualizer
-
-    publishLocalPlan(local_plan);
-    return true;
-  }
-
-  void DWAPlannerROS::cmd_pub(std::vector<geometry_msgs::PoseStamped> Point, geometry_msgs::PoseStamped pose, std::vector<double> &fov_speed)
+  void DWAPlannerROS::cmd_pub(std::vector<geometry_msgs::msg::PoseStamped> Point, geometry_msgs::msg::PoseStamped pose, std::vector<double> &fov_speed)
 {
 
     double length = comDistance(Point.back(), Point[0]); //直线总长度
@@ -1605,7 +1582,7 @@ bool DWAPlannerROS::isGoalReached()
     sp->speedComputeLine(d, length, fov_speed, 1);       //T型速度曲线计算每点速度值
 }
 
-bool DWAPlannerROS::comparePose(geometry_msgs::PoseStamped p,geometry_msgs::PoseStamped q)
+bool DWAPlannerROS::comparePose(geometry_msgs::msg::PoseStamped p,geometry_msgs::msg::PoseStamped q)
 {
   if (p.pose.position.x != q.pose.position.x)
   {
@@ -1634,22 +1611,22 @@ bool DWAPlannerROS::comparePose(geometry_msgs::PoseStamped p,geometry_msgs::Pose
   return true;
 }
 
-double DWAPlannerROS::comDistance(geometry_msgs::PoseStamped p, geometry_msgs::PoseStamped q)
+double DWAPlannerROS::comDistance(geometry_msgs::msg::PoseStamped p, geometry_msgs::msg::PoseStamped q)
 {
     double distance = sqrt((p.pose.position.x - q.pose.position.x) * (p.pose.position.x - q.pose.position.x) + (p.pose.position.y - q.pose.position.y) * (p.pose.position.y - q.pose.position.y));
     return distance;
 }
 
 
-//Eigen::Vector3d DWAPlannerROS::toEigenVector3d(const geometry_msgs::PoseStamped& pose) {
+//Eigen::Vector3d DWAPlannerROS::toEigenVector3d(const geometry_msgs::msg::PoseStamped& pose) {
 //    return Eigen::Vector3d(pose.pose.position.x, pose.pose.position.y, pose.pose.position.z);
 //}
 
-Eigen::Vector2d  DWAPlannerROS::toEigenVector2d(const geometry_msgs::PoseStamped& pose) {
+Eigen::Vector2d  DWAPlannerROS::toEigenVector2d(const geometry_msgs::msg::PoseStamped& pose) {
     return Eigen::Vector2d(pose.pose.position.x, pose.pose.position.y);
 }
 /*
-double DWAPlannerROS::distanceToLine(const geometry_msgs::PoseStamped& A, const geometry_msgs::PoseStamped& B, const geometry_msgs::PoseStamped& C) {
+double DWAPlannerROS::distanceToLine(const geometry_msgs::msg::PoseStamped& A, const geometry_msgs::msg::PoseStamped& B, const geometry_msgs::msg::PoseStamped& C) {
     Eigen::Vector2d A_vec = toEigenVector2d(A);
     Eigen::Vector2d B_vec = toEigenVector2d(B);
     Eigen::Vector2d C_vec = toEigenVector2d(C);
@@ -1675,7 +1652,7 @@ double DWAPlannerROS::distanceToLine(const geometry_msgs::PoseStamped& A, const 
 }
 */
 // 计算点C到直线AB的垂直距离，并保留正负号
-double DWAPlannerROS::signedDistanceToLine(const geometry_msgs::PoseStamped& A, const geometry_msgs::PoseStamped& B, const geometry_msgs::PoseStamped& C) {
+double DWAPlannerROS::signedDistanceToLine(const geometry_msgs::msg::PoseStamped& A, const geometry_msgs::msg::PoseStamped& B, const geometry_msgs::msg::PoseStamped& C) {
     Eigen::Vector2d A_vec = toEigenVector2d(A);
     Eigen::Vector2d B_vec = toEigenVector2d(B);
     Eigen::Vector2d C_vec = toEigenVector2d(C);
@@ -1702,7 +1679,7 @@ double DWAPlannerROS::signedDistanceToLine(const geometry_msgs::PoseStamped& A, 
 
 
 
-bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseStamped> linePath, geometry_msgs::Twist &cmd_vel)
+bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::msg::PoseStamped> linePath, geometry_msgs::msg::Twist &cmd_vel)
 {
   if (linePath.size() < 2)
   {
@@ -1712,13 +1689,13 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseS
   computeRelativePosition(current_pose_,linePath.back());
   dis2line = signedDistanceToLine(linePath.at(0),linePath.back(),current_pose_);
 
-  ROS_INFO_STREAM("distance to goal in xy :" << sqrt(Qtar.pose.position.x*Qtar.pose.position.x+Qtar.pose.position.y*Qtar.pose.position.y));
+  RCLCPP_INFO_STREAM(logger_, "distance to goal in xy :" << sqrt(Qtar.pose.position.x*Qtar.pose.position.x+Qtar.pose.position.y*Qtar.pose.position.y));
   std::cout<<"Qx err = "<<Qtar.pose.position.x<<"Qy err = "<<Qtar.pose.position.y<<"front dis="<<frontdis_X<<std::endl;
            // ss1<<"goal: x="<<linePath.back().pose.position.x<<" y="<<linePath.back().pose.position.y<<std::endl;
             //ss1<<"stop cmd at: x="<<current_pose_.pose.position.x<<" y="<<current_pose_.pose.position.y<<std::endl;
             //
 
-  for (int i = 0; i < linePath.size(); i++)
+  for (std::size_t i = 0; i < linePath.size(); i++)
   {
     if (linePath[i].pose.position.z == 2)
     {
@@ -1735,11 +1712,11 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseS
   VehicleState state(0, 0, 0, 0); //初始状态
  state.x=current_pose_.pose.position.x;
  state.y=current_pose_.pose.position.y;
- state.yaw=tf::getYaw(current_pose_.pose.orientation);
+ state.yaw=tf2::getYaw(current_pose_.pose.orientation);
 
 
   //计算机器人当前位置距离终点的角度误差
-  double yaw = tf::getYaw(linePath.back().pose.orientation);
+  double yaw = tf2::getYaw(linePath.back().pose.orientation);
   goal_yaw_err = yaw - state.yaw;      
   if (goal_yaw_err <= -PI)
   {
@@ -1749,7 +1726,7 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseS
   {
     goal_yaw_err = goal_yaw_err - 2 * PI;
   }
- // ROS_INFO_STREAM( "self rotation:" << goal_yaw_err );
+ // RCLCPP_INFO_STREAM(logger_,  "self rotation:" << goal_yaw_err );
 
   double terminal_yaw_command = 0.0;
   bool terminal_yaw_updated = false;
@@ -1767,7 +1744,7 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseS
   {
     angle_err = angle_err - 2 * PI;
   }
-  //ROS_INFO_STREAM("angle_err:"<<angle_err);
+  //RCLCPP_INFO_STREAM(logger_, "angle_err:"<<angle_err);
   //robot he moduan dian wucha 
   double angle_err2_over = angle_line -angle_Robot2End;
 //  double distance = sqrt((state.x-linePath.back().pose.position.x )*(state.x-linePath.back().pose.position.x)+((state.y-linePath.back().pose.position.y)*((state.y-linePath.back().pose.position.y)))
@@ -1800,11 +1777,11 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseS
     status = 5;
     state5counter = 8;
     terminal_yaw_controller_.reset();
-    ROS_INFO("Terminal position captured at %.3f m; switch to final-yaw preparation.",
+    RCLCPP_INFO(logger_, "Terminal position captured at %.3f m; switch to final-yaw preparation.",
              xy_error);
   }else if(status==1 && xy_error<=terminal_no_realign_distance){
     status = 0;
-    ROS_WARN("Suppress path realignment near goal at %.3f m.", xy_error);
+    RCLCPP_WARN(logger_, "Suppress path realignment near goal at %.3f m.", xy_error);
   }else if(status==1 && fabs(angle_err)<angleerr_staChange1){
     status=4;
     state4counter = 8;
@@ -1820,7 +1797,7 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseS
                                         &terminal_yaw_command))
     {
       status=3;
-      ROS_INFO("Terminal yaw stable; goal completed.");
+      RCLCPP_INFO(logger_, "Terminal yaw stable; goal completed.");
     }
   }
   else if((status==4) &&(state4counter<=0) ){
@@ -1830,7 +1807,7 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseS
     status = 2;
   }
 
-  ROS_INFO_STREAM("---------------------CONTROL STATUS:"<<status);
+  RCLCPP_INFO_STREAM(logger_, "---------------------CONTROL STATUS:"<<status);
 
 
 //状态0  纯追踪，状态1  原地旋转使得初始方向和直线方向大致一致，状态 2 原地旋转使得与终点方向一致
@@ -1846,7 +1823,7 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseS
     ind = ret.y;          //距离机器人当前位置前视距离的下标
     double alpha = ret.x; //角度误差
    
-    //ROS_INFO_STREAM( "alpha:" << alpha<<" PA"<<pid_PA<<" PB"<<pid_PB);
+    //RCLCPP_INFO_STREAM(logger_,  "alpha:" << alpha<<" PA"<<pid_PA<<" PB"<<pid_PB);
 
     w = 0.7 * alpha;
     mergew =  pid_PA*alpha + Qtar.pose.position.y*pid_PB;
@@ -1943,41 +1920,40 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseS
 }
 
 
-  bool DWAPlannerROS::computeVelocityCommands(geometry_msgs::Twist &cmd_vel)
+  geometry_msgs::msg::TwistStamped DWAPlannerROS::computeVelocityCommands(
+      const geometry_msgs::msg::PoseStamped &pose,
+      const geometry_msgs::msg::Twist &velocity,
+      nav2_core::GoalChecker *goal_checker)
   {
-    // dispatches to either dwa sampling control or stop and rotate control, depending on whether we have been close enough to goal
-
-// dispatches to either dwa sampling control or stop and rotate control, depending on whether we have been close enough to goal
-    if (!costmap_ros_->getRobotPose(current_pose_)) {
-        ROS_ERROR("Could not get robot pose");
-        return false;
-    }
-    std::vector<geometry_msgs::PoseStamped> transformed_plan;
-    if (!planner_util_.getLocalPlan(current_pose_, transformed_plan)) {
-        ROS_ERROR("Could not get local plan");
-        return false;
+    std::lock_guard<std::mutex> lock(control_parameter_mutex_);
+    current_pose_ = pose;
+    current_velocity_ = velocity;
+    goal_checker_ = goal_checker;
+    if (global_plan_.poses.empty())
+    {
+      throw std::runtime_error("DWAPlannerROS has no plan");
     }
 
-    //if the global plan passed in is empty... we won't do anything
-    if (transformed_plan.empty()) {
-        ROS_WARN_NAMED("mxb_dwa_local_planner", "Received an empty transformed plan.");
-        return false;
-    }
+    geometry_msgs::msg::TwistStamped command;
+    command.header.stamp = clock_->now();
+    command.header.frame_id = costmap_ros_->getBaseFrameID();
+    auto &cmd_vel = command.twist;
+    std::vector<geometry_msgs::msg::PoseStamped> plan = global_plan_.poses;
+
     if (useLine>0) {
-      begin=ros::Time::now();
-    //  ROS_INFO("pure pursuit!!!");
-      publishGlobalPlan(transformed_plan);
+      begin = clock_->now();
+      publishGlobalPlan(plan);
       consumeReferencePathJob();
       maybeStartReferencePathJob();
       bool reference_hard_failure = false;
       if (computeReferenceVelocityCommands(cmd_vel, reference_hard_failure))
       {
-        return true;
+        return command;
       }
       if (reference_hard_failure)
       {
         stopCmd(cmd_vel);
-        return false;
+        throw std::runtime_error("reference-path generation failed");
       }
       // Only the legacy straight-line fallback keeps the original hard-stop
       // check. Active reference paths were already handled above with staged
@@ -1986,131 +1962,76 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseS
       {
         path_follower_.reset();
         stopCmd(cmd_vel);
-        ROS_WARN_THROTTLE(
-            1.0,
+        RCLCPP_WARN_THROTTLE(
+            logger_, *clock_, 1000,
             "Fixed route: obstacle detected on the locked legacy path; wait in place until it clears.");
-        return true;
+        return command;
       }
-      return lineComputeVelocityCommands(linePath, cmd_vel);
+      if (!lineComputeVelocityCommands(linePath, cmd_vel))
+      {
+        throw std::runtime_error("legacy line controller failed");
+      }
+      return command;
     }
     //modify to back up
-    else if(useLine<0&&begin+ros::Duration(back_distance)>ros::Time::now())
+    if (useLine < 0 &&
+        begin + rclcpp::Duration::from_seconds(back_distance) > clock_->now())
     {
-        ROS_INFO("backing up");
+        RCLCPP_INFO(logger_, "backing up");
         cmd_vel.linear.x=-0.1;
         cmd_vel.linear.y=0;
         cmd_vel.angular.z=0;
-        return true;
+        return command;
     }
 
-    ROS_INFO("DWA!!!!" );
-    ROS_DEBUG_NAMED("jgl_dwa_local_planner", "Received a transformed plan with %zu points.", transformed_plan.size());
+    RCLCPP_DEBUG(logger_, "Delegating %zu-point sampling plan to Nav2 DWB", plan.size());
+    return dwb_planner_->computeVelocityCommands(pose, velocity, goal_checker);
+  }
 
-    // pose : current_pose_
-    // plan : transformed_plan
-    // add by jgl
-    float directionchange = base_plan_direction_check(transformed_plan, current_pose_);
-    directionchange=directionchange*180/PI;
-
-    // update plan in dwa_planner even if we just stop and rotate, to allow checkTrajectory
-    dp_->updatePlanAndLocalCosts(current_pose_, transformed_plan, costmap_ros_->getRobotFootprint());
-
-    if (latchedStopRotateController_.isPositionReached(&planner_util_, current_pose_))
+  void DWAPlannerROS::setSpeedLimit(
+      const double &speed_limit, const bool &percentage)
+  {
+    std::lock_guard<std::mutex> lock(control_parameter_mutex_);
+    dwb_planner_->setSpeedLimit(speed_limit, percentage);
+    if (!sp)
     {
-      //publish an empty plan because we've reached our goal position
-      std::vector<geometry_msgs::PoseStamped> local_plan;
-      std::vector<geometry_msgs::PoseStamped> transformed_plan;
-      publishGlobalPlan(transformed_plan);
-      publishLocalPlan(local_plan);
-      base_local_planner::LocalPlannerLimits limits = planner_util_.getCurrentLimits();
-      return latchedStopRotateController_.computeVelocityCommandsStopRotate(
-          cmd_vel,
-          limits.getAccLimits(),
-          dp_->getSimPeriod(),
-          &planner_util_,
-          odom_helper_,
-          current_pose_,
-          boost::bind(&DWAPlanner::checkTrajectory, dp_, _1, _2, _3));
-      is_start_rotating = false;
+      return;
+    }
+    if (speed_limit <= 0.0)
+    {
+      sp->vmax = max_vel_x;
+    }
+    else if (percentage)
+    {
+      sp->vmax = max_vel_x * std::clamp(speed_limit, 0.0, 100.0) / 100.0;
     }
     else
     {
-      //dwa successful
-      bool isOk = dwaComputeVelocityCommands(current_pose_, cmd_vel);
-      ROS_INFO_STREAM("directionchange:"<<directionchange);
-      //add by jgl 2021 01 27
-
-      std::cout<<"cmd_vel for dwa:"<<isOk<<"  "<<cmd_vel.linear.x <<" z="<<cmd_vel.angular.z<<std::endl;
-
-      //   double posediff=comDistance(current_pose_,firstPose);
-      //   ROS_INFO_STREAM("posediff:"<<posediff);
-
-      // if (posediff<0.1 && (abs(directionchange) > startrotangle) && (!is_start_rotating))
-      // {
-      //   is_start_rotating = true;
-      // }
-
-      //   if ((abs(directionchange) < stoprotangle) && (is_start_rotating))
-      //   {
-      //       is_start_rotating = false;
-      //       ROS_WARN_NAMED("jgl_dwa_local_planner", "the angle dis=%f DWA planner start rotation finished", directionchange);
-
-      //   }
-
-      //   if (is_start_rotating)
-      //   {
-      //       ROS_WARN_NAMED("jgl_dwa_local_planner", "the angle dis=%f DWA planner start rotation.", directionchange);
-      //       cmd_vel.linear.x = 0;
-      //       cmd_vel.linear.y = 0;
-      //       cmd_vel.angular.z = 0.4 * directionchange / (abs(directionchange) + 0.001);
-      //   }
-
-      if (isOk)
-      {
-        publishGlobalPlan(transformed_plan);
-      }
-      else
-      {
-        ROS_WARN_NAMED("jgl_dwa_local_planner", "DWA planner failed to produce path.");
-        std::vector<geometry_msgs::PoseStamped> empty_plan;
-        publishGlobalPlan(empty_plan);
-      }
-
-
-      return isOk;
+      sp->vmax = std::min(max_vel_x, speed_limit);
     }
-
-    ROS_ERROR("DWA control dispatch reached an unexpected state.");
-    stopCmd(cmd_vel);
-    return false;
   }
 
-  float DWAPlannerROS::base_plan_direction_check(const std::vector<geometry_msgs::PoseStamped> &orig_global_plan,
-                                                 geometry_msgs::PoseStamped &robot_pose_)
+  float DWAPlannerROS::base_plan_direction_check(const std::vector<geometry_msgs::msg::PoseStamped> &orig_global_plan,
+                                                 geometry_msgs::msg::PoseStamped &robot_pose_)
   {
     if (orig_global_plan.size() < 10)
     {
       return 0;
     }
 
-    geometry_msgs::PoseStamped planposes[10];
-    geometry_msgs::Quaternion robotdirection = robot_pose_.pose.orientation;
-    geometry_msgs::Point robotposition = robot_pose_.pose.position;
+    geometry_msgs::msg::Point robotposition = robot_pose_.pose.position;
 
 
     double robotangle = tf2::getYaw(robot_pose_.pose.orientation);                    //通过赋值方式就可以得到需要的绕z轴偏转角度了
-                                                          // ROS_ERROR("the robot angle is %f",robotangle);
+                                                          // RCLCPP_ERROR(logger_, "the robot angle is %f",robotangle);
 
-    geometry_msgs::Quaternion targetOrientation = orig_global_plan[9].pose.orientation;
-    geometry_msgs::Point targetPosition = orig_global_plan[9].pose.position;
-
-    double d = sqrt((robotposition.x - targetPosition.x) * (robotposition.x - targetPosition.x) + (robotposition.y - targetPosition.y) * (robotposition.y - targetPosition.y));
+    geometry_msgs::msg::Point targetPosition = orig_global_plan[9].pose.position;
 
 
         double direction_angle =
             atan2(targetPosition.y - robotposition.y, targetPosition.x - robotposition.x) ;
-        // ROS_ERROR("the robot pose %f,%f, planpose is %f,%f",robotposition.x,robotposition.y,targetPosition.x,targetPosition.y);
-        //  ROS_ERROR("the robot planned angle is %f, distance = %f",direction_angle,d);
+        // RCLCPP_ERROR(logger_, "the robot pose %f,%f, planpose is %f,%f",robotposition.x,robotposition.y,targetPosition.x,targetPosition.y);
+        //  RCLCPP_ERROR(logger_, "the robot planned angle is %f, distance = %f",direction_angle,d);
 
         double diffangle = direction_angle - robotangle;
         
@@ -2123,7 +2044,7 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseS
         diffangle = diffangle - 2*PI;
         }
 
-        //  ROS_ERROR("the change angle is %f",diffangle);
+        //  RCLCPP_ERROR(logger_, "the change angle is %f",diffangle);
 
         return (float)diffangle;
 

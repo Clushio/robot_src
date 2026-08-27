@@ -2,12 +2,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <jgl_dwa_local_planner/parameter_utils.h>
 
 namespace jgl_dwa_local_planner
 {
 
 ReferencePathManager::ReferencePathManager()
-    : have_reference_path_(false),
+    : clock_(std::make_shared<rclcpp::Clock>(RCL_SYSTEM_TIME)),
+      have_reference_path_(false),
       topology_changed_(false),
       topology_version_(0),
       path_version_(0),
@@ -17,30 +19,35 @@ ReferencePathManager::ReferencePathManager()
 {
 }
 
-void ReferencePathManager::initialize(ros::NodeHandle &node_nh,
-                                      ros::NodeHandle &private_nh)
+void ReferencePathManager::initialize(
+    const rclcpp_lifecycle::LifecycleNode::SharedPtr &node,
+    const std::string &parameter_prefix)
 {
-  private_nh.param("path_regenerate_cooldown",
-                   path_regenerate_cooldown_, 1.0);
+  clock_ = node->get_clock();
+  logger_ = node->get_logger();
+  path_regenerate_cooldown_ = declareOrGet(
+      node, parameter_prefix + ".path_regenerate_cooldown", 1.0);
 
   path_regenerate_cooldown_ = std::max(0.0, path_regenerate_cooldown_);
 
-  topology_sub_ = node_nh.subscribe("/topology_plan", 1,
-                                    &ReferencePathManager::topologyCallback, this);
+  topology_sub_ = node->create_subscription<nav_msgs::msg::Path>(
+      "/topology_plan", rclcpp::QoS(1),
+      std::bind(&ReferencePathManager::topologyCallback, this,
+                std::placeholders::_1));
 }
 
-void ReferencePathManager::topologyCallback(const nav_msgs::Path::ConstPtr &msg)
+void ReferencePathManager::topologyCallback(const nav_msgs::msg::Path::SharedPtr msg)
 {
   boost::mutex::scoped_lock lock(mutex_);
   const bool repeated_delivery =
       sameTopology(topo_waypoints_, msg->poses) &&
-      !msg->header.stamp.isZero() &&
-      msg->header.stamp == last_topology_stamp_;
+      rclcpp::Time(msg->header.stamp).nanoseconds() != 0 &&
+      rclcpp::Time(msg->header.stamp) == last_topology_stamp_;
   if (repeated_delivery)
   {
     return;
   }
-  last_topology_stamp_ = msg->header.stamp;
+  last_topology_stamp_ = rclcpp::Time(msg->header.stamp);
 
   if (msg->poses.size() < 2)
   {
@@ -59,8 +66,9 @@ void ReferencePathManager::topologyCallback(const nav_msgs::Path::ConstPtr &msg)
   topology_changed_ = true;
   current_path_index_ = 0;
   topology_version_++;
-  ROS_INFO("JGL reference path: received topology path version %d with %zu waypoints.",
-           topology_version_, topo_waypoints_.size());
+  RCLCPP_INFO(logger_,
+              "JGL reference path: received topology path version %d with %zu waypoints.",
+              topology_version_, topo_waypoints_.size());
 }
 
 bool ReferencePathManager::hasWaypoints() const
@@ -69,7 +77,7 @@ bool ReferencePathManager::hasWaypoints() const
   return topo_waypoints_.size() >= 2;
 }
 
-std::vector<geometry_msgs::PoseStamped> ReferencePathManager::waypoints() const
+std::vector<geometry_msgs::msg::PoseStamped> ReferencePathManager::waypoints() const
 {
   boost::mutex::scoped_lock lock(mutex_);
   return topo_waypoints_;
@@ -87,13 +95,13 @@ bool ReferencePathManager::hasValidPath() const
   return have_reference_path_ && reference_path_.poses.size() >= 2;
 }
 
-nav_msgs::Path ReferencePathManager::referencePath() const
+nav_msgs::msg::Path ReferencePathManager::referencePath() const
 {
   boost::mutex::scoped_lock lock(mutex_);
   return reference_path_;
 }
 
-void ReferencePathManager::setReferencePath(const nav_msgs::Path &path)
+void ReferencePathManager::setReferencePath(const nav_msgs::msg::Path &path)
 {
   boost::mutex::scoped_lock lock(mutex_);
   reference_path_ = path;
@@ -152,9 +160,9 @@ bool ReferencePathManager::needRegenerate() const
     return false;
   }
 
-  const ros::Time now = ros::Time::now();
-  if (!last_regenerate_attempt_.isZero() &&
-      (now - last_regenerate_attempt_).toSec() < path_regenerate_cooldown_)
+  const rclcpp::Time now = clock_->now();
+  if (last_regenerate_attempt_.nanoseconds() != 0 &&
+      (now - last_regenerate_attempt_).seconds() < path_regenerate_cooldown_)
   {
     return false;
   }
@@ -169,10 +177,10 @@ bool ReferencePathManager::needRegenerate() const
 void ReferencePathManager::markRegenerateAttempt()
 {
   boost::mutex::scoped_lock lock(mutex_);
-  last_regenerate_attempt_ = ros::Time::now();
+  last_regenerate_attempt_ = clock_->now();
 }
 
-int ReferencePathManager::goalIndex(const geometry_msgs::PoseStamped &goal) const
+int ReferencePathManager::goalIndex(const geometry_msgs::msg::PoseStamped &goal) const
 {
   boost::mutex::scoped_lock lock(mutex_);
   if (topo_waypoints_.empty())
@@ -194,7 +202,7 @@ int ReferencePathManager::goalIndex(const geometry_msgs::PoseStamped &goal) cons
   return best_distance <= waypoint_match_tolerance_ ? best_index : -1;
 }
 
-bool ReferencePathManager::isMiddleGoal(const geometry_msgs::PoseStamped &goal,
+bool ReferencePathManager::isMiddleGoal(const geometry_msgs::msg::PoseStamped &goal,
                                         int *goal_index) const
 {
   const int index = goalIndex(goal);
@@ -215,8 +223,8 @@ bool ReferencePathManager::isTerminalReferenceGoal(int goal_index) const
 }
 
 bool ReferencePathManager::referenceProgressReached(
-    const geometry_msgs::PoseStamped &goal,
-    const geometry_msgs::PoseStamped &current_pose,
+    const geometry_msgs::msg::PoseStamped &goal,
+    const geometry_msgs::msg::PoseStamped &current_pose,
     double pass_distance,
     unsigned int *goal_path_index,
     double *remaining_reference_distance,
@@ -280,7 +288,7 @@ bool ReferencePathManager::referenceProgressReached(
 }
 
 double ReferencePathManager::distanceToReference(
-    const geometry_msgs::PoseStamped &pose,
+    const geometry_msgs::msg::PoseStamped &pose,
     unsigned int *nearest_index) const
 {
   if (nearest_index != NULL)
@@ -314,8 +322,8 @@ double ReferencePathManager::distanceToReference(
 }
 
 bool ReferencePathManager::sameTopology(
-    const std::vector<geometry_msgs::PoseStamped> &a,
-    const std::vector<geometry_msgs::PoseStamped> &b) const
+    const std::vector<geometry_msgs::msg::PoseStamped> &a,
+    const std::vector<geometry_msgs::msg::PoseStamped> &b) const
 {
   if (a.size() != b.size())
   {
@@ -332,8 +340,8 @@ bool ReferencePathManager::sameTopology(
 }
 
 double ReferencePathManager::poseDistance(
-    const geometry_msgs::PoseStamped &a,
-    const geometry_msgs::PoseStamped &b) const
+    const geometry_msgs::msg::PoseStamped &a,
+    const geometry_msgs::msg::PoseStamped &b) const
 {
   return std::hypot(a.pose.position.x - b.pose.position.x,
                     a.pose.position.y - b.pose.position.y);

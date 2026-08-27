@@ -6,16 +6,16 @@
 #include <string>
 #include <unordered_map>
 
-#include <costmap_2d/layer.h>
-#include <costmap_2d/layered_costmap.h>
-#include <ros/ros.h>
-#include <sensor_msgs/PointCloud2.h>
+#include <nav2_costmap_2d/layer.hpp>
+#include <nav2_costmap_2d/layered_costmap.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
 #include <tf2/LinearMath/Transform.h>
 
 namespace jgl_dwa_local_planner
 {
 
-class DecayObstacleLayer : public costmap_2d::Layer
+class DecayObstacleLayer : public nav2_costmap_2d::Layer
 {
 public:
   DecayObstacleLayer();
@@ -23,19 +23,20 @@ public:
   void onInitialize() override;
   void updateBounds(double robot_x, double robot_y, double robot_yaw,
                     double* min_x, double* min_y, double* max_x, double* max_y) override;
-  void updateCosts(costmap_2d::Costmap2D& master_grid, int min_i, int min_j,
+  void updateCosts(nav2_costmap_2d::Costmap2D& master_grid, int min_i, int min_j,
                    int max_i, int max_j) override;
   void matchSize() override;
+  void reset() override;
+  bool isClearable() override { return true; }
 
 private:
-  void cloudCallback(const sensor_msgs::PointCloud2ConstPtr& cloud_msg);
+  void cloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_msg);
   uint64_t worldKey(double world_x, double world_y) const;
   void keyToWorld(uint64_t key, double* world_x, double* world_y) const;
-  void pruneOldCells(const ros::Time& now, const costmap_2d::Costmap2D& master_grid);
+  void pruneOldCells(const rclcpp::Time& now, const nav2_costmap_2d::Costmap2D& master_grid);
 
-  ros::NodeHandle nh_;
-  ros::Subscriber cloud_sub_;
-  std::unordered_map<uint64_t, ros::Time> last_seen_;
+  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
+  std::unordered_map<uint64_t, rclcpp::Time> last_seen_;
   mutable std::mutex mutex_;
 
   std::string input_topic_;

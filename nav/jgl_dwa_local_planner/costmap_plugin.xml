@@ -1,7 +1,7 @@
-<library path="lib/libjgl_dwa_local_planner">
+<library path="jgl_dwa_local_planner">
   <class name="jgl_dwa_local_planner/DecayObstacleLayer"
          type="jgl_dwa_local_planner::DecayObstacleLayer"
-         base_class_type="costmap_2d::Layer">
+         base_class_type="nav2_costmap_2d::Layer">
     <description>
       Clears stale point-cloud obstacle cells after a configurable timeout.
     </description>
@@ -9,7 +9,7 @@
 
   <class name="jgl_dwa_local_planner/BlindClearLayer"
          type="jgl_dwa_local_planner::BlindClearLayer"
-         base_class_type="costmap_2d::Layer">
+         base_class_type="nav2_costmap_2d::Layer">
     <description>
       Clears local costmap cells outside the configured sensor field of view.
     </description>

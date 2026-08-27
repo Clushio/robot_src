@@ -1,120 +1,98 @@
-DWAPlannerROS:
+controller_server:
+  ros__parameters:
+    controller_frequency: 10.0
+    controller_plugins: [FollowPath]
 
+    FollowPath:
+      plugin: jgl_dwa_local_planner/DWAPlannerROS
 
-  brake_distance: 1.0
-  lfc: 0.3
-  forwNum: 0.1
+      # Project-specific straight-line, topology and B-spline behavior.
+      brake_distance: 1.0
+      lfc: 0.3
+      forwNum: 0.1
+      pid_PA: 0.6
+      pid_PB: 0.4
+      frontdis_X: 0.0
+      back_distance: 2.5
+      jgl_rot_start_angle: 30.0
+      jgl_rot_stop_angle: 15.0
+      enable_bspline_reference_path: true
+      fixed_route_mode: false
+      reference_curve_type: bspline
+      bspline_sample_resolution: 0.10
+      bspline_control_point_spacing: 0.40
+      bspline_opt_iterations: 60
+      bspline_weight_smooth: 1.0
+      bspline_weight_obstacle: 2.0
+      bspline_weight_topo: 0.6
+      bspline_weight_curvature: 1.0
+      safe_distance: 0.10
+      reference_occupied_threshold: 98
+      max_deviation_from_topo: 0.50
+      max_curvature: 2.10
+      min_turn_radius: 0.476
+      tracking_max_curvature: 1.90
+      reference_fallback_boundary_distance: 0.15
+      reference_middle_pass_distance: 0.25
+      reference_terminal_xy_tolerance: 0.08
+      lookahead_distance: 0.50
+      v_min: 0.04
+      v_max: 0.20
+      end_slow_distance: 0.80
+      obstacle_slowdown_distance: 1.00
+      obstacle_stop_distance: 0.70
+      obstacle_wait_time: 10.0
+      path_deviation_replan_threshold: 0.60
+      path_regenerate_cooldown: 1.0
+      k_curve: 1.0
+      curvature_filter_tau: 0.25
+      max_curvature_rate: 1.5
+      curvature_deadband: 0.02
+      control_period: 0.10
+      yaw_goal_tolerance: 0.025
+      xy_goal_tolerance: 0.03
+      terminal_yaw_tolerance: 0.04
+      terminal_yaw_kp: 1.2
+      terminal_yaw_max_speed: 0.25
+      terminal_yaw_min_speed: 0.06
+      terminal_yaw_stable_cycles: 3
 
-  pid_PA: 0.6
-  pid_PB: 0.4
-
-  frontdis_X: 0.00
-
-  enable_bspline_reference_path: true
-  reference_curve_type: "bspline"  # "bspline" or "cubic"
-  bspline_sample_resolution: 0.10
-  bspline_control_point_spacing: 0.40
-  bspline_opt_iterations: 60
-  bspline_weight_smooth: 1.0
-  bspline_weight_obstacle: 2.0
-  bspline_weight_topo: 0.6
-  bspline_weight_curvature: 1.0
-  safe_distance: 0.10
-  reference_occupied_threshold: 98
-  max_deviation_from_topo: 0.50
-  max_curvature: 2.10
-  min_turn_radius: 0.476
-  # B-spline and legacy forward tracking stay below the Ranger Mini V2
-  # dual-Ackermann/spinning boundary. This is intentionally separate from
-  # max_curvature used by path generation.
-  tracking_max_curvature: 1.90
-  reference_fallback_boundary_distance: 0.15
-  # Ordinary B-spline waypoints are progress markers and remain smooth
-  # pass-through points. The final B-spline waypoint is completed separately
-  # by the real map->base_link XY distance below.
-  reference_middle_pass_distance: 0.25
-  reference_terminal_xy_tolerance: 0.08
-  lookahead_distance: 0.50
-  v_min: 0.04
-  v_max: 0.20
-  # Applied to ordinary path endings only. The terminal B-spline handoff point
-  # keeps normal curvature-limited speed until its 0.08 m XY tolerance.
-  end_slow_distance: 0.80
-  # Runtime B-spline obstacle handling.  Arc-length distance to the first
-  # blocked reference-path sample selects 100/75/50/25/0% candidate speed.
-  # Collision Monitor remains the final footprint-based safety authority.
-  obstacle_slowdown_distance: 1.00
-  obstacle_stop_distance: 0.70
-  obstacle_wait_time: 10.0
-  path_deviation_replan_threshold: 0.60
-  path_regenerate_cooldown: 1.0
-  k_curve: 1.0
-  curvature_filter_tau: 0.25
-  max_curvature_rate: 1.5
-  curvature_deadband: 0.02
-  control_period: 0.10
-
-
-# Robot Configuration Parameters - Kobuki
-  max_vel_x: 0.2  # X2bot最大线速度0.85m/s
-  min_vel_x: 0.05  #back speed
-
-  max_vel_y: 0.0  # diff drive robot
-  min_vel_y: 0.0  # diff drive robot
-
-  max_vel_trans: 0.50 # X2bot最大线速度0.85m/s
-  min_vel_trans: 0.01 # this is the min trans velocity when there is negligible rotational velocity
-  trans_stopped_vel: 0.02
-
-  # Warning!
-  #   do not set min_trans_vel to 0.0 otherwise dwa will always think translational velocities
-  #   are non-negligible and small in place rotational velocities will be created.
-
-  max_vel_theta: 4  # x2bot最大角速度470度/s，即8.2rad/s
-  min_vel_theta: 0.1  # this is the min angular velocity when there is negligible translational velocity
-  theta_stopped_vel: 0.05
-
-  acc_lim_x: 3 # maximum is theoretically 2.0, but we
-  acc_lim_theta: 4.2
-  acc_lim_y: 0.0      # diff drive robot
-
-# Goal Tolerance Parameters
-  yaw_goal_tolerance: 0.025  # 0.05
-  xy_goal_tolerance: 0.03 # 0.10
-  # Fixed-route endpoints use a gentler final-yaw controller and require
-  # consecutive in-tolerance samples before move_base reports success.
-  terminal_yaw_tolerance: 0.04
-  terminal_yaw_kp: 1.2
-  terminal_yaw_max_speed: 0.25
-  terminal_yaw_min_speed: 0.06
-  terminal_yaw_stable_cycles: 3
-  # latch_xy_goal_tolerance: false
-
-# Forward Simulation Parameters
-  sim_time: 1.7       # 1.7
-  vx_samples: 6      # 3
-  vy_samples: 1       # diff drive robot, there is only one sample
-  vtheta_samples: 20  # 20
-  controller_frequency: 10.
-
-# Trajectory Scoring Parameters
-  path_distance_bias: 55      # 32.0   - weighting for how much it should stick to the global path plan
-  goal_distance_bias: 20      # 24.0   - wighting for how much it should attempt to reach its goal
-  occdist_scale: 0.05          # 0.01   - weighting for how much the controller should avoid obstacles
-  forward_point_distance: 0.3 # 0.325  - how far along to place an additional scoring point
-  stop_time_buffer: 0.2         # 0.2    - amount of time a robot must stop in before colliding for a valid traj.
-  scaling_speed: 0.25           # 0.25   - absolute velocity at which to start scaling the robot's footprint
-  max_scaling_factor: 0.2       # 0.2    - how much to scale the robot's footprint when at speed.
-
-# Oscillation Prevention Parameters
-  oscillation_reset_dist: 0.03  # 0.05   - how far to travel before resetting oscillation flags
-
-# Debugging
-  publish_traj_pc : true
-  publish_cost_grid_pc: true
-  global_frame_id: odom
-
-
-# Differential-drive robot configuration - necessary?
-#  holonomic_rob:w
-# ot: false
+      # ROS1 base_local_planner has no Humble port. The sampling branch uses
+      # Nav2 DWB with the closest parameter and critic mapping.
+      trajectory_generator_name: dwb_plugins::StandardTrajectoryGenerator
+      critics: [RotateToGoal, Oscillation, BaseObstacle, GoalAlign,
+                PathAlign, PathDist, GoalDist]
+      min_vel_x: 0.05
+      min_vel_y: 0.0
+      max_vel_x: 0.20
+      max_vel_y: 0.0
+      max_vel_theta: 4.0
+      min_speed_xy: 0.01
+      max_speed_xy: 0.50
+      min_speed_theta: 0.10
+      acc_lim_x: 3.0
+      acc_lim_y: 0.0
+      acc_lim_theta: 4.2
+      decel_lim_x: -3.0
+      decel_lim_y: 0.0
+      decel_lim_theta: -4.2
+      vx_samples: 6
+      vy_samples: 1
+      vtheta_samples: 20
+      sim_time: 1.7
+      linear_granularity: 0.025
+      angular_granularity: 0.10
+      transform_tolerance: 0.2
+      short_circuit_trajectory_evaluation: true
+      stateful: true
+      Oscillation.oscillation_reset_dist: 0.03
+      BaseObstacle.scale: 0.05
+      PathAlign.scale: 55.0
+      PathAlign.forward_point_distance: 0.30
+      GoalAlign.scale: 20.0
+      GoalAlign.forward_point_distance: 0.30
+      PathDist.scale: 55.0
+      GoalDist.scale: 20.0
+      RotateToGoal.scale: 32.0
+      RotateToGoal.slowing_factor: 5.0
+      RotateToGoal.lookahead_time: -1.0

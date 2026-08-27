@@ -10,14 +10,14 @@
 #include <jgl_dwa_local_planner/trajectory_generator.h>
 
 #include <tf2/LinearMath/Quaternion.h>
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 namespace
 {
 
-geometry_msgs::PoseStamped makePose(double x, double y, double yaw = 0.0)
+geometry_msgs::msg::PoseStamped makePose(double x, double y, double yaw = 0.0)
 {
-  geometry_msgs::PoseStamped pose;
+  geometry_msgs::msg::PoseStamped pose;
   pose.header.frame_id = "map";
   pose.pose.position.x = x;
   pose.pose.position.y = y;
@@ -29,13 +29,13 @@ geometry_msgs::PoseStamped makePose(double x, double y, double yaw = 0.0)
   return pose;
 }
 
-nav_msgs::OccupancyGrid makeFreeGrid(double origin_x,
+nav_msgs::msg::OccupancyGrid makeFreeGrid(double origin_x,
                                      double origin_y,
                                      double resolution,
                                      unsigned int width,
                                      unsigned int height)
 {
-  nav_msgs::OccupancyGrid grid;
+  nav_msgs::msg::OccupancyGrid grid;
   grid.header.frame_id = "map";
   grid.info.resolution = resolution;
   grid.info.width = width;
@@ -47,7 +47,7 @@ nav_msgs::OccupancyGrid makeFreeGrid(double origin_x,
   return grid;
 }
 
-void addHorizontalWall(nav_msgs::OccupancyGrid &grid,
+void addHorizontalWall(nav_msgs::msg::OccupancyGrid &grid,
                        double y,
                        double thickness)
 {
@@ -67,7 +67,7 @@ void addHorizontalWall(nav_msgs::OccupancyGrid &grid,
   }
 }
 
-double minYInXRange(const nav_msgs::Path &path, double min_x, double max_x)
+double minYInXRange(const nav_msgs::msg::Path &path, double min_x, double max_x)
 {
   double best = std::numeric_limits<double>::infinity();
   for (unsigned int i = 0; i < path.poses.size(); ++i)
@@ -85,20 +85,19 @@ double minYInXRange(const nav_msgs::Path &path, double min_x, double max_x)
 
 TEST(TrajectoryGeneratorBspline, StraightLineUsesSecondToPenultimateEndpoints)
 {
-  ros::Time::init();
   jgl_dwa_local_planner::TrajectoryGenerator generator;
   generator.setGlobalCostmapForTesting(makeFreeGrid(-1.0, -1.0, 0.05, 100, 40));
   generator.setReferenceLimitsForTesting(0.05, 0.10, 0.30, 2.0, 0.48);
   generator.setBsplineOptimizationForTesting(0.30, 60, 1.0, 2.0, 0.6, 1.0);
 
-  std::vector<geometry_msgs::PoseStamped> waypoints;
+  std::vector<geometry_msgs::msg::PoseStamped> waypoints;
   waypoints.push_back(makePose(0.0, 0.0));
   waypoints.push_back(makePose(1.0, 0.0));
   waypoints.push_back(makePose(2.0, 0.0));
   waypoints.push_back(makePose(3.0, 0.0));
   waypoints.push_back(makePose(4.0, 0.0));
 
-  nav_msgs::Path path;
+  nav_msgs::msg::Path path;
   ASSERT_TRUE(generator.generate(waypoints, path));
   EXPECT_EQ(jgl_dwa_local_planner::TrajectoryGenerator::PATH_MODE_BSPLINE,
             generator.lastPathMode());
@@ -119,8 +118,7 @@ TEST(TrajectoryGeneratorBspline, StraightLineUsesSecondToPenultimateEndpoints)
 
 TEST(TrajectoryGeneratorBspline, WallNearTopoPushesMiddleAway)
 {
-  ros::Time::init();
-  nav_msgs::OccupancyGrid grid = makeFreeGrid(-0.5, -0.2, 0.05, 70, 40);
+  nav_msgs::msg::OccupancyGrid grid = makeFreeGrid(-0.5, -0.2, 0.05, 70, 40);
   addHorizontalWall(grid, 0.0, 0.06);
 
   jgl_dwa_local_planner::TrajectoryGenerator generator;
@@ -128,14 +126,14 @@ TEST(TrajectoryGeneratorBspline, WallNearTopoPushesMiddleAway)
   generator.setReferenceLimitsForTesting(0.05, 0.20, 0.50, 4.0, 0.0);
   generator.setBsplineOptimizationForTesting(0.25, 120, 0.8, 8.0, 0.15, 0.5);
 
-  std::vector<geometry_msgs::PoseStamped> waypoints;
+  std::vector<geometry_msgs::msg::PoseStamped> waypoints;
   waypoints.push_back(makePose(-0.4, 0.40));
   waypoints.push_back(makePose(0.0, 0.40));
   waypoints.push_back(makePose(1.0, 0.22));
   waypoints.push_back(makePose(2.0, 0.40));
   waypoints.push_back(makePose(2.4, 0.40));
 
-  nav_msgs::Path path;
+  nav_msgs::msg::Path path;
   ASSERT_TRUE(generator.generate(waypoints, path));
   EXPECT_EQ(jgl_dwa_local_planner::TrajectoryGenerator::PATH_MODE_BSPLINE,
             generator.lastPathMode());
@@ -147,20 +145,19 @@ TEST(TrajectoryGeneratorBspline, WallNearTopoPushesMiddleAway)
 
 TEST(TrajectoryGeneratorBspline, TooSharpFullBsplineFallsBackToChunkedBspline)
 {
-  ros::Time::init();
   jgl_dwa_local_planner::TrajectoryGenerator generator;
   generator.setGlobalCostmapForTesting(makeFreeGrid(-1.0, -1.0, 0.05, 60, 60));
   generator.setReferenceLimitsForTesting(0.05, 0.0, 1.0, 1.0, 1.0);
   generator.setBsplineOptimizationForTesting(0.40, 80, 1.0, 0.0, 0.4, 1.0);
 
-  std::vector<geometry_msgs::PoseStamped> waypoints;
+  std::vector<geometry_msgs::msg::PoseStamped> waypoints;
   waypoints.push_back(makePose(0.0, 0.0));
   waypoints.push_back(makePose(0.4, 0.0));
   waypoints.push_back(makePose(0.4, 0.4));
   waypoints.push_back(makePose(0.8, 0.4));
   waypoints.push_back(makePose(1.2, 0.4));
 
-  nav_msgs::Path path;
+  nav_msgs::msg::Path path;
   ASSERT_TRUE(generator.generate(waypoints, path));
   EXPECT_EQ(jgl_dwa_local_planner::TrajectoryGenerator::PATH_MODE_POLYLINE_FALLBACK,
             generator.lastPathMode());
@@ -177,18 +174,17 @@ TEST(TrajectoryGeneratorBspline, TooSharpFullBsplineFallsBackToChunkedBspline)
 
 TEST(TrajectoryGeneratorBspline, TwoCurveWaypointReferenceMarksSecondToThirdSegmentPolyline)
 {
-  ros::Time::init();
   jgl_dwa_local_planner::TrajectoryGenerator generator;
   generator.setGlobalCostmapForTesting(makeFreeGrid(-1.0, -1.0, 0.05, 60, 60));
   generator.setReferenceLimitsForTesting(0.05, 0.0, 1.0, 2.0, 0.48);
 
-  std::vector<geometry_msgs::PoseStamped> waypoints;
+  std::vector<geometry_msgs::msg::PoseStamped> waypoints;
   waypoints.push_back(makePose(0.0, 0.0));
   waypoints.push_back(makePose(0.4, 0.0));
   waypoints.push_back(makePose(0.4, 0.4));
   waypoints.push_back(makePose(0.8, 0.4));
 
-  nav_msgs::Path path;
+  nav_msgs::msg::Path path;
   ASSERT_TRUE(generator.generate(waypoints, path));
   EXPECT_EQ(jgl_dwa_local_planner::TrajectoryGenerator::PATH_MODE_POLYLINE_FALLBACK,
             generator.lastPathMode());
@@ -203,15 +199,14 @@ TEST(TrajectoryGeneratorBspline, TwoCurveWaypointReferenceMarksSecondToThirdSegm
 
 TEST(PathFollowerAckermannOnly, CommandNeverUsesCrabOrReverse)
 {
-  ros::Time::init();
   jgl_dwa_local_planner::PathFollower follower;
 
-  nav_msgs::Path path;
+  nav_msgs::msg::Path path;
   path.header.frame_id = "map";
   path.poses.push_back(makePose(0.0, 0.0));
   path.poses.push_back(makePose(0.5, 0.0));
 
-  geometry_msgs::Twist cmd_vel;
+  geometry_msgs::msg::Twist cmd_vel;
   unsigned int new_index = 0;
   double curvature = 0.0;
   ASSERT_TRUE(follower.computeCommand(path,
@@ -229,16 +224,15 @@ TEST(PathFollowerAckermannOnly, CommandNeverUsesCrabOrReverse)
 
 TEST(PathFollowerTerminalGoal, LastIndexKeepsDrivingUntilRealGoalTolerance)
 {
-  ros::Time::init();
   jgl_dwa_local_planner::PathFollower follower;
 
-  nav_msgs::Path path;
+  nav_msgs::msg::Path path;
   path.header.frame_id = "map";
   path.poses.push_back(makePose(0.0, 0.0));
   path.poses.push_back(makePose(0.1, 0.0));
   path.poses.push_back(makePose(0.2, 0.0));
 
-  geometry_msgs::Twist cmd_vel;
+  geometry_msgs::msg::Twist cmd_vel;
   unsigned int new_index = 2;
   double curvature = 0.0;
   ASSERT_TRUE(follower.computeCommand(path, makePose(0.1, 0.0), 2,
@@ -254,16 +248,15 @@ TEST(PathFollowerTerminalGoal, LastIndexKeepsDrivingUntilRealGoalTolerance)
 
 TEST(PathFollowerTerminalGoal, StopsOnlyInsideRealGoalTolerance)
 {
-  ros::Time::init();
   jgl_dwa_local_planner::PathFollower follower;
 
-  nav_msgs::Path path;
+  nav_msgs::msg::Path path;
   path.header.frame_id = "map";
   path.poses.push_back(makePose(0.0, 0.0));
   path.poses.push_back(makePose(0.1, 0.0));
   path.poses.push_back(makePose(0.2, 0.0));
 
-  geometry_msgs::Twist cmd_vel;
+  geometry_msgs::msg::Twist cmd_vel;
   unsigned int new_index = 2;
   double curvature = 0.0;
   ASSERT_TRUE(follower.computeCommand(path, makePose(0.13, 0.0), 2,
@@ -277,16 +270,15 @@ TEST(PathFollowerTerminalGoal, StopsOnlyInsideRealGoalTolerance)
 
 TEST(PathFollowerTerminalGoal, OrdinaryPassThroughStillStopsAtLastIndex)
 {
-  ros::Time::init();
   jgl_dwa_local_planner::PathFollower follower;
 
-  nav_msgs::Path path;
+  nav_msgs::msg::Path path;
   path.header.frame_id = "map";
   path.poses.push_back(makePose(0.0, 0.0));
   path.poses.push_back(makePose(0.1, 0.0));
   path.poses.push_back(makePose(0.2, 0.0));
 
-  geometry_msgs::Twist cmd_vel;
+  geometry_msgs::msg::Twist cmd_vel;
   unsigned int new_index = 2;
   double curvature = 0.0;
   ASSERT_TRUE(follower.computeCommand(path, makePose(0.1, 0.0), 2,
@@ -298,20 +290,19 @@ TEST(PathFollowerTerminalGoal, OrdinaryPassThroughStillStopsAtLastIndex)
 
 TEST(PathFollowerTerminalGoal, SimulatedLastSegmentRunsIntoTolerance)
 {
-  ros::Time::init();
   jgl_dwa_local_planner::PathFollower follower;
 
-  nav_msgs::Path path;
+  nav_msgs::msg::Path path;
   path.header.frame_id = "map";
   path.poses.push_back(makePose(0.0, 0.0));
   path.poses.push_back(makePose(0.1, 0.0));
   path.poses.push_back(makePose(0.2, 0.0));
 
-  geometry_msgs::PoseStamped pose = makePose(0.08, 0.0);
+  geometry_msgs::msg::PoseStamped pose = makePose(0.08, 0.0);
   bool stopped = false;
   for (int cycle = 0; cycle < 100; ++cycle)
   {
-    geometry_msgs::Twist cmd_vel;
+    geometry_msgs::msg::Twist cmd_vel;
     unsigned int new_index = 2;
     double curvature = 0.0;
     ASSERT_TRUE(follower.computeCommand(path, pose, 2,
@@ -334,7 +325,7 @@ TEST(PathFollowerTerminalGoal, SimulatedLastSegmentRunsIntoTolerance)
 TEST(ReferencePathManagerTerminalGoal, HoldsIndexOnLastSegmentUntilReached)
 {
   jgl_dwa_local_planner::ReferencePathManager manager;
-  nav_msgs::Path path;
+  nav_msgs::msg::Path path;
   path.header.frame_id = "map";
   path.poses.push_back(makePose(0.0, 0.0));
   path.poses.push_back(makePose(0.1, 0.0));
@@ -350,16 +341,15 @@ TEST(ReferencePathManagerTerminalGoal, HoldsIndexOnLastSegmentUntilReached)
 
 TEST(PathFollowerAntiShake, LookaheadTargetIsInterpolatedAlongPath)
 {
-  ros::Time::init();
   jgl_dwa_local_planner::PathFollower follower;
   follower.setSmoothingForTesting(0.0, 0.0, 0.0, 0.1);
 
-  nav_msgs::Path path;
+  nav_msgs::msg::Path path;
   path.header.frame_id = "map";
   path.poses.push_back(makePose(0.0, 0.0));
   path.poses.push_back(makePose(1.0, 0.2));
 
-  geometry_msgs::Twist cmd_vel;
+  geometry_msgs::msg::Twist cmd_vel;
   unsigned int new_index = 0;
   double curvature = 0.0;
   ASSERT_TRUE(follower.computeCommand(path, makePose(0.0, 0.0), 0,
@@ -372,16 +362,15 @@ TEST(PathFollowerAntiShake, LookaheadTargetIsInterpolatedAlongPath)
 
 TEST(PathFollowerAntiShake, CurvatureChangeIsRateLimited)
 {
-  ros::Time::init();
   jgl_dwa_local_planner::PathFollower follower;
   follower.setSmoothingForTesting(0.0, 1.5, 0.0, 0.1);
 
-  nav_msgs::Path path;
+  nav_msgs::msg::Path path;
   path.header.frame_id = "map";
   path.poses.push_back(makePose(0.0, 0.0));
   path.poses.push_back(makePose(0.2, 0.5));
 
-  geometry_msgs::Twist cmd_vel;
+  geometry_msgs::msg::Twist cmd_vel;
   unsigned int new_index = 0;
   double curvature = 0.0;
   ASSERT_TRUE(follower.computeCommand(path, makePose(0.0, 0.0), 0,
@@ -393,16 +382,15 @@ TEST(PathFollowerAntiShake, CurvatureChangeIsRateLimited)
 
 TEST(PathFollowerAntiShake, ResetRampsAgainAfterStop)
 {
-  ros::Time::init();
   jgl_dwa_local_planner::PathFollower follower;
   follower.setSmoothingForTesting(0.0, 1.5, 0.0, 0.1);
 
-  nav_msgs::Path path;
+  nav_msgs::msg::Path path;
   path.header.frame_id = "map";
   path.poses.push_back(makePose(0.0, 0.0));
   path.poses.push_back(makePose(0.2, 0.5));
 
-  geometry_msgs::Twist cmd_vel;
+  geometry_msgs::msg::Twist cmd_vel;
   unsigned int new_index = 0;
   double curvature = 0.0;
   for (int i = 0; i < 5; ++i)
@@ -421,7 +409,6 @@ TEST(PathFollowerAntiShake, ResetRampsAgainAfterStop)
 
 TEST(PathFollowerAntiShake, ExternalLegacyCurvatureUsesSameLimits)
 {
-  ros::Time::init();
   jgl_dwa_local_planner::PathFollower follower;
   follower.setSmoothingForTesting(0.0, 1.5, 0.0, 0.1);
 
@@ -440,6 +427,5 @@ TEST(PathFollowerAntiShake, ExternalLegacyCurvatureUsesSameLimits)
 int main(int argc, char **argv)
 {
   testing::InitGoogleTest(&argc, argv);
-  ros::Time::init();
   return RUN_ALL_TESTS();
 }

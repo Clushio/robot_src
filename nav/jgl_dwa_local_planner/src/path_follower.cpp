@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include <tf2/utils.h>
+#include <jgl_dwa_local_planner/parameter_utils.h>
 
 namespace jgl_dwa_local_planner
 {
@@ -24,22 +25,27 @@ PathFollower::PathFollower()
 {
 }
 
-void PathFollower::loadParams(ros::NodeHandle &private_nh)
+void PathFollower::loadParams(
+    const rclcpp_lifecycle::LifecycleNode::SharedPtr &node,
+    const std::string &parameter_prefix)
 {
-  private_nh.param("lookahead_distance", lookahead_distance_, 0.50);
-  private_nh.param("v_min", v_min_, 0.04);
-  private_nh.param("v_max", v_max_, 0.20);
-  private_nh.param("end_slow_distance", end_slow_distance_, 0.80);
-  private_nh.param("k_curve", k_curve_, 1.0);
+  const auto key = [&parameter_prefix](const std::string &name) {
+      return parameter_prefix + "." + name;
+    };
+  lookahead_distance_ = declareOrGet(node, key("lookahead_distance"), 0.50);
+  v_min_ = declareOrGet(node, key("v_min"), 0.04);
+  v_max_ = declareOrGet(node, key("v_max"), 0.20);
+  end_slow_distance_ = declareOrGet(node, key("end_slow_distance"), 0.80);
+  k_curve_ = declareOrGet(node, key("k_curve"), 1.0);
   // Keep the controller limit separate from the reference-path limit.  The
   // latter may be close to the physical Ranger limit, while tracking needs
   // margin to avoid switching from dual Ackermann to spinning mode.
-  private_nh.param("tracking_max_curvature", max_curvature_, 1.90);
-  private_nh.param("min_turn_radius", min_turn_radius_, 0.476);
-  private_nh.param("curvature_filter_tau", curvature_filter_tau_, 0.25);
-  private_nh.param("max_curvature_rate", max_curvature_rate_, 1.5);
-  private_nh.param("curvature_deadband", curvature_deadband_, 0.02);
-  private_nh.param("control_period", control_period_, 0.10);
+  max_curvature_ = declareOrGet(node, key("tracking_max_curvature"), 1.90);
+  min_turn_radius_ = declareOrGet(node, key("min_turn_radius"), 0.476);
+  curvature_filter_tau_ = declareOrGet(node, key("curvature_filter_tau"), 0.25);
+  max_curvature_rate_ = declareOrGet(node, key("max_curvature_rate"), 1.5);
+  curvature_deadband_ = declareOrGet(node, key("curvature_deadband"), 0.02);
+  control_period_ = declareOrGet(node, key("control_period"), 0.10);
 
   lookahead_distance_ = std::max(0.05, lookahead_distance_);
   v_min_ = std::max(0.0, v_min_);
@@ -62,16 +68,16 @@ void PathFollower::reset()
   filtered_curvature_ = 0.0;
 }
 
-bool PathFollower::computeCommand(const nav_msgs::Path &path,
-                                  const geometry_msgs::PoseStamped &current_pose,
+bool PathFollower::computeCommand(const nav_msgs::msg::Path &path,
+                                  const geometry_msgs::msg::PoseStamped &current_pose,
                                   unsigned int current_index,
-                                  geometry_msgs::Twist &cmd_vel,
+                                  geometry_msgs::msg::Twist &cmd_vel,
                                   unsigned int &new_index,
                                   double &curvature,
                                   bool terminal_goal,
                                   double terminal_xy_tolerance)
 {
-  cmd_vel = geometry_msgs::Twist();
+  cmd_vel = geometry_msgs::msg::Twist();
   curvature = 0.0;
   new_index = current_index;
 
@@ -102,7 +108,7 @@ bool PathFollower::computeCommand(const nav_msgs::Path &path,
   // Interpolate the target at the exact arc-length lookahead.  Selecting the
   // first sampled point beyond the lookahead made the target jump by one path
   // sample and showed up as visible steering-wheel shake.
-  const geometry_msgs::PoseStamped target =
+  const geometry_msgs::msg::PoseStamped target =
       interpolatedLookaheadTarget(path, current_pose, new_index);
   const double dx = target.pose.position.x - current_pose.pose.position.x;
   const double dy = target.pose.position.y - current_pose.pose.position.y;
@@ -140,21 +146,21 @@ bool PathFollower::computeCommand(const nav_msgs::Path &path,
   return true;
 }
 
-geometry_msgs::PoseStamped PathFollower::interpolatedLookaheadTarget(
-    const nav_msgs::Path &path,
-    const geometry_msgs::PoseStamped &current_pose,
+geometry_msgs::msg::PoseStamped PathFollower::interpolatedLookaheadTarget(
+    const nav_msgs::msg::Path &path,
+    const geometry_msgs::msg::PoseStamped &current_pose,
     unsigned int current_index) const
 {
   const unsigned int last = static_cast<unsigned int>(path.poses.size() - 1);
   current_index = std::min(current_index, last);
-  geometry_msgs::PoseStamped target = path.poses[current_index];
+  geometry_msgs::msg::PoseStamped target = path.poses[current_index];
   if (current_index >= last)
   {
     return target;
   }
 
-  const geometry_msgs::PoseStamped &a = path.poses[current_index];
-  const geometry_msgs::PoseStamped &b = path.poses[current_index + 1];
+  const geometry_msgs::msg::PoseStamped &a = path.poses[current_index];
+  const geometry_msgs::msg::PoseStamped &b = path.poses[current_index + 1];
   const double ab_x = b.pose.position.x - a.pose.position.x;
   const double ab_y = b.pose.position.y - a.pose.position.y;
   const double ab_length_sq = ab_x * ab_x + ab_y * ab_y;
@@ -195,8 +201,8 @@ geometry_msgs::PoseStamped PathFollower::interpolatedLookaheadTarget(
   return path.poses.back();
 }
 
-unsigned int PathFollower::advanceIndex(const nav_msgs::Path &path,
-                                        const geometry_msgs::PoseStamped &current_pose,
+unsigned int PathFollower::advanceIndex(const nav_msgs::msg::Path &path,
+                                        const geometry_msgs::msg::PoseStamped &current_pose,
                                         unsigned int current_index) const
 {
   if (path.poses.empty())
@@ -208,8 +214,8 @@ unsigned int PathFollower::advanceIndex(const nav_msgs::Path &path,
       std::min(current_index, static_cast<unsigned int>(path.poses.size() - 1));
   while (index + 1 < path.poses.size())
   {
-    const geometry_msgs::PoseStamped &a = path.poses[index];
-    const geometry_msgs::PoseStamped &b = path.poses[index + 1];
+    const geometry_msgs::msg::PoseStamped &a = path.poses[index];
+    const geometry_msgs::msg::PoseStamped &b = path.poses[index + 1];
     const double ax = a.pose.position.x;
     const double ay = a.pose.position.y;
     const double bx = b.pose.position.x;
@@ -237,8 +243,8 @@ unsigned int PathFollower::advanceIndex(const nav_msgs::Path &path,
   return index;
 }
 
-double PathFollower::remainingDistance(const nav_msgs::Path &path,
-                                       const geometry_msgs::PoseStamped &current_pose,
+double PathFollower::remainingDistance(const nav_msgs::msg::Path &path,
+                                       const geometry_msgs::msg::PoseStamped &current_pose,
                                        unsigned int index) const
 {
   if (path.poses.empty())
@@ -255,8 +261,8 @@ double PathFollower::remainingDistance(const nav_msgs::Path &path,
   return distance;
 }
 
-double PathFollower::poseDistance(const geometry_msgs::PoseStamped &a,
-                                  const geometry_msgs::PoseStamped &b) const
+double PathFollower::poseDistance(const geometry_msgs::msg::PoseStamped &a,
+                                  const geometry_msgs::msg::PoseStamped &b) const
 {
   return std::hypot(a.pose.position.x - b.pose.position.x,
                     a.pose.position.y - b.pose.position.y);

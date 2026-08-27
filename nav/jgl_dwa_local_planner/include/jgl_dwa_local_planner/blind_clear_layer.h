@@ -1,13 +1,13 @@
 #ifndef JGL_DWA_LOCAL_PLANNER_BLIND_CLEAR_LAYER_H_
 #define JGL_DWA_LOCAL_PLANNER_BLIND_CLEAR_LAYER_H_
 
-#include <costmap_2d/layer.h>
-#include <costmap_2d/layered_costmap.h>
+#include <nav2_costmap_2d/layer.hpp>
+#include <nav2_costmap_2d/layered_costmap.hpp>
 
 namespace jgl_dwa_local_planner
 {
 
-class BlindClearLayer : public costmap_2d::Layer
+class BlindClearLayer : public nav2_costmap_2d::Layer
 {
 public:
   BlindClearLayer();
@@ -15,9 +15,11 @@ public:
   void onInitialize() override;
   void updateBounds(double robot_x, double robot_y, double robot_yaw,
                     double* min_x, double* min_y, double* max_x, double* max_y) override;
-  void updateCosts(costmap_2d::Costmap2D& master_grid, int min_i, int min_j,
+  void updateCosts(nav2_costmap_2d::Costmap2D& master_grid, int min_i, int min_j,
                    int max_i, int max_j) override;
   void matchSize() override;
+  void reset() override { current_ = true; }
+  bool isClearable() override { return true; }
 
 private:
   bool isInBlindZone(double world_x, double world_y) const;

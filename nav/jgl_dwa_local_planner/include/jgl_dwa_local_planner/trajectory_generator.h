@@ -3,10 +3,11 @@
 
 #include <boost/thread/mutex.hpp>
 
-#include <geometry_msgs/PoseStamped.h>
-#include <nav_msgs/OccupancyGrid.h>
-#include <nav_msgs/Path.h>
-#include <ros/ros.h>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <nav_msgs/msg/occupancy_grid.hpp>
+#include <nav_msgs/msg/path.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <rclcpp_lifecycle/lifecycle_node.hpp>
 
 #include <string>
 #include <vector>
@@ -28,15 +29,17 @@ public:
 
   TrajectoryGenerator();
 
-  void initialize(ros::NodeHandle &private_nh, ros::NodeHandle &node_nh);
+  void initialize(
+      const rclcpp_lifecycle::LifecycleNode::SharedPtr &node,
+      const std::string &parameter_prefix);
 
-  bool generate(const std::vector<geometry_msgs::PoseStamped> &waypoints,
-                nav_msgs::Path &out_path);
-  bool checkCollision(const nav_msgs::Path &path);
-  bool checkDeviationFromTopo(const nav_msgs::Path &path,
-                              const std::vector<geometry_msgs::PoseStamped> &waypoints);
-  bool checkCurvature(const nav_msgs::Path &path);
-  nav_msgs::Path fallbackPolylinePath(const std::vector<geometry_msgs::PoseStamped> &waypoints);
+  bool generate(const std::vector<geometry_msgs::msg::PoseStamped> &waypoints,
+                nav_msgs::msg::Path &out_path);
+  bool checkCollision(const nav_msgs::msg::Path &path);
+  bool checkDeviationFromTopo(const nav_msgs::msg::Path &path,
+                              const std::vector<geometry_msgs::msg::PoseStamped> &waypoints);
+  bool checkCurvature(const nav_msgs::msg::Path &path);
+  nav_msgs::msg::Path fallbackPolylinePath(const std::vector<geometry_msgs::msg::PoseStamped> &waypoints);
 
   double sampleResolution() const { return sample_resolution_; }
   double safeDistance() const { return safe_distance_; }
@@ -46,7 +49,7 @@ public:
   std::vector<int> lastFallbackSegments() const { return last_fallback_segments_; }
 
 #ifdef JGL_DWA_LOCAL_PLANNER_ENABLE_TEST_ACCESS
-  void setGlobalCostmapForTesting(const nav_msgs::OccupancyGrid &grid)
+  void setGlobalCostmapForTesting(const nav_msgs::msg::OccupancyGrid &grid)
   {
     boost::mutex::scoped_lock lock(costmap_mutex_);
     global_costmap_ = grid;
@@ -106,53 +109,53 @@ private:
 	    std::vector<double> distance;
 	  };
 
-	  void globalCostmapCallback(const nav_msgs::OccupancyGrid::ConstPtr &msg);
+	  void globalCostmapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
 
-	  bool generateBsplineReference(const std::vector<geometry_msgs::PoseStamped> &waypoints,
-	                                nav_msgs::Path &out_path);
+	  bool generateBsplineReference(const std::vector<geometry_msgs::msg::PoseStamped> &waypoints,
+	                                nav_msgs::msg::Path &out_path);
 	  bool buildOptimizedBsplinePath(
-	      const std::vector<geometry_msgs::PoseStamped> &waypoints,
+	      const std::vector<geometry_msgs::msg::PoseStamped> &waypoints,
 	      const DistanceField &distance_field,
-	      nav_msgs::Path &out_path,
+	      nav_msgs::msg::Path &out_path,
 	      unsigned int *control_point_count) const;
 	  bool generateChunkedBsplineReference(
-	      const std::vector<geometry_msgs::PoseStamped> &waypoints,
-	      nav_msgs::Path &out_path);
+	      const std::vector<geometry_msgs::msg::PoseStamped> &waypoints,
+	      nav_msgs::msg::Path &out_path);
 	  bool generateBsplineChunk(
-	      const std::vector<geometry_msgs::PoseStamped> &waypoints,
+	      const std::vector<geometry_msgs::msg::PoseStamped> &waypoints,
 	      unsigned int start_index,
 	      unsigned int end_index,
 	      const DistanceField &distance_field,
-	      nav_msgs::Path &out_path);
+	      nav_msgs::msg::Path &out_path);
 	  std::vector<unsigned int> findBsplineBreakpoints(
-	      const std::vector<geometry_msgs::PoseStamped> &waypoints,
-	      const nav_msgs::Path &failed_path,
+	      const std::vector<geometry_msgs::msg::PoseStamped> &waypoints,
+	      const nav_msgs::msg::Path &failed_path,
 	      const DistanceField &distance_field) const;
 	  unsigned int nearestTopoSegmentIndex(
-	      const geometry_msgs::PoseStamped &pose,
-	      const std::vector<geometry_msgs::PoseStamped> &waypoints) const;
-	  double pathSampleCurvature(const nav_msgs::Path &path,
+	      const geometry_msgs::msg::PoseStamped &pose,
+	      const std::vector<geometry_msgs::msg::PoseStamped> &waypoints) const;
+	  double pathSampleCurvature(const nav_msgs::msg::Path &path,
 	                             unsigned int sample_index) const;
-	  bool generateCubicReference(const std::vector<geometry_msgs::PoseStamped> &waypoints,
-	                              nav_msgs::Path &out_path);
-	  std::vector<geometry_msgs::PoseStamped> referenceCurveWaypoints(
-	      const std::vector<geometry_msgs::PoseStamped> &waypoints) const;
+	  bool generateCubicReference(const std::vector<geometry_msgs::msg::PoseStamped> &waypoints,
+	                              nav_msgs::msg::Path &out_path);
+	  std::vector<geometry_msgs::msg::PoseStamped> referenceCurveWaypoints(
+	      const std::vector<geometry_msgs::msg::PoseStamped> &waypoints) const;
 	  void expandFallbackSegmentsForFullTopology(
 	      unsigned int full_waypoint_count,
 	      const std::vector<int> &curve_fallback_segments);
 	  std::vector<Point2d> initializeBsplineControlPoints(
-	      const std::vector<geometry_msgs::PoseStamped> &waypoints) const;
+	      const std::vector<geometry_msgs::msg::PoseStamped> &waypoints) const;
 	  bool optimizeBsplineControlPoints(
 	      std::vector<Point2d> &control_points,
-	      const std::vector<geometry_msgs::PoseStamped> &waypoints,
+	      const std::vector<geometry_msgs::msg::PoseStamped> &waypoints,
 	      const DistanceField &distance_field) const;
 	  double bsplineOptimizationCost(
 	      const std::vector<Point2d> &control_points,
-	      const std::vector<geometry_msgs::PoseStamped> &waypoints,
+	      const std::vector<geometry_msgs::msg::PoseStamped> &waypoints,
 	      const DistanceField &distance_field) const;
-	  nav_msgs::Path sampleBsplinePath(
+	  nav_msgs::msg::Path sampleBsplinePath(
 	      const std::vector<Point2d> &control_points,
-	      const std::vector<geometry_msgs::PoseStamped> &waypoints) const;
+	      const std::vector<geometry_msgs::msg::PoseStamped> &waypoints) const;
 	  bool evaluateBspline(const std::vector<Point2d> &control_points,
 	                       double u,
 	                       Point2d &point) const;
@@ -162,7 +165,7 @@ private:
 	                           std::vector<double> &weights) const;
 	  void buildClampedKnotVector(int control_point_count,
 	                              std::vector<double> &knots) const;
-	  bool buildDistanceField(const nav_msgs::OccupancyGrid &grid,
+	  bool buildDistanceField(const nav_msgs::msg::OccupancyGrid &grid,
 	                          DistanceField &distance_field) const;
 	  bool distanceAtPoint(const DistanceField &distance_field,
 	                       const Point2d &point,
@@ -172,14 +175,14 @@ private:
 	                               Point2d &gradient) const;
 	  Point2d projectPointToTopo(
 	      const Point2d &point,
-	      const std::vector<geometry_msgs::PoseStamped> &waypoints) const;
+	      const std::vector<geometry_msgs::msg::PoseStamped> &waypoints) const;
 	  Point2d interpolateTopoPolyline(
-	      const std::vector<geometry_msgs::PoseStamped> &waypoints,
+	      const std::vector<geometry_msgs::msg::PoseStamped> &waypoints,
 	      double distance_along) const;
 	  double topoPolylineLength(
-	      const std::vector<geometry_msgs::PoseStamped> &waypoints) const;
+	      const std::vector<geometry_msgs::msg::PoseStamped> &waypoints) const;
 	  Point2d waypointTangent(
-	      const std::vector<geometry_msgs::PoseStamped> &waypoints,
+	      const std::vector<geometry_msgs::msg::PoseStamped> &waypoints,
 	      bool start) const;
 	  double effectiveMaxCurvature() const;
 	  double controlPolygonCurvature(const Point2d &a,
@@ -188,47 +191,49 @@ private:
 	  void limitPointStep(Point2d &delta, double max_step) const;
 	  bool isFixedControlPoint(unsigned int index, unsigned int count) const;
 
-	  nav_msgs::Path catmullRomPath(const std::vector<geometry_msgs::PoseStamped> &waypoints);
-	  nav_msgs::Path catmullRomSegment(
-	      const std::vector<geometry_msgs::PoseStamped> &waypoints,
+	  nav_msgs::msg::Path catmullRomPath(const std::vector<geometry_msgs::msg::PoseStamped> &waypoints);
+	  nav_msgs::msg::Path catmullRomSegment(
+	      const std::vector<geometry_msgs::msg::PoseStamped> &waypoints,
       unsigned int segment_index) const;
-  nav_msgs::Path hybridPath(const std::vector<geometry_msgs::PoseStamped> &waypoints,
+  nav_msgs::msg::Path hybridPath(const std::vector<geometry_msgs::msg::PoseStamped> &waypoints,
                             unsigned int *fallback_segments,
                             unsigned int *total_segments,
                             std::vector<int> *fallback_segment_flags);
-  nav_msgs::Path fallbackPolylineSegment(const geometry_msgs::PoseStamped &start,
-                                         const geometry_msgs::PoseStamped &end) const;
-  void appendPathSegment(nav_msgs::Path &path, const nav_msgs::Path &segment) const;
-  void applyPathOrientations(nav_msgs::Path &path,
-                             const geometry_msgs::PoseStamped &final_pose) const;
-  geometry_msgs::PoseStamped makePoseLike(const geometry_msgs::PoseStamped &reference,
+  nav_msgs::msg::Path fallbackPolylineSegment(const geometry_msgs::msg::PoseStamped &start,
+                                         const geometry_msgs::msg::PoseStamped &end) const;
+  void appendPathSegment(nav_msgs::msg::Path &path, const nav_msgs::msg::Path &segment) const;
+  void applyPathOrientations(nav_msgs::msg::Path &path,
+                             const geometry_msgs::msg::PoseStamped &final_pose) const;
+  geometry_msgs::msg::PoseStamped makePoseLike(const geometry_msgs::msg::PoseStamped &reference,
                                           double x, double y) const;
 
-  bool pathChecksPass(const nav_msgs::Path &path,
-                      const std::vector<geometry_msgs::PoseStamped> &waypoints,
+  bool pathChecksPass(const nav_msgs::msg::Path &path,
+                      const std::vector<geometry_msgs::msg::PoseStamped> &waypoints,
                       bool check_curvature);
-  bool poseCollides(const geometry_msgs::PoseStamped &pose,
-                    const nav_msgs::OccupancyGrid &grid) const;
-  bool worldToMap(const nav_msgs::OccupancyGrid &grid, double wx, double wy,
+  bool poseCollides(const geometry_msgs::msg::PoseStamped &pose,
+                    const nav_msgs::msg::OccupancyGrid &grid) const;
+  bool worldToMap(const nav_msgs::msg::OccupancyGrid &grid, double wx, double wy,
                   int &mx, int &my) const;
-  bool occupiedCell(const nav_msgs::OccupancyGrid &grid, int mx, int my) const;
+  bool occupiedCell(const nav_msgs::msg::OccupancyGrid &grid, int mx, int my) const;
 
-  double pointToPolylineDistance(const geometry_msgs::PoseStamped &pose,
-                                 const std::vector<geometry_msgs::PoseStamped> &waypoints) const;
+  double pointToPolylineDistance(const geometry_msgs::msg::PoseStamped &pose,
+                                 const std::vector<geometry_msgs::msg::PoseStamped> &waypoints) const;
   double pointToSegmentDistance(double px, double py,
-                                const geometry_msgs::PoseStamped &a,
-                                const geometry_msgs::PoseStamped &b) const;
-	  double poseDistance(const geometry_msgs::PoseStamped &a,
-	                      const geometry_msgs::PoseStamped &b) const;
+                                const geometry_msgs::msg::PoseStamped &a,
+                                const geometry_msgs::msg::PoseStamped &b) const;
+	  double poseDistance(const geometry_msgs::msg::PoseStamped &a,
+	                      const geometry_msgs::msg::PoseStamped &b) const;
 	  double pointDistance(const Point2d &a, const Point2d &b) const;
 	  double pointNorm(const Point2d &point) const;
 	  Point2d pointAdd(const Point2d &a, const Point2d &b) const;
 	  Point2d pointSub(const Point2d &a, const Point2d &b) const;
 	  Point2d pointScale(const Point2d &point, double scale) const;
 
-	  ros::Subscriber global_costmap_sub_;
+	  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr global_costmap_sub_;
+	  rclcpp::Clock::SharedPtr clock_;
+	  rclcpp::Logger logger_{rclcpp::get_logger("TrajectoryGenerator")};
 	  mutable boost::mutex costmap_mutex_;
-  nav_msgs::OccupancyGrid global_costmap_;
+  nav_msgs::msg::OccupancyGrid global_costmap_;
   bool have_global_costmap_;
 
   double sample_resolution_;

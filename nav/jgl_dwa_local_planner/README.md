@@ -8,7 +8,7 @@
 
 | 组件 | 文件 | 作用 |
 |---|---|---|
-| `DWAPlannerROS` | `src/dwa_planner_ros.cpp` | MoveBase 局部规划插件、模式切换和导航状态 |
+| `DWAPlannerROS` | `src/dwa_planner_ros.cpp` | Nav2 Controller 插件、模式切换和导航状态 |
 | `TrajectoryGenerator` | `src/trajectory_generator.cpp` | cubic/B 样条生成、优化、碰撞和曲率约束 |
 | `ReferencePathManager` | `src/reference_path_manager.cpp` | 参考路径生命周期、进度和局部段管理 |
 | `PathFollower` | `src/path_follower.cpp` | 参考路径跟踪、曲率到双阿克曼控制 |
@@ -35,6 +35,27 @@ reference_curve_type: bspline
 
 完整路径不能安全优化时，可以根据失败样本定位问题段，对局部段使用旧跟踪/DWA 回退，
 而不是接受一条总代价更差的曲线。
+
+## ROS2 控制器接口与模式兼容
+
+插件名保持为 `jgl_dwa_local_planner/DWAPlannerROS`，基类由 ROS1
+`nav_core::BaseLocalPlanner` 改为 `nav2_core::Controller`，由 Nav2
+`controller_server` 的 `/follow_path` action 调用。路径点 `position.z` 的项目语义保持：
+
+- `z == 0`：普通采样局部规划；
+- `z == 1`：项目原有直线/纯追踪、拓扑和 B 样条逻辑；
+- `z == 2`：停车等待；
+- `z < 0`：原有短时倒车逻辑。
+
+ROS1 `base_local_planner` 在 Humble 没有直接版本，因此只把 `z == 0` 的标准采样分支
+最小替换为 Nav2 官方 DWB。项目的拓扑、B 样条、纯追踪、末端航向、固定路线和障碍
+分级减速均仍在本插件内；旧 `dwa_planner.cpp` 作为 ROS1 对照源码保留，但不参与 ROS2
+编译。DWB 参数和 critic 的近似映射记录在 `param/dwa_local_planner_params.yaml`。
+
+原 `dynamic_reconfigure` 已替换为 ROS2 参数。启动时加载全部参数；原回调中可在线调整
+的速度、制动距离、前视、纯追踪增益、旋转阈值和到达容差仍可用
+`ros2 param set /controller_server FollowPath.<name> <value>` 更新。标准采样参数由 DWB
+自己的参数回调负责。
 
 ## 跟踪平滑
 
@@ -75,12 +96,15 @@ AutoNAV 负责拓扑重规划，局部层不应静默改变业务路线。
 
 ## 代价地图插件
 
-插件在 `costmap_plugin.xml` 注册，参数位于 `param/costmap_common_params.yaml`。
+插件在 `costmap_plugin.xml` 注册。可启动的 ROS2 配置示例位于
+`param/controller_server_example.yaml`；生产配置应把标准 marking/clearing layer 放在这两个
+项目层之前。
 
 ### DecayObstacleLayer
 
-从 `/livox_pcl0` 接收点云，把障碍写入代价地图并按 `decay_time` 衰减。它用于减少移动
-障碍离开后长时间残留，但不能替代正确的传感器 clearing 和最终碰撞监控。
+从 `/livox_pcl0` 接收点云，记录已观测障碍单元并在 `decay_time` 后清除 master costmap
+中的对应致命代价。障碍写入仍由标准 Obstacle/VoxelLayer 负责；本层只保留 ROS1 的
+定时衰减职责，不能替代正确的传感器 clearing 和最终碰撞监控。
 
 ### BlindClearLayer
 
@@ -91,12 +115,11 @@ AutoNAV 负责拓扑重规划，局部层不应静默改变业务路线。
 
 | 文件 | 内容 |
 |---|---|
-| `param/dwa_local_planner_params.yaml` | B 样条、跟踪、DWA 和到达容差 |
-| `param/costmap_common_params.yaml` | 障碍层、衰减层、盲区层、膨胀层 |
-| `param/local_costmap_params.yaml` | 局部代价地图窗口和插件顺序 |
-| `param/global_costmap_params.yaml` | 全局代价地图 |
-| `param/global_planner_params.yaml` | 定制全局规划和堵塞行为 |
-| `param/move_base_params.yaml` | MoveBase 频率和恢复配置 |
+| `param/dwa_local_planner_params.yaml` | ROS2 Controller、B 样条、跟踪和 DWB 参数 |
+| `param/controller_server_example.yaml` | 可独立验证插件和两个 costmap layer 的 Nav2 示例 |
+
+目录中其余 ROS1 MoveBase YAML 仅保留为后续 `mxb_move_base` 迁移对照，不由本包安装，
+避免 ROS1 私有参数层级被误当成 ROS2 配置加载。
 
 物理 footprint 不在本目录定义；统一从
 `collision_monitor/config/robot_footprint.yaml` 加载。
@@ -104,10 +127,11 @@ AutoNAV 负责拓扑重规划，局部层不应静默改变业务路线。
 ## 测试
 
 ```bash
-cd ~/catkin_ws
-source /opt/ros/noetic/setup.bash
-catkin_make run_tests_jgl_dwa_local_planner
-catkin_test_results build
+cd /workspace
+source /opt/ros/humble/setup.bash
+colcon build --packages-select jgl_dwa_local_planner
+colcon test --packages-select jgl_dwa_local_planner
+colcon test-result --verbose
 ```
 
 `test/trajectory_generator_test.cpp` 覆盖曲线生成和部分跟踪边界。单元测试之外仍需要：
@@ -123,6 +147,7 @@ catkin_test_results build
 
 - 不要把生成曲率上限和跟踪曲率上限混为一个参数。
 - 不要让局部回退绕过 AutoNAV 的固定路线语义。
-- 不要在此包直接发布最终 `/cmd_vel`；MoveBase 输出应进入 `/cmd_vel/nav`。
+- ControllerServer 默认发布 `/cmd_vel`；整车 bringup 必须将其重映射到
+  `/cmd_vel/nav` 后再进入 `cmd_vel_arbiter`。
 - 修改障碍高度/FOV 时同步核对 LIO、点云转换、costmap 和碰撞监控。
 - 新增参数时同时更新 YAML、加载代码、测试和本文。
