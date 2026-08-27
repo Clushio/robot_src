@@ -1,0 +1,234 @@
+planner_server:
+  ros__parameters:
+    expected_planner_frequency: 5.0
+    planner_plugins: [GridBased]
+    GridBased:
+      plugin: myglobal_planner/MyGlobalPlanner
+      local_costmap_topic: /local_costmap/costmap_raw
+      lethal_cost: 253
+      neutral_cost: 10
+      cost_factor: 3.0
+      publish_potential: true
+      orientation_mode: 1
+      orientation_window_size: 1
+      distance_convert_line: 0.5
+      point_per_meter: 0.02
+      distance_check_obstacle: 1.0
+      distance_behind_obstacle: 1.0
+      wait_time: 3.0
+      enable_dwa_obstacle_avoidance: false
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      global_frame: map
+      robot_base_frame: base_link
+      update_frequency: 5.0
+      publish_frequency: 5.0
+      transform_tolerance: 0.5
+      footprint: "[[0.36, 0.25], [0.36, -0.25], [-0.36, -0.25], [-0.36, 0.25]]"
+      resolution: 0.05
+      track_unknown_space: true
+      plugins: [static_layer, inflation_layer]
+      static_layer:
+        plugin: nav2_costmap_2d::StaticLayer
+        enabled: true
+        map_subscribe_transient_local: true
+      inflation_layer:
+        plugin: nav2_costmap_2d::InflationLayer
+        enabled: true
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.35
+      always_send_full_costmap: true
+
+controller_server:
+  ros__parameters:
+    controller_frequency: 10.0
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.001
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 0.0
+    progress_checker_plugin: progress_checker
+    goal_checker_plugins: [goal_checker]
+    controller_plugins: [FollowPath]
+    progress_checker:
+      plugin: nav2_controller::SimpleProgressChecker
+      required_movement_radius: 0.08
+      movement_time_allowance: 100.0
+    goal_checker:
+      plugin: nav2_controller::SimpleGoalChecker
+      xy_goal_tolerance: 0.03
+      yaw_goal_tolerance: 0.025
+      stateful: true
+    FollowPath:
+      plugin: jgl_dwa_local_planner/DWAPlannerROS
+      brake_distance: 1.0
+      lfc: 0.3
+      forwNum: 0.1
+      pid_PA: 0.6
+      pid_PB: 0.4
+      frontdis_X: 0.0
+      back_distance: 2.5
+      jgl_rot_start_angle: 30.0
+      jgl_rot_stop_angle: 15.0
+      enable_bspline_reference_path: true
+      fixed_route_mode: false
+      reference_curve_type: bspline
+      bspline_sample_resolution: 0.10
+      bspline_control_point_spacing: 0.40
+      bspline_opt_iterations: 60
+      bspline_weight_smooth: 1.0
+      bspline_weight_obstacle: 2.0
+      bspline_weight_topo: 0.6
+      bspline_weight_curvature: 1.0
+      safe_distance: 0.10
+      reference_occupied_threshold: 98
+      max_deviation_from_topo: 0.50
+      max_curvature: 2.10
+      min_turn_radius: 0.476
+      tracking_max_curvature: 1.90
+      reference_fallback_boundary_distance: 0.15
+      reference_middle_pass_distance: 0.25
+      reference_terminal_xy_tolerance: 0.08
+      lookahead_distance: 0.50
+      v_min: 0.04
+      v_max: 0.20
+      end_slow_distance: 0.80
+      obstacle_slowdown_distance: 1.00
+      obstacle_stop_distance: 0.70
+      obstacle_wait_time: 10.0
+      path_deviation_replan_threshold: 0.60
+      path_regenerate_cooldown: 1.0
+      k_curve: 1.0
+      curvature_filter_tau: 0.25
+      max_curvature_rate: 1.5
+      curvature_deadband: 0.02
+      control_period: 0.10
+      yaw_goal_tolerance: 0.025
+      xy_goal_tolerance: 0.03
+      terminal_yaw_tolerance: 0.04
+      terminal_yaw_kp: 1.2
+      terminal_yaw_max_speed: 0.25
+      terminal_yaw_min_speed: 0.06
+      terminal_yaw_stable_cycles: 3
+      trajectory_generator_name: dwb_plugins::StandardTrajectoryGenerator
+      critics: [RotateToGoal, Oscillation, BaseObstacle, GoalAlign, PathAlign, PathDist, GoalDist]
+      min_vel_x: 0.05
+      min_vel_y: 0.0
+      max_vel_x: 0.20
+      max_vel_y: 0.0
+      max_vel_theta: 4.0
+      min_speed_xy: 0.01
+      max_speed_xy: 0.50
+      min_speed_theta: 0.10
+      acc_lim_x: 3.0
+      acc_lim_y: 0.0
+      acc_lim_theta: 4.2
+      decel_lim_x: -3.0
+      decel_lim_y: 0.0
+      decel_lim_theta: -4.2
+      vx_samples: 6
+      vy_samples: 1
+      vtheta_samples: 20
+      sim_time: 1.7
+      linear_granularity: 0.025
+      angular_granularity: 0.10
+      transform_tolerance: 0.2
+      short_circuit_trajectory_evaluation: true
+      stateful: true
+      Oscillation.oscillation_reset_dist: 0.03
+      BaseObstacle.scale: 0.05
+      PathAlign.scale: 55.0
+      PathAlign.forward_point_distance: 0.30
+      GoalAlign.scale: 20.0
+      GoalAlign.forward_point_distance: 0.30
+      PathDist.scale: 55.0
+      GoalDist.scale: 20.0
+      RotateToGoal.scale: 32.0
+      RotateToGoal.slowing_factor: 5.0
+      RotateToGoal.lookahead_time: -1.0
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      global_frame: map
+      robot_base_frame: base_link
+      update_frequency: 10.0
+      publish_frequency: 10.0
+      rolling_window: true
+      width: 3
+      height: 3
+      resolution: 0.05
+      transform_tolerance: 0.5
+      footprint: "[[0.36, 0.25], [0.36, -0.25], [-0.36, -0.25], [-0.36, 0.25]]"
+      plugins: [obstacle_layer, decay_obstacle_layer, blind_clear_layer, inflation_layer]
+      obstacle_layer:
+        plugin: nav2_costmap_2d::ObstacleLayer
+        enabled: true
+        observation_sources: pointcloud
+        pointcloud:
+          topic: /livox_pcl0
+          sensor_frame: livox_frame
+          data_type: PointCloud2
+          clearing: true
+          marking: true
+          min_obstacle_height: -0.25
+          max_obstacle_height: 1.2
+          obstacle_min_range: 0.0
+          obstacle_max_range: 3.0
+          raytrace_min_range: 0.0
+          raytrace_max_range: 3.0
+      decay_obstacle_layer:
+        plugin: jgl_dwa_local_planner/DecayObstacleLayer
+        enabled: true
+        input_topic: /livox_pcl0
+        decay_time: 0.8
+        prune_time: 10.0
+        update_bounds_range: 2.2
+        min_obstacle_height: -0.25
+        max_obstacle_height: 1.2
+        obstacle_range: 3.0
+        transform_tolerance: 0.2
+        lethal_threshold: 254
+      blind_clear_layer:
+        plugin: jgl_dwa_local_planner/BlindClearLayer
+        enabled: true
+        min_angle_deg: -110.0
+        max_angle_deg: 110.0
+        clear_range: 2.2
+        keep_radius: 0.15
+      inflation_layer:
+        plugin: nav2_costmap_2d::InflationLayer
+        enabled: true
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.35
+      always_send_full_costmap: true
+
+bt_navigator:
+  ros__parameters:
+    global_frame: map
+    robot_base_frame: base_link
+    odom_topic: /odom
+    transform_tolerance: 0.5
+    bt_loop_duration: 10
+    default_server_timeout: 20
+    plugin_lib_names:
+      - nav2_compute_path_to_pose_action_bt_node
+      - nav2_compute_path_through_poses_action_bt_node
+      - nav2_follow_path_action_bt_node
+      - nav2_pipeline_sequence_bt_node
+      - nav2_rate_controller_bt_node
+
+lifecycle_manager_navigation:
+  ros__parameters:
+    autostart: true
+    bond_timeout: 4.0
+    node_names: [planner_server, controller_server, bt_navigator]
+
+mxb_move_base:
+  ros__parameters:
+    navigate_action: /navigate_to_pose
+    planner_service: /planner_server/GridBased/make_plan
+    local_clear_service: /local_costmap/clear_entirely_local_costmap
+    global_clear_service: /global_costmap/clear_entirely_global_costmap
+    service_timeout: 3.0

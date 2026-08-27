@@ -1,84 +1,59 @@
-cmake_minimum_required(VERSION 2.8.3)
+cmake_minimum_required(VERSION 3.8)
 project(mxb_move_base)
 
-find_package(catkin REQUIRED
-    COMPONENTS
-        actionlib
-        base_local_planner
-        clear_costmap_recovery
-        cmake_modules
-        costmap_2d
-        dynamic_reconfigure
-        geometry_msgs
-        message_generation
-        move_base_msgs
-        nav_core
-        nav_msgs
-        navfn
-        pluginlib
-        roscpp
-        rospy
-        rotate_recovery
-        std_msgs
-        std_srvs
-        tf2_geometry_msgs
-        tf2_ros
-)
-find_package(Eigen3 REQUIRED)
-add_definitions(${EIGEN3_DEFINITIONS})
+if(NOT CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 17)
+endif()
 
-# dynamic reconfigure
-generate_dynamic_reconfigure_options(
-    cfg/MoveBase.cfg
+find_package(ament_cmake REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(nav2_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rclcpp_action REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
+
+add_executable(mxb_move_base src/move_base_compat.cpp)
+ament_target_dependencies(mxb_move_base
+  geometry_msgs
+  nav2_msgs
+  nav_msgs
+  rclcpp
+  rclcpp_action
+  std_msgs
+  std_srvs
 )
 
-catkin_package(
-    CATKIN_DEPENDS
-        dynamic_reconfigure
-        geometry_msgs
-        move_base_msgs
-        nav_msgs
-        roscpp
-        std_msgs
+install(TARGETS mxb_move_base
+  DESTINATION lib/${PROJECT_NAME}
 )
 
-include_directories(
-    include
-    ${catkin_INCLUDE_DIRS}
-    ${EIGEN3_INCLUDE_DIRS}
+install(DIRECTORY config launch behavior_trees
+  DESTINATION share/${PROJECT_NAME}
 )
 
-# move_base
-add_library(mxb_move_base
-  src/move_base.cpp
-)
-target_link_libraries(mxb_move_base
-    ${Boost_LIBRARIES}
-    ${catkin_LIBRARIES}
-    )
-add_dependencies(mxb_move_base ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+if(BUILD_TESTING)
+  find_package(ament_cmake_copyright REQUIRED)
+  find_package(ament_cmake_cpplint REQUIRED)
+  find_package(ament_cmake_flake8 REQUIRED)
+  find_package(ament_cmake_lint_cmake REQUIRED)
+  find_package(ament_cmake_pep257 REQUIRED)
+  find_package(ament_cmake_uncrustify REQUIRED)
+  find_package(ament_cmake_xmllint REQUIRED)
 
-add_executable(move_base_node
-  src/move_base_node.cpp
-)
-add_dependencies(move_base_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
-target_link_libraries(move_base_node mxb_move_base)
-set_target_properties(move_base_node PROPERTIES OUTPUT_NAME mxb_move_base)
+  ament_copyright(src/move_base_compat.cpp launch/navigation.launch.py)
+  ament_cpplint(src/move_base_compat.cpp)
+  ament_flake8(launch/navigation.launch.py)
+  ament_lint_cmake(CMakeLists.txt)
+  ament_pep257(launch/navigation.launch.py)
+  ament_uncrustify(src/move_base_compat.cpp)
+  ament_xmllint(
+    package.xml
+    behavior_trees/navigate_through_poses.xml
+    behavior_trees/navigate_to_pose_fixed_route.xml
+    behavior_trees/navigate_to_pose_replanning.xml
+  )
+endif()
 
-install(
-    TARGETS
-        move_base_node
-    DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
-)
-
-install(
-    TARGETS
-          mxb_move_base
-    DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-)
-
-## Mark cpp header files for installation
-install(DIRECTORY include/${PROJECT_NAME}/
-  DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
-  FILES_MATCHING PATTERN "*.h"
-)
+ament_package()
