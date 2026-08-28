@@ -1,7 +1,7 @@
 #ifndef LIO_LITE_POINTCLOUD_PROCESSING_H
 #define LIO_LITE_POINTCLOUD_PROCESSING_H
 
-#include <livox_ros_driver/CustomMsg.h>
+#include <livox_ros_driver2/msg/custom_msg.hpp>
 #include <pcl_conversions/pcl_conversions.h>
 
 #include <pcl/point_cloud.h>
@@ -89,8 +89,8 @@ class PointCloudPreprocess {
     ~PointCloudPreprocess() = default;
 
     /// processors
-    void Process(const livox_ros_driver::CustomMsg::ConstPtr &msg, PointCloudType::Ptr &pcl_out);
-    void Process(const sensor_msgs::PointCloud2::ConstPtr &msg, PointCloudType::Ptr &pcl_out);
+    void Process(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr &msg, PointCloudType::Ptr &pcl_out);
+    void Process(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, PointCloudType::Ptr &pcl_out);
     void Set(LidarType lid_type, double bld, int pfilt_num);
 
     // accessors
@@ -107,10 +107,10 @@ class PointCloudPreprocess {
     void SetLidarType(LidarType lt) { lidar_type_ = lt; }
 
    private:
-    void AviaHandler(const livox_ros_driver::CustomMsg::ConstPtr &msg);
-    void Oust64Handler(const sensor_msgs::PointCloud2::ConstPtr &msg);
-    void VelodyneHandler(const sensor_msgs::PointCloud2::ConstPtr &msg);
-    void HesaiHandler(const sensor_msgs::PointCloud2::ConstPtr&);
+    void AviaHandler(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr &msg);
+    void Oust64Handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
+    void VelodyneHandler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
+    void HesaiHandler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr&);
 
     PointCloudType cloud_full_, cloud_out_;
 

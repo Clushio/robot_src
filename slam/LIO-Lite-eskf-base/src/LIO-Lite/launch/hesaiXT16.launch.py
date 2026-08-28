@@ -1,0 +1,30 @@
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+from ament_index_python.packages import get_package_share_directory
+import os
+
+
+def generate_launch_description():
+    share = get_package_share_directory('lio_lite')
+    return LaunchDescription([
+        DeclareLaunchArgument('rviz', default_value='true'),
+        Node(
+            package='lio_lite',
+            executable='run_mapping_online',
+            name='laserMapping',
+            output='screen',
+            parameters=[os.path.join(share, 'config', 'hesaixt16_ros2.yaml')],
+        ),
+        Node(
+            package='rviz2',
+            executable='rviz2',
+            name='rviz',
+            prefix='nice',
+            arguments=['-d', os.path.join(share, 'launch', 'include', 'rviz.rviz')],
+            condition=IfCondition(LaunchConfiguration('rviz')),
+            output='screen',
+        ),
+    ])

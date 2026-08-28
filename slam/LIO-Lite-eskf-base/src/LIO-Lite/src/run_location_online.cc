@@ -8,7 +8,7 @@
 DEFINE_bool(need_logs, true, "save logs for check");
 void SigHandle(int sig) {
     lio_lite::options::FLAG_EXIT = true;
-    ROS_WARN("catch sig %d", sig);
+    LOG(WARNING) << "catch sig " << sig;
 }
 
 int main(int argc, char **argv) {
@@ -17,25 +17,29 @@ int main(int argc, char **argv) {
     if(FLAGS_need_logs){
         save_log("local");
     }
-    ros::init(argc, argv, "lio_lite");
-    ros::NodeHandle nh;
+    rclcpp::init(argc, argv);
+    auto node = std::make_shared<rclcpp::Node>("lio_lite");
     
     LOG(INFO) << "\033[1;32m run_location_online \033[0m";
 
     auto laser_mapping = std::make_shared<lio_lite::LaserMapping>();
-    laser_mapping->InitROS(nh);
+    if (!laser_mapping->InitROS(node)) {
+        LOG(ERROR) << "failed to initialize LIO";
+        rclcpp::shutdown();
+        return 1;
+    }
     //time.sleep(5)
 
     signal(SIGINT, SigHandle);
-    ros::Rate rate(5000);
+    rclcpp::WallRate rate(5000.0);
     
     laser_mapping->Load_map();
 
-    while (ros::ok()) {
+    while (rclcpp::ok()) {
         if (lio_lite::options::FLAG_EXIT) {
             break;
         }
-        ros::spinOnce();
+        rclcpp::spin_some(node);
         laser_mapping->Run_location();
         rate.sleep();
     }
@@ -44,6 +48,7 @@ int main(int argc, char **argv) {
     laser_mapping->Finish();
 
     lio_lite::Timer::PrintAll();
+    rclcpp::shutdown();
 
     return 0;
 }

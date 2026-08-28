@@ -2,9 +2,9 @@
 #define LIO_LITE_IMU_PROCESSING_H
 
 #include <glog/logging.h>
-#include <nav_msgs/Odometry.h>
-#include <sensor_msgs/Imu.h>
-#include <sensor_msgs/PointCloud2.h>
+#include <nav_msgs/msg/odometry.hpp>
+#include <sensor_msgs/msg/imu.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
 #include <cmath>
 #include <deque>
 #include <fstream>
@@ -53,8 +53,8 @@ class ImuProcess {
                       PointCloudType &pcl_out);
 
     PointCloudType::Ptr cur_pcl_un_;
-    sensor_msgs::ImuConstPtr last_imu_;
-    std::deque<sensor_msgs::ImuConstPtr> v_imu_;
+    sensor_msgs::msg::Imu::ConstSharedPtr last_imu_;
+    std::deque<sensor_msgs::msg::Imu::ConstSharedPtr> v_imu_;
     std::vector<common::Pose6D> IMUpose_;
     std::vector<common::M3D> v_rot_pcl_;
     common::M3D Lidar_R_wrt_IMU_;
@@ -81,7 +81,7 @@ ImuProcess::ImuProcess() : b_first_frame_(true), imu_need_init_(true) {
     angvel_last_ = common::Zero3d;
     Lidar_T_wrt_IMU_ = common::Zero3d;
     Lidar_R_wrt_IMU_ = common::Eye3d;
-    last_imu_.reset(new sensor_msgs::Imu());
+    last_imu_.reset(new sensor_msgs::msg::Imu());
 }
 
 ImuProcess::~ImuProcess() {}
@@ -94,7 +94,7 @@ void ImuProcess::Reset() {
     init_iter_num_ = 1;
     v_imu_.clear();
     IMUpose_.clear();
-    last_imu_.reset(new sensor_msgs::Imu());
+    last_imu_.reset(new sensor_msgs::msg::Imu());
     cur_pcl_un_.reset(new PointCloudType());
 }
 
@@ -205,8 +205,8 @@ void ImuProcess::UndistortPcl(const common::MeasureGroup &meas, esekfom::esekf<s
     /*** add the imu_ of the last frame-tail to the of current frame-head ***/
     auto v_imu = meas.imu_;
     v_imu.push_front(last_imu_);
-    const double &imu_beg_time = v_imu.front()->header.stamp.toSec();
-    const double &imu_end_time = v_imu.back()->header.stamp.toSec();
+    const double imu_beg_time = common::StampToSec(v_imu.front()->header.stamp);
+    const double imu_end_time = common::StampToSec(v_imu.back()->header.stamp);
     const double &pcl_beg_time = meas.lidar_bag_time_;
     const double &pcl_end_time = meas.lidar_end_time_;
 
@@ -232,7 +232,7 @@ void ImuProcess::UndistortPcl(const common::MeasureGroup &meas, esekfom::esekf<s
         auto &&head = *(it_imu);
         auto &&tail = *(it_imu + 1);
 
-        if (tail->header.stamp.toSec() < last_lidar_end_time_) {
+        if (common::StampToSec(tail->header.stamp) < last_lidar_end_time_) {
             continue;
         }
 
@@ -245,10 +245,10 @@ void ImuProcess::UndistortPcl(const common::MeasureGroup &meas, esekfom::esekf<s
 
         acc_avr = acc_avr * common::G_m_s2 / mean_acc_.norm();  // - state_inout.ba;
 
-        if (head->header.stamp.toSec() < last_lidar_end_time_) {
-            dt = tail->header.stamp.toSec() - last_lidar_end_time_;
+        if (common::StampToSec(head->header.stamp) < last_lidar_end_time_) {
+            dt = common::StampToSec(tail->header.stamp) - last_lidar_end_time_;
         } else {
-            dt = tail->header.stamp.toSec() - head->header.stamp.toSec();
+            dt = common::StampToSec(tail->header.stamp) - common::StampToSec(head->header.stamp);
         }
 
         in.acc = acc_avr;
@@ -267,7 +267,7 @@ void ImuProcess::UndistortPcl(const common::MeasureGroup &meas, esekfom::esekf<s
             acc_s_last_[i] += imu_state.grav[i];
         }
 
-        double &&offs_t = tail->header.stamp.toSec() - pcl_beg_time;
+        double &&offs_t = common::StampToSec(tail->header.stamp) - pcl_beg_time;
         IMUpose_.emplace_back(common::set_pose6d(offs_t, acc_s_last_, angvel_last_, imu_state.vel, imu_state.pos,
                                                  imu_state.rot.toRotationMatrix()));
     }
@@ -329,7 +329,7 @@ void ImuProcess::Process(const common::MeasureGroup &meas, esekfom::esekf<state_
         return;
     }
 
-    ROS_ASSERT(meas.lidar_ != nullptr);
+    assert(meas.lidar_ != nullptr);
 
     if (imu_need_init_) {
         /// The very first lidar frame

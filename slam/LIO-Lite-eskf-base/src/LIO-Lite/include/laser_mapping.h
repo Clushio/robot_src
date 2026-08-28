@@ -1,19 +1,22 @@
 #ifndef LIO_LITE_LASER_MAPPING_H
 #define LIO_LITE_LASER_MAPPING_H
 
-#include <livox_ros_driver/CustomMsg.h>
-#include <nav_msgs/Path.h>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
+#include <livox_ros_driver2/msg/custom_msg.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+#include <nav_msgs/msg/path.hpp>
 #include <pcl/filters/voxel_grid.h>
-#include <ros/ros.h>
-#include <sensor_msgs/PointCloud2.h>
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/imu.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
+#include <tf2_ros/transform_broadcaster.hpp>
 #include <condition_variable>
 #include <memory>
 #include <thread>
 
 #include <mutex>
 #include <chrono>
-#include <geometry_msgs/PoseStamped.h>
-#include <geometry_msgs/PoseWithCovarianceStamped.h>
 #include <pcl/registration/icp.h>
 #include <pcl/registration/ndt.h>
 #include <pcl/kdtree/kdtree_flann.h>
@@ -53,7 +56,7 @@ class LaserMapping {
     }
 
     /// init with ros
-    bool InitROS(ros::NodeHandle &nh);
+    bool InitROS(const rclcpp::Node::SharedPtr &node);
 
     /// init without ros
     bool InitWithoutROS(const std::string &config_yaml);
@@ -61,9 +64,9 @@ class LaserMapping {
     void Run();
 
     // callbacks of lidar and imu
-    void StandardPCLCallBack(const sensor_msgs::PointCloud2::ConstPtr &msg);
-    void LivoxPCLCallBack(const livox_ros_driver::CustomMsg::ConstPtr &msg);
-    void IMUCallBack(const sensor_msgs::Imu::ConstPtr &msg_in);
+    void StandardPCLCallBack(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
+    void LivoxPCLCallBack(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr &msg);
+    void IMUCallBack(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in);
 
     // sync lidar with imu
     bool SyncPackages();
@@ -73,11 +76,12 @@ class LaserMapping {
     void ObsModel_location(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_data);
 
     ////////////////////////////// debug save / show ////////////////////////////////////////////////////////////////
-    void PublishPath(const ros::Publisher pub_path);
-    void PublishOdometry(const ros::Publisher &pub_odom_aft_mapped);
+    void PublishPath(const rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr &pub_path);
+    void PublishOdometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr &pub_odom_aft_mapped);
     void PublishFrameWorld();
-    void PublishFrameBody(const ros::Publisher &pub_laser_cloud_body);
-    void PublishFrameEffectWorld(const ros::Publisher &pub_laser_cloud_effect_world);
+    void PublishFrameBody(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pub_laser_cloud_body);
+    void PublishFrameEffectWorld(
+        const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pub_laser_cloud_effect_world);
     void Savetrajectory(const std::string &traj_file);
 
     void Finish();
@@ -87,15 +91,15 @@ class LaserMapping {
     void Load_map();
     void Run_location();
   private:
-    void initialpose_callback(const geometry_msgs::PoseWithCovarianceStampedConstPtr& pose_msg);
+    void initialpose_callback(const geometry_msgs::msg::PoseWithCovarianceStamped::ConstSharedPtr& pose_msg);
     void initialpose();
     void initialpose2();
-    void VisualMap(const ros::TimerEvent &e);
-    ros::Subscriber sub_init_pose_;
-    ros::Publisher pub_global_map_, pub_feature_map_;
-    ros::Publisher pub_msg2uav_;
-    ros::Timer visual_timer_;
-    sensor_msgs::PointCloud2 msg_map_, msg_feature_;
+    void VisualMap();
+    rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr sub_init_pose_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_global_map_, pub_feature_map_;
+    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pub_msg2uav_;
+    rclcpp::TimerBase::SharedPtr visual_timer_;
+    sensor_msgs::msg::PointCloud2 msg_map_, msg_feature_;
     bool flg_islocation_mode_ = false;
     bool flg_location_inited_ = false;
     bool flg_get_init_guess_ = false;
@@ -123,10 +127,23 @@ class LaserMapping {
 
     void MapIncremental();
 
-    void SubAndPubToROS(ros::NodeHandle &nh);
+    void SubAndPubToROS();
 
-    bool LoadParams(ros::NodeHandle &nh);
+    bool LoadParams();
     bool LoadParamsFromYAML(const std::string &yaml);
+
+    template <typename T>
+    void LoadParam(const std::string &name, T &value, const T &default_value) {
+        value = node_->declare_parameter<T>(name, default_value);
+    }
+
+    void LoadParam(const std::string &name, int &value, int default_value) {
+        value = static_cast<int>(node_->declare_parameter<int64_t>(name, default_value));
+    }
+
+    void LoadParam(const std::string &name, float &value, float default_value) {
+        value = static_cast<float>(node_->declare_parameter<double>(name, default_value));
+    }
 
     void PrintState(const state_ikfom &s);
     
@@ -165,21 +182,24 @@ class LaserMapping {
     common::VV4F plane_coef_;                         // plane coeffs
 
     /// ros pub and sub stuffs
-    ros::Subscriber sub_pcl_;
-    ros::Subscriber sub_imu_;
-    ros::Publisher pub_laser_cloud_world_;
-    ros::Publisher pub_laser_cloud_body_;
-    ros::Publisher pub_laser_cloud_effect_world_;
-    ros::Publisher pub_static_cloud_;
-    ros::Publisher pub_dynamic_candidate_cloud_;
-    ros::Publisher pub_odom_aft_mapped_;
-    ros::Publisher pub_path_;
+    rclcpp::Node::SharedPtr node_;
+    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_pcl_;
+    rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr sub_livox_pcl_;
+    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_laser_cloud_world_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_laser_cloud_body_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_laser_cloud_effect_world_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_static_cloud_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_dynamic_candidate_cloud_;
+    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom_aft_mapped_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_path_;
+    std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
     std::mutex mtx_buffer_;
     std::deque<double> time_buffer_;
     std::deque<PointCloudType::Ptr> lidar_buffer_;
-    std::deque<sensor_msgs::Imu::ConstPtr> imu_buffer_;
-    nav_msgs::Odometry odom_aft_mapped_;
+    std::deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu_buffer_;
+    nav_msgs::msg::Odometry odom_aft_mapped_;
 
     /// options
     bool time_sync_en_ = false;
@@ -225,8 +245,8 @@ class LaserMapping {
     CloudPtr pcl_feature_point_{new PointCloudType()};
     StaticMapFilter::Options dynamic_filter_options_;
     std::unique_ptr<StaticMapFilter> static_map_filter_;
-    nav_msgs::Path path_;
-    geometry_msgs::PoseStamped msg_body_pose_;
+    nav_msgs::msg::Path path_;
+    geometry_msgs::msg::PoseStamped msg_body_pose_;
 
     /////////////////////////  location  //////////////////////////////////////////////////////////////
     bool split_map_ = false;

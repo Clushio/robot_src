@@ -10,7 +10,7 @@
 #include <glog/logging.h>
 #include <gflags/gflags.h>
 
-#include <ros/package.h>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 
 
 using namespace std;
@@ -31,15 +31,15 @@ void save_log(const string& dir){
   strftime(time_str, sizeof(time_str), "%Y%m%d-%H%M%S", localtime(&now_c));
 	std::string package_path, log_folder;
 	if (dir == "local"){
-		package_path = ros::package::getPath("lio_lite");
+		package_path = ament_index_cpp::get_package_share_directory("lio_lite");
 		log_folder = package_path + "/logs/" + time_str + "/";
 		if (!std::filesystem::exists(log_folder)) {
-			std::filesystem::create_directory(log_folder);
+			std::filesystem::create_directories(log_folder);
 		}
 	}else{
 		log_folder = dir + "/" + time_str + "/";
 		if (!std::filesystem::exists(log_folder)) {
-			std::filesystem::create_directory(log_folder);
+			std::filesystem::create_directories(log_folder);
 		}
 	}
   FLAGS_log_dir = log_folder;
