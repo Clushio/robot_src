@@ -118,7 +118,7 @@ map.yaml + map.pgm + robot_positions.txt
 - `/cmd_vel/candidate`：带来源的候选速度；
 - `/odom`：实测底盘运动；
 - `/map`：静态占据地图；
-- `/mxb_move_base/local_costmap/costmap`：局部障碍地图；
+- `/local_costmap/costmap`：Nav2 局部障碍地图；
 - `map -> base_link` TF；
 - `collision_monitor/config/robot_footprint.yaml`：物理 footprint。
 

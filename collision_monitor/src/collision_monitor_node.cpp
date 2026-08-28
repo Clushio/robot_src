@@ -278,7 +278,7 @@ class CollisionMonitorNode : public rclcpp::Node {
     Param("static_map_topic", static_map_topic_,
                       std::string("/map"));
     Param("local_map_topic", local_map_topic_,
-                      std::string("/mxb_move_base/local_costmap/costmap"));
+                      std::string("/local_costmap/costmap"));
     Param("status_topic", status_topic_,
                       std::string("/diagnostics"));
     Param("marker_topic", marker_topic_,

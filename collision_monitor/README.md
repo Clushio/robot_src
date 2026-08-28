@@ -357,7 +357,7 @@ OK = 0    WARN = 1    ERROR = 2
 默认 local costmap 话题：
 
 ```text
-/mxb_move_base/local_costmap/costmap
+/local_costmap/costmap
 ```
 
 静态 `/map` 的处理规则：

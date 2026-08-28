@@ -4,7 +4,7 @@ collision_monitor:
     output_topic: /cmd_vel
     odom_topic: /odom
     static_map_topic: /map
-    local_map_topic: /mxb_move_base/local_costmap/costmap
+    local_map_topic: /local_costmap/costmap
     status_topic: /diagnostics
     marker_topic: /collision_monitor/markers
 
