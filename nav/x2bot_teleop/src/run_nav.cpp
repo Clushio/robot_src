@@ -1,3 +1,4 @@
+#include <ament_index_cpp/get_package_share_directory.hpp>
 #include <cmd_vel_arbiter/srv/finish_motion.hpp>
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <diagnostic_msgs/msg/diagnostic_status.hpp>
@@ -280,6 +281,15 @@ public:
         block_bidirectional_ = declare_parameter<bool>("block_bidirectional", block_bidirectional_);
         static_map_inflation_radius_ =
             declare_parameter<double>("static_map_inflation_radius", static_map_inflation_radius_);
+        fixed_route_behavior_tree_ = declare_parameter<std::string>(
+            "fixed_route_behavior_tree", defaultFixedRouteBehaviorTree());
+        if (!fileExists(fixed_route_behavior_tree_))
+        {
+            RCLCPP_WARN(
+                get_logger(),
+                "Fixed-route behavior tree is unavailable: %s. Fixed-route tasks will be rejected.",
+                fixed_route_behavior_tree_.c_str());
+        }
 
         initializeGlobalAC();
         const auto cmd_vel_topic = declare_parameter<std::string>("cmd_vel_topic", "/cmd_vel/nav");
@@ -803,6 +813,7 @@ private:
     std::vector<int> active_path_;
     int active_next_index_ = -1;
     std::string maps_dir_;
+    std::string fixed_route_behavior_tree_;
     bool static_map_loaded_;
     int static_map_width_;
     int static_map_height_;
@@ -1024,6 +1035,13 @@ private:
             rclcpp::get_logger("target_pose_loader"),
             "HOME is not set; falling back to /home/nav/maps.");
         return "/home/nav/maps";
+    }
+
+    static std::string defaultFixedRouteBehaviorTree()
+    {
+        return joinPath(
+            ament_index_cpp::get_package_share_directory("mxb_move_base"),
+            "behavior_trees/navigate_to_pose_fixed_route.xml");
     }
 
     void normalizeMapsDir()
@@ -2649,6 +2667,19 @@ private:
         else
         {
             mb_goal.pose = toPoseStamped(target_pose);
+        }
+
+        if (fixed_route)
+        {
+            if (!fileExists(fixed_route_behavior_tree_))
+            {
+                RCLCPP_ERROR(
+                    get_logger(),
+                    "Reject fixed-route goal P%d because behavior tree is unavailable: %s",
+                    target_index, fixed_route_behavior_tree_.c_str());
+                return GOAL_FAILED;
+            }
+            mb_goal.behavior_tree = fixed_route_behavior_tree_;
         }
 
         active_next_index_ = target_index;

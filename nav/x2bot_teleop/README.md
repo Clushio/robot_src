@@ -162,6 +162,10 @@ GUI 也使用 `/joy` 发送“记录点位、开始、暂停、继续”等兼�
 - ROS1 `move_base` action 映射为标准 Nav2
   `/navigate_to_pose`（`nav2_msgs/action/NavigateToPose`），可用
   `navigate_action` 参数覆盖；拓扑选路、堵塞判断和到点复核算法未改变。
+- 固定路线任务会在每个 `NavigateToPose` goal 的 `behavior_tree` 字段中显式指定
+  `mxb_move_base/behavior_trees/navigate_to_pose_fixed_route.xml`。该树只计算一次路径，
+  保持 ROS1 固定路线不因周期重规划换路的语义；路径可用
+  `fixed_route_behavior_tree` 参数覆盖，文件无效时固定路线任务会被拒绝。
 - `SetInt.srv` 的 `currentID` 因 ROS2 接口字段规范改为 `current_id`。
 - TF 查询改用 TF2 buffer/listener；frame 仍为 `map` 和 `base_link`。
 - 固定路线状态不再写另一个节点的私有参数，而由 transient-local

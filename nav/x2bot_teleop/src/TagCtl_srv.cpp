@@ -61,18 +61,18 @@ public:
           target_y_m_(0.0),
           target_yaw_rad_(0.0),
           current_yaw_rad_(0.0),
+          last_update_time_(0, 0, get_clock()->get_clock_type()),
           current_valid_(-99.0),
           filter_initialized_(false),
           yaw_pd_initialized_(false),
           previous_yaw_error_(0.0),
           previous_angular_speed_(0.0),
+          previous_yaw_time_(0, 0, get_clock()->get_clock_type()),
           yaw_stable_count_(0),
           yaw_stable_required_(5),
           tag_update_seq_(0),
           last_yaw_stable_seq_(0),
-          control_active_(false),
-          last_update_time_(0, 0, get_clock()->get_clock_type()),
-          previous_yaw_time_(0, 0, get_clock()->get_clock_type()) {
+          control_active_(false) {
         // 初始化参数
         kp_ = declare_parameter<double>("kp", 0.5);
         kp_x_ = declare_parameter<double>("kp_x", 0.5);

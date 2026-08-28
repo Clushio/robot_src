@@ -7,6 +7,7 @@ endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(cmd_vel_arbiter REQUIRED)
 find_package(diagnostic_msgs REQUIRED)
@@ -40,7 +41,7 @@ ament_target_dependencies(
 add_executable(runnav src/run_nav.cpp)
 ament_target_dependencies(
   runnav
-  cmd_vel_arbiter diagnostic_msgs geometry_msgs nav2_msgs nav_msgs rclcpp
+  ament_index_cpp cmd_vel_arbiter diagnostic_msgs geometry_msgs nav2_msgs nav_msgs rclcpp
   rclcpp_action sensor_msgs std_msgs std_srvs tf2 tf2_geometry_msgs tf2_ros
   visualization_msgs)
 target_link_libraries(runnav "${cpp_typesupport_target}")
