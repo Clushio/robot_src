@@ -1,6 +1,0 @@
-<launch>
-  <node pkg="x2bot_teleop" type="saveLocation" name="saveLocation" output="screen">
-  </node>
-
-
-</launch>

@@ -1,8 +1,0 @@
-<launch>
-  <arg name="tag_abort_timeout" default="10.0"/>
-
-  <node pkg="x2bot_teleop" type="TagCtl" name="TagCtl_service" output="screen">
-    <param name="tag_abort_timeout" value="$(arg tag_abort_timeout)"/>
-  </node>
-
-</launch>

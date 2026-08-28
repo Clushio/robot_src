@@ -9,13 +9,13 @@
 #include <QLineEdit>
 #include <QVBoxLayout>
 
-#include <pluginlib/class_list_macros.h>
-#include <rviz/config.h>
+#include <pluginlib/class_list_macros.hpp>
+#include <rviz_common/config.hpp>
 
 namespace robot_r
 {
 
-ANavPanel::ANavPanel(QWidget* parent) : rviz::Panel(parent)
+ANavPanel::ANavPanel(QWidget* parent) : rviz_common::Panel(parent)
 {
   sim_mode_checkbox_ = new QCheckBox("仿真模式", this);
   sim_mode_checkbox_->setChecked(false);
@@ -153,15 +153,15 @@ QPushButton* ANavPanel::makeButton(const QString& text)
   return button;
 }
 
-void ANavPanel::load(const rviz::Config& config)
+void ANavPanel::load(const rviz_common::Config& config)
 {
-  rviz::Panel::load(config);
+  rviz_common::Panel::load(config);
   sim_mode_checkbox_->setChecked(false);
 }
 
-void ANavPanel::save(rviz::Config config) const
+void ANavPanel::save(rviz_common::Config config) const
 {
-  rviz::Panel::save(config);
+  rviz_common::Panel::save(config);
   config.mapSetValue("SimMode", false);
 }
 
@@ -173,12 +173,12 @@ void ANavPanel::startSimulator()
     return;
   }
 
-  startLaunch("simulator", {"robot_r", "ranger_mini_sim.launch"});
+  startLaunch("simulator", {"robot_r", "ranger_mini_sim.launch.py"});
 }
 
 void ANavPanel::startSetLocation()
 {
-  startLaunch("setting_location", {"robot_r", "3settinglocation.launch"});
+  startLaunch("setting_location", {"robot_r", "3settinglocation.launch.py"});
   start_setting_button_->setEnabled(false);
   stop_setting_button_->setEnabled(true);
   setSettingButtonsVisible(true);
@@ -195,7 +195,7 @@ void ANavPanel::stopSetLocation()
 
 void ANavPanel::startRelocalization()
 {
-  startLaunch("localization", {"robot_r", "3startlocation.launch", "rviz_enable:=false"});
+  startLaunch("localization", {"robot_r", "3startlocation.launch.py", "rviz_enable:=false"});
   start_location_button_->setEnabled(false);
 }
 
@@ -208,7 +208,7 @@ void ANavPanel::quitRelocalization()
 
 void ANavPanel::startAutoNav()
 {
-  startLaunch("auto_nav", {"robot_r", "3navlocations.launch"});
+  startLaunch("auto_nav", {"robot_r", "3navlocations.launch.py"});
   auto_nav_button_->setEnabled(false);
   setNavShortcutsVisible(true);
 }
@@ -223,23 +223,23 @@ void ANavPanel::stopAutoNav()
 
 void ANavPanel::startMoveBase()
 {
-  startLaunch("move_base", {"robot_r", "5nav.launch"});
+  startLaunch("move_base", {"robot_r", "5nav.launch.py"});
 }
 
 void ANavPanel::startBase()
 {
-  startLaunch("base", {"ranger_bringup", "ranger_mini_v2.launch"});
+  startLaunch("base", {"ranger_bringup", "ranger_mini_v2.launch.py"});
 }
 
 void ANavPanel::startJoy()
 {
-  startLaunch("joy", {"x2bot_teleop", "x2bot_joy_PXN.launch"});
+  startLaunch("joy", {"x2bot_teleop", "x2bot_joy_PXN.launch.py"});
 }
 
 void ANavPanel::startTag()
 {
-  startTerminal("tag_mm3v", "roslaunch robot_r 6tagReadAndCtl_mm3v.launch; exec bash");
-  startTerminal("tag_tcp", "python3 tcpserver.py; exec bash");
+  startTerminal("tag_mm3v", "ros2 launch robot_r 6tagReadAndCtl_mm3v.launch.py; exec bash");
+  startTerminal("tag_tcp", "ros2 run robot_r tcpserver.py; exec bash");
 }
 
 void ANavPanel::startCan()
@@ -334,13 +334,22 @@ void ANavPanel::setYValue(double value, bool send)
   y_value_label_->setText(QString("当前Y=%1 m").arg(value, 0, 'f', 2));
   if (send)
   {
-    callService("set_y", {"call", "/set_target_y", QString::number(value, 'f', 3)});
+    const QString request = QString(
+      "{target_x: 0.0, target_y: %1, target_angle: 0.0}")
+      .arg(value, 0, 'f', 3);
+    callService(
+      "set_y",
+      {"service", "call", "/set_target_y", "x2bot_teleop/srv/SetTagY", request});
   }
 }
 
 void ANavPanel::goToPoint(int id)
 {
-  callService("go_to_point", {"call", "/plan_path_and_go", QString::number(id), QString::number(current_id_), "1"});
+  const QString request = QString("{data: %1, current_id: %2, run: 1}")
+    .arg(id).arg(current_id_);
+  callService(
+    "go_to_point",
+    {"service", "call", "/plan_path_and_go", "x2bot_teleop/srv/SetInt", request});
   current_id_ = id;
 }
 
@@ -351,7 +360,7 @@ void ANavPanel::goToWorkstation(int station_id)
 
 void ANavPanel::callService(const QString& key, const QStringList& arguments)
 {
-  startProgram(key, "rosservice", arguments);
+  startProgram(key, "ros2", arguments);
 }
 
 void ANavPanel::sendJoy(const QString& key, const QList<int>& buttons)
@@ -363,12 +372,16 @@ void ANavPanel::sendJoy(const QString& key, const QList<int>& buttons)
   }
 
   const QString payload = QString("{axes: [0.0, 0.0, 0.0], buttons: [%1]}").arg(button_values.join(", "));
-  startProgram(key, "rostopic", {"pub", "-1", "/joy", "sensor_msgs/Joy", payload});
+  startProgram(
+    key, "ros2",
+    {"topic", "pub", "--once", "/joy", "sensor_msgs/msg/Joy", payload});
 }
 
 void ANavPanel::startLaunch(const QString& key, const QStringList& arguments)
 {
-  startProgram(key, "roslaunch", arguments);
+  QStringList ros_arguments{"launch"};
+  ros_arguments.append(arguments);
+  startProgram(key, "ros2", ros_arguments);
 }
 
 void ANavPanel::startProgram(const QString& key, const QString& program, const QStringList& arguments)
@@ -457,4 +470,4 @@ QString ANavPanel::modeLabel() const
 
 }  // namespace robot_r
 
-PLUGINLIB_EXPORT_CLASS(robot_r::ANavPanel, rviz::Panel)
+PLUGINLIB_EXPORT_CLASS(robot_r::ANavPanel, rviz_common::Panel)

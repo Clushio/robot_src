@@ -1,12 +1,12 @@
 #ifndef ROBOT_R_RECORD_POSE_TOOL_H
 #define ROBOT_R_RECORD_POSE_TOOL_H
 
-#include <rviz/default_plugin/tools/goal_tool.h>
+#include <rviz_default_plugins/tools/goal_pose/goal_tool.hpp>
 
 namespace robot_r
 {
 
-class RecordPoseTool : public rviz::GoalTool
+class RecordPoseTool : public rviz_default_plugins::tools::GoalTool
 {
   Q_OBJECT
 

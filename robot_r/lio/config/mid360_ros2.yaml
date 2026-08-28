@@ -1,0 +1,74 @@
+/**:
+  ros__parameters:
+    common:
+      lid_topic: /livox/lidar
+      imu_topic: /livox/imu
+      time_sync_en: false
+    preprocess:
+      lidar_type: 1
+      scan_line: 4
+      blind2: 1.5
+      max_range2: 1600.0
+      time_scale: 0.001
+      angle_filter_en: true
+      min_angle_deg: -110.0
+      max_angle_deg: 110.0
+    mapping:
+      det_range: 40.0
+      acc_cov: 0.1
+      gyr_cov: 0.1
+      b_acc_cov: 0.0001
+      b_gyr_cov: 0.0001
+      extrinsic_est_en: false
+      extrinsic_T: [-0.011, -0.02329, 0.04412]
+      extrinsic_R: [1.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0,
+                    0.0, 0.0, 1.0]
+    publish:
+      path_publish_en: true
+      scan_publish_en: true
+      scan_effect_pub_en: true
+      dense_publish_en: false
+      scan_bodyframe_pub_en: true
+    pcd_save:
+      pcd_save_en: true
+      interval: -1
+    dynamic_filter:
+      enabled: true
+      keyframe_interval: 0.5
+      voxel_size: 0.30
+      match_radius: 0.30
+      min_hits: 3
+      min_observation_span: 1.0
+      free_keyframes_to_remove: 3
+      ray_end_margin: 0.40
+      candidate_timeout: 5.0
+      max_global_samples_per_voxel: 80
+      max_feature_samples_per_voxel: 40
+      min_confirmed_voxels: 100
+      publish_debug: true
+      save_raw: true
+    path_save_en: false
+    feature_extract_enable: false
+    point_filter_num: 3
+    max_iteration: 3
+    filter_size_surf: 0.5
+    filter_size_map: 0.5
+    cube_side_length: 1000.0
+    runtime_pos_log_enable: true
+    ivox_grid_resolution: 0.5
+    ivox_nearby_type: 18
+    esti_plane_threshold: 0.1
+    ivox_capacity: 1000000
+    location_mode: false
+    split_map: true
+    sub_grid_resolution: 80.0
+    load_g_map: GlobalMap.pcd
+    load_f_map: FeatureMap.pcd
+    load_eaf_size: 0.5
+    init_trans: [0.0, 0.0, 0.0]
+    init_rpy: [0.0, 0.0, 0.0]
+    init_icp_max_corr_dist: 3.0
+    init_icp_fitness_score_th: 0.35
+    init_max_translation_delta: 3.0
+    init_max_yaw_delta_deg: 45.0

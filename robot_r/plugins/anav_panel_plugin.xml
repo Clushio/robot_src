@@ -1,14 +1,14 @@
-<library path="lib/librobot_r_anav_panel">
+<library path="robot_r_anav_panel">
   <class name="robot_r/ANavPanel"
          type="robot_r::ANavPanel"
-         base_class_type="rviz::Panel">
+         base_class_type="rviz_common::Panel">
     <description>
       aNAV control panel for starting simulator, relocalization, and MoveBase.
     </description>
   </class>
   <class name="robot_r/RecordPoseTool"
          type="robot_r::RecordPoseTool"
-         base_class_type="rviz::Tool">
+         base_class_type="rviz_common::Tool">
     <description>
       Record a map pose to /anav/record_pose without sending a navigation goal.
     </description>

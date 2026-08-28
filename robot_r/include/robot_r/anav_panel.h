@@ -8,7 +8,7 @@
 #include <QTextEdit>
 #include <QWidget>
 
-#include <rviz/panel.h>
+#include <rviz_common/panel.hpp>
 
 class QCheckBox;
 class QLabel;
@@ -17,15 +17,15 @@ class QLineEdit;
 namespace robot_r
 {
 
-class ANavPanel : public rviz::Panel
+class ANavPanel : public rviz_common::Panel
 {
   Q_OBJECT
 
 public:
   explicit ANavPanel(QWidget* parent = nullptr);
 
-  void load(const rviz::Config& config) override;
-  void save(rviz::Config config) const override;
+  void load(const rviz_common::Config& config) override;
+  void save(rviz_common::Config config) const override;
 
 private Q_SLOTS:
   void startSimulator();
