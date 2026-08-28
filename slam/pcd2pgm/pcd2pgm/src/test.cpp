@@ -1,30 +1,24 @@
-#include <ros/ros.h>
+#include <iostream>
+#include <memory>
+#include <string>
 
-#include <nav_msgs/OccupancyGrid.h>
-#include <nav_msgs/GetMap.h>
-
-#include <sensor_msgs/PointCloud2.h>
+#include <nav_msgs/msg/occupancy_grid.hpp>
+#include <pcl/filters/passthrough.h>
+#include <pcl/filters/radius_outlier_removal.h>
 #include <pcl/io/pcd_io.h>
-#include <pcl_conversions/pcl_conversions.h>
-
 #include <pcl/point_types.h>
-#include <pcl/filters/passthrough.h>  //直通滤波器头文件
-#include <pcl/filters/voxel_grid.h>  //体素滤波器头文件
-#include <pcl/filters/statistical_outlier_removal.h>   //统计滤波器头文件
-#include <pcl/filters/conditional_removal.h>    //条件滤波器头文件
-#include <pcl/filters/radius_outlier_removal.h>   //半径滤波器头文件
-
-//#include "cartographer_ros_msgs/Serveice.h" 
+#include <pcl_conversions/pcl_conversions.h>
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
 
 std::string file_directory;
 std::string file_name;
 std::string pcd_file;
-
 std::string map_topic_name;
 
 const std::string pcd_format = ".pcd";
 
-nav_msgs::OccupancyGrid map_topic_msg;
+nav_msgs::msg::OccupancyGrid map_topic_msg;
 
 double thre_z_min = 0.3;
 double thre_z_max = 2.0;
@@ -42,158 +36,161 @@ int radius_min_neighbors = 10;
 
 bool savemap_f = true;
 
-pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_after_PassThrough(new pcl::PointCloud<pcl::PointXYZ>);
-pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_after_Radius(new pcl::PointCloud<pcl::PointXYZ>);
+pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_after_PassThrough(
+  new pcl::PointCloud<pcl::PointXYZ>);
+pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_after_Radius(
+  new pcl::PointCloud<pcl::PointXYZ>);
 pcl::PointCloud<pcl::PointXYZ>::Ptr pcd_cloud(new pcl::PointCloud<pcl::PointXYZ>);
 
-sensor_msgs::PointCloud2 outputpclmsg;
+sensor_msgs::msg::PointCloud2 outputpclmsg;
 
-void PassThroughFilter(const double& thre_low, const double& thre_high, const bool& flag_in);
+void PassThroughFilter(const double & thre_low, const double & thre_high, const bool & flag_in);
 
-void RadiusOutlierFilter(const pcl::PointCloud<pcl::PointXYZ>::Ptr& pcd_cloud, const double &radius, const int &thre_count);
+void RadiusOutlierFilter(
+  const pcl::PointCloud<pcl::PointXYZ>::Ptr & cloud,
+  const double & radius,
+  const int & thre_count);
 
-void SetMapTopicMsg(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, nav_msgs::OccupancyGrid& msg);
+void SetMapTopicMsg(
+  const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
+  nav_msgs::msg::OccupancyGrid & msg,
+  const rclcpp::Time & stamp);
 
-
-int main(int argc, char** argv)
+int main(int argc, char ** argv)
 {
-   ros::init(argc, argv, "pcl_filters");
-   ros::NodeHandle nh;
-   ros::NodeHandle private_nh("~");
+  rclcpp::init(argc, argv);
+  const auto node = std::make_shared<rclcpp::Node>("pcl_filters");
 
-   ros::Rate loop_rate(1.0);
+  file_directory = node->declare_parameter<std::string>(
+    "file_directory", "/home/suv/suvrobot/src/slam/LIO-Lite-eskf-base/src/LIO-Lite/maps");
+  RCLCPP_INFO(node->get_logger(), "*** file_directory = %s ***", file_directory.c_str());
 
-   private_nh.param("file_directory", file_directory, std::string("/home/suv/suvrobot/src/slam/LIO-Lite-eskf-base/src/LIO-Lite/maps"));
-   ROS_INFO("*** file_directory = %s ***\n", file_directory.c_str());
+  file_name = node->declare_parameter<std::string>("file_name", "GlobalMap");
+  RCLCPP_INFO(node->get_logger(), "*** file_name = %s ***", file_name.c_str());
 
+  pcd_file = file_directory + file_name + pcd_format;
+  RCLCPP_INFO(node->get_logger(), "*** pcd_file = %s ***", pcd_file.c_str());
 
-   private_nh.param("file_name", file_name, std::string("GlobalMap"));
-   ROS_INFO("*** file_name = %s ***\n", file_name.c_str());
+  thre_z_min = node->declare_parameter<double>("thre_z_min", -0.1);
+  thre_z_max = node->declare_parameter<double>("thre_z_max", 0.3);
+  flag_pass_through = node->declare_parameter<int>("flag_pass_through", 0);
+  grid_x = node->declare_parameter<double>("grid_x", 0.1);
+  grid_y = node->declare_parameter<double>("grid_y", 0.1);
+  grid_z = node->declare_parameter<double>("grid_z", 0.1);
+  thre_radius = node->declare_parameter<double>("thre_radius", 0.5);
+  radius_filter_enable = node->declare_parameter<bool>("radius_filter_enable", false);
+  radius_min_neighbors = node->declare_parameter<int>("radius_min_neighbors", 10);
+  map_resolution = node->declare_parameter<double>("map_resolution", 0.05);
+  map_topic_name = node->declare_parameter<std::string>("map_topic_name", "map");
+  savemap_f = node->declare_parameter<bool>("savemap", true);
 
-   pcd_file = file_directory + file_name + pcd_format;
-   ROS_INFO("*** pcd_file = %s ***\n", pcd_file.c_str());
+  const auto map_topic_pub = node->create_publisher<nav_msgs::msg::OccupancyGrid>(
+    map_topic_name, rclcpp::QoS(1));
+  const auto pcl_pub = node->create_publisher<sensor_msgs::msg::PointCloud2>(
+    "pcl_output", rclcpp::QoS(1));
+  outputpclmsg.header.frame_id = "map";
 
-   private_nh.param("thre_z_min", thre_z_min, -0.1);
-   private_nh.param("thre_z_max", thre_z_max, 0.3);
-   private_nh.param("flag_pass_through", flag_pass_through, 0);
-   private_nh.param("grid_x", grid_x, 0.1);
-   private_nh.param("grid_y", grid_y, 0.1);
-   private_nh.param("grid_z", grid_z, 0.1);
-   private_nh.param("thre_radius", thre_radius, 0.5);
-   private_nh.param("radius_filter_enable", radius_filter_enable, false);
-   private_nh.param("radius_min_neighbors", radius_min_neighbors, 10);
-   private_nh.param("map_resolution", map_resolution, 0.05);
-   private_nh.param("map_topic_name", map_topic_name, std::string("map"));
-   private_nh.param("savemap", savemap_f, true);
+  if (pcl::io::loadPCDFile<pcl::PointXYZ>(pcd_file, *pcd_cloud) == -1) {
+    RCLCPP_ERROR(node->get_logger(), "Couldn't read file: %s", pcd_file.c_str());
+    rclcpp::shutdown();
+    return -1;
+  }
 
-   ros::Publisher map_topic_pub = nh.advertise<nav_msgs::OccupancyGrid>(map_topic_name, 1);
-   ros::Publisher pcl_pub=nh.advertise<sensor_msgs::PointCloud2> ("pcl_output",1);
-   outputpclmsg.header.frame_id="map";
-   
+  std::cout << "初始点云数据点数：" << pcd_cloud->points.size() << std::endl;
+  std::cout << "threlow= " << thre_z_min << "threhig = " << thre_z_max << std::endl;
 
+  PassThroughFilter(thre_z_min, thre_z_max, static_cast<bool>(flag_pass_through));
 
+  if (radius_filter_enable) {
+    RadiusOutlierFilter(cloud_after_PassThrough, thre_radius, radius_min_neighbors);
+    SetMapTopicMsg(cloud_after_Radius, map_topic_msg, node->now());
+  } else {
+    SetMapTopicMsg(cloud_after_PassThrough, map_topic_msg, node->now());
+  }
 
-   if (pcl::io::loadPCDFile<pcl::PointXYZ> (pcd_file, *pcd_cloud) == -1)
-   {
-     PCL_ERROR ("Couldn't read file: %s \n", pcd_file.c_str());
-     return (-1);
-   }
+  rclcpp::WallRate loop_rate(1.0);
+  while (rclcpp::ok()) {
+    map_topic_pub->publish(map_topic_msg);
+    pcl_pub->publish(outputpclmsg);
+    rclcpp::spin_some(node);
+    loop_rate.sleep();
+  }
 
-   std::cout << "初始点云数据点数：" << pcd_cloud->points.size() << std::endl;
-
-   std::cout<<"threlow= "<<thre_z_min<<"threhig = "<<thre_z_max<<std::endl;
-
-   PassThroughFilter(thre_z_min, thre_z_max, bool(flag_pass_through));
-
-   if (radius_filter_enable)
-   {
-     RadiusOutlierFilter(cloud_after_PassThrough, thre_radius, radius_min_neighbors);
-     SetMapTopicMsg(cloud_after_Radius, map_topic_msg);
-   }
-   else
-   {
-     SetMapTopicMsg(cloud_after_PassThrough, map_topic_msg);
-   }
-
-   while(ros::ok())
-   {
-     map_topic_pub.publish(map_topic_msg);
-     pcl_pub.publish(outputpclmsg);
-
-     loop_rate.sleep();
-
-     ros::spinOnce();
-   }
-
-   return 0;
+  rclcpp::shutdown();
+  return 0;
 }
 
-void PassThroughFilter(const double &thre_low, const double &thre_high, const bool &flag_in)
+void PassThroughFilter(const double & thre_low, const double & thre_high, const bool & flag_in)
 {
-    /*方法一：直通滤波器对点云进行处理。*/
-    pcl::PassThrough<pcl::PointXYZ> passthrough;
-    passthrough.setInputCloud(pcd_cloud);//输入点云
-    passthrough.setFilterFieldName("z");//对z轴进行操作
-    std::cout<<"threlow= "<<thre_low<<"threhig ="<<thre_high<<std::endl;
-    passthrough.setFilterLimits(thre_low, thre_high);//设置直通滤波器操作范围
-    passthrough.setFilterLimitsNegative(flag_in);//true表示保留范围外，false表示保留范围内
-    passthrough.filter(*cloud_after_PassThrough);//执行滤波，过滤结果保存在 cloud_after_PassThrough
-    std::cout << "直通滤波后点云数据点数：" << cloud_after_PassThrough->points.size() << std::endl;
+  pcl::PassThrough<pcl::PointXYZ> passthrough;
+  passthrough.setInputCloud(pcd_cloud);
+  passthrough.setFilterFieldName("z");
+  std::cout << "threlow= " << thre_low << "threhig =" << thre_high << std::endl;
+  passthrough.setFilterLimits(thre_low, thre_high);
+  passthrough.setNegative(flag_in);
+  passthrough.filter(*cloud_after_PassThrough);
+  std::cout << "直通滤波后点云数据点数：" << cloud_after_PassThrough->points.size() << std::endl;
 
-    pcl::toROSMsg(*cloud_after_PassThrough, outputpclmsg);
-    outputpclmsg.header.frame_id="map";
+  pcl::toROSMsg(*cloud_after_PassThrough, outputpclmsg);
+  outputpclmsg.header.frame_id = "map";
 }
 
-void RadiusOutlierFilter(const pcl::PointCloud<pcl::PointXYZ>::Ptr& pcd_cloud0, const double &radius, const int &thre_count)
+void RadiusOutlierFilter(
+  const pcl::PointCloud<pcl::PointXYZ>::Ptr & cloud,
+  const double & radius,
+  const int & thre_count)
 {
-    pcl::RadiusOutlierRemoval<pcl::PointXYZ> radiusoutlier;  //创建滤波器
-
-    radiusoutlier.setInputCloud(pcd_cloud0);    //设置输入点云
-    radiusoutlier.setRadiusSearch(radius);     //设置radius为100的范围内找临近点
-    radiusoutlier.setMinNeighborsInRadius(thre_count); //设置查询点的邻域点集数小于2的删除
-
-    radiusoutlier.filter(*cloud_after_Radius);
-    std::cout << "半径滤波后点云数据点数：" << cloud_after_Radius->points.size() << std::endl;
+  pcl::RadiusOutlierRemoval<pcl::PointXYZ> radiusoutlier;
+  radiusoutlier.setInputCloud(cloud);
+  radiusoutlier.setRadiusSearch(radius);
+  radiusoutlier.setMinNeighborsInRadius(thre_count);
+  radiusoutlier.filter(*cloud_after_Radius);
+  std::cout << "半径滤波后点云数据点数：" << cloud_after_Radius->points.size() << std::endl;
 }
 
-void SetMapTopicMsg(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, nav_msgs::OccupancyGrid& msg)
+void SetMapTopicMsg(
+  const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
+  nav_msgs::msg::OccupancyGrid & msg,
+  const rclcpp::Time & stamp)
 {
-  msg.header.seq = 0;
-  msg.header.stamp = ros::Time::now();
+  msg.header.stamp = stamp;
   msg.header.frame_id = "map";
 
-  msg.info.map_load_time = ros::Time::now();
+  msg.info.map_load_time = stamp;
   msg.info.resolution = map_resolution;
 
-  double x_min, x_max, y_min, y_max;
-  double z_max_grey_rate = 0.05;
-  double z_min_grey_rate = 0.95;
-  double k_line = (z_max_grey_rate - z_min_grey_rate) / (thre_z_max - thre_z_min);
-  double b_line = (thre_z_max * z_min_grey_rate - thre_z_min * z_max_grey_rate) / (thre_z_max - thre_z_min);
+  double x_min;
+  double x_max;
+  double y_min;
+  double y_max;
+  const double z_max_grey_rate = 0.05;
+  const double z_min_grey_rate = 0.95;
+  const double k_line =
+    (z_max_grey_rate - z_min_grey_rate) / (thre_z_max - thre_z_min);
+  const double b_line =
+    (thre_z_max * z_min_grey_rate - thre_z_min * z_max_grey_rate) /
+    (thre_z_max - thre_z_min);
+  (void)k_line;
+  (void)b_line;
 
-  if(cloud->points.empty())
-  {
-    ROS_WARN("pcd is empty!\n");
-
+  if (cloud->points.empty()) {
+    RCLCPP_WARN(rclcpp::get_logger("pcd2pgm"), "pcd is empty!");
     return;
   }
 
-  for(int i = 0; i < cloud->points.size() - 1; i++)
-  {
-    if(i == 0)
-    {
+  for (std::size_t i = 0; i + 1 < cloud->points.size(); ++i) {
+    if (i == 0) {
       x_min = x_max = cloud->points[i].x;
       y_min = y_max = cloud->points[i].y;
     }
 
-    double x = cloud->points[i].x;
-    double y = cloud->points[i].y;
+    const double x = cloud->points[i].x;
+    const double y = cloud->points[i].y;
 
-    if(x < x_min) x_min = x;
-    if(x > x_max) x_max = x;
-
-    if(y < y_min) y_min = y;
-    if(y > y_max) y_max = y;
+    if (x < x_min) {x_min = x;}
+    if (x > x_max) {x_max = x;}
+    if (y < y_min) {y_min = y;}
+    if (y > y_max) {y_max = y;}
   }
 
   msg.info.origin.position.x = x_min;
@@ -204,24 +201,24 @@ void SetMapTopicMsg(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, nav_msgs::O
   msg.info.origin.orientation.z = 0.0;
   msg.info.origin.orientation.w = 1.0;
 
-  msg.info.width = int((x_max - x_min) / map_resolution);
-  msg.info.height = int((y_max - y_min) / map_resolution);
+  msg.info.width = static_cast<uint32_t>((x_max - x_min) / map_resolution);
+  msg.info.height = static_cast<uint32_t>((y_max - y_min) / map_resolution);
 
-  msg.data.resize(msg.info.width * msg.info.height);
   msg.data.assign(msg.info.width * msg.info.height, 0);
+  RCLCPP_INFO(rclcpp::get_logger("pcd2pgm"), "data size = %zu", msg.data.size());
 
-  ROS_INFO("data size = %d\n", msg.data.size());
+  for (const auto & point : cloud->points) {
+    const int i = static_cast<int>((point.x - x_min) / map_resolution);
+    if (i < 0 || i >= static_cast<int>(msg.info.width)) {
+      continue;
+    }
 
-  for(int iter = 0; iter < cloud->points.size(); iter++)
-  {
-    int i = int((cloud->points[iter].x - x_min) / map_resolution);
-    if(i < 0 || i >= msg.info.width) continue;
+    const int j = static_cast<int>((point.y - y_min) / map_resolution);
+    if (j < 0 || j >= static_cast<int>(msg.info.height) - 1) {
+      continue;
+    }
 
-    int j = int((cloud->points[iter].y - y_min) / map_resolution);
-    if(j < 0 || j >= msg.info.height - 1) continue;
-
-    msg.data[i + j * msg.info.width] = 100;
-//    msg.data[i + j * msg.info.width] = int(255 * (cloud->points[iter].z * k_line + b_line)) % 255;
+    msg.data[static_cast<std::size_t>(i) +
+      static_cast<std::size_t>(j) * msg.info.width] = 100;
   }
 }
-
