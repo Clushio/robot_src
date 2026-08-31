@@ -1,17 +1,9 @@
+#!/usr/bin/env python3
 
 import serial
 import time
 import math
 import threading
-
-
-import rospy
-import serial
-import time
-import math
-import threading
-from geometry_msgs.msg import PoseStamped
-from tf.transformations import quaternion_from_euler
 
 class SerialTagReader:
     def __init__(self, port='/dev/ttyUSB0', baudrate=38400, max_buffer_size=2048):

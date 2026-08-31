@@ -20,8 +20,12 @@ from PyQt5.QtGui import QDoubleValidator
 import os
 import signal
 
-import rospy
+import rclpy
 import tf2_ros
+from ament_index_python.packages import get_package_share_directory
+from rclpy.duration import Duration
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.time import Time
 from sensor_msgs.msg import Joy
 from nav_msgs.msg import Odometry
 from std_msgs.msg import String
@@ -39,7 +43,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def find_workspace_root():
-    """兼容 <workspace>/script 和标准的 <workspace>/src/script 两种目录结构。"""
+    """兼容源码目录和 colcon 安装目录。"""
     parent = os.path.dirname(SCRIPT_DIR)
     grandparent = os.path.dirname(parent)
     candidates = (
@@ -57,12 +61,15 @@ WORKSPACE_ROOT = find_workspace_root()
 
 
 def load_workspace_environment():
-    """自动加载脚本所在 catkin 工作空间，避免要求用户先 source setup.bash。"""
-    env_script = os.path.join(WORKSPACE_ROOT, 'devel', 'env.sh')
+    """直接从源码运行时加载所在 colcon 工作空间。"""
+    env_script = os.path.join(WORKSPACE_ROOT, 'install', 'local_setup.bash')
     if not os.path.isfile(env_script):
         return False
     try:
-        output = subprocess.check_output([env_script, 'env', '-0'])
+        output = subprocess.check_output([
+            'bash', '-c', 'source "$1" >/dev/null 2>&1; env -0',
+            '_', env_script,
+        ])
         loaded_environment = {}
         for entry in os.fsdecode(output).split('\0'):
             if '=' in entry:
@@ -80,15 +87,22 @@ for python_path in os.environ.get('PYTHONPATH', '').split(os.pathsep):
     if python_path and python_path not in sys.path:
         sys.path.insert(0, python_path)
 
-from cmd_vel_arbiter.srv import FinishMotion, FinishMotionRequest
+from cmd_vel_arbiter.srv import FinishMotion
 from ranger_msgs.msg import MotionState as RangerMotionState
-from x2bot_teleop.srv import NavConfig, NavConfigRequest
+from x2bot_teleop.srv import NavConfig
+from ros2_runtime import (
+    Ros2Runtime,
+    parse_service_message,
+    parse_service_success,
+    service_is_ready,
+    wait_future,
+)
 
 
 
 def robot_r_path():
     try:
-        return subprocess.check_output(['rospack', 'find', 'robot_r'], text=True).strip()
+        return get_package_share_directory('robot_r')
     except Exception:
         direct_path = os.path.join(WORKSPACE_ROOT, 'robot_r')
         standard_path = os.path.join(WORKSPACE_ROOT, 'src', 'robot_r')
@@ -220,26 +234,13 @@ class PointEditDialog(QDialog):
         )
 
 
-def check_and_start_roscore():
-    """确保 ROS master 可用，且不让 GUI 在等待窗口标题时无限卡住。"""
+def create_ros2_runtime():
+    """ROS2 不需要 master；创建供 Qt 后台使用的 executor。"""
     try:
-        result = subprocess.run(['rosnode', 'list'], capture_output=True, text=True, timeout=2)
-        if result.returncode == 0:
-            return True
-
-        print("Starting roscore...")
-        subprocess.Popen(
-            ['roscore'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            preexec_fn=os.setpgrp
-        )
-        for _ in range(16):
-            time.sleep(0.5)
-            result = subprocess.run(['rosnode', 'list'], capture_output=True, text=True, timeout=2)
-            if result.returncode == 0:
-                return True
+        return Ros2Runtime('upmachine_publisher')
     except Exception as e:
-        print(f"Error checking or starting roscore: {e}")
-    return False
+        print(f"Error initializing ROS2: {e}")
+        return None
 
 class MyWindow(QWidget):
     status_requested = pyqtSignal(str, str)
@@ -259,10 +260,17 @@ class MyWindow(QWidget):
 
         self.preview_mode = os.environ.get('ANAV_GUI_PREVIEW') == '1'
         self.autonav_settings = self.load_autonav_settings()
-        self.ros_available = False if self.preview_mode else check_and_start_roscore()
+        self.ros_runtime = (
+            None if self.preview_mode else create_ros2_runtime()
+        )
+        self.ros_available = self.ros_runtime is not None
+        self.ros_node = (
+            self.ros_runtime.node if self.ros_runtime is not None else None
+        )
         self.joy_pub = None
         self.safety_pub = None
-        self.finish_motion_proxy = None
+        self.finish_motion_client = None
+        self.nav_config_client = None
         self.tf_buffer = None
         self.tf_listener = None
         self.task_status_sub = None
@@ -316,18 +324,29 @@ class MyWindow(QWidget):
         self.loop_thread = None
         if self.ros_available:
             try:
-                rospy.init_node('upmachine_publisher', anonymous=True, disable_signals=True)
-                self.tf_buffer = tf2_ros.Buffer(cache_time=rospy.Duration(5.0))
-                self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
-                self.joy_pub = rospy.Publisher('/joy', Joy, queue_size=10)
-                self.safety_pub = rospy.Publisher(
-                    '/cmd_vel/safety', Twist, queue_size=1
+                self.tf_buffer = tf2_ros.Buffer(
+                    cache_time=Duration(seconds=5.0), node=self.ros_node
                 )
-                self.finish_motion_proxy = rospy.ServiceProxy(
-                    '/cmd_vel_arbiter/finish_motion', FinishMotion
+                self.tf_listener = tf2_ros.TransformListener(
+                    self.tf_buffer, self.ros_node, spin_thread=False
                 )
-                self.record_marker_pub = rospy.Publisher(
-                    RVIZ_RECORD_MARKER_TOPIC, MarkerArray, queue_size=1, latch=True
+                self.joy_pub = self.ros_node.create_publisher(Joy, '/joy', 10)
+                self.safety_pub = self.ros_node.create_publisher(
+                    Twist, '/cmd_vel/safety', 1
+                )
+                self.finish_motion_client = self.ros_node.create_client(
+                    FinishMotion, '/cmd_vel_arbiter/finish_motion'
+                )
+                self.nav_config_client = self.ros_node.create_client(
+                    NavConfig, '/anav/nav_config'
+                )
+                marker_qos = QoSProfile(
+                    depth=1,
+                    reliability=ReliabilityPolicy.RELIABLE,
+                    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                )
+                self.record_marker_pub = self.ros_node.create_publisher(
+                    MarkerArray, RVIZ_RECORD_MARKER_TOPIC, marker_qos
                 )
             except Exception as error:
                 print(f"ROS initialization failed: {error}")
@@ -354,28 +373,26 @@ class MyWindow(QWidget):
         self.nav_config_received.connect(self.on_nav_config_received)
         if self.ros_available:
             try:
-                self.task_status_sub = rospy.Subscriber(
-                    '/anav/task_status', String, self.on_task_status, queue_size=10
+                self.task_status_sub = self.ros_node.create_subscription(
+                    String, '/anav/task_status', self.on_task_status, 10
                 )
-                self.localization_odom_sub = rospy.Subscriber(
-                    '/Odometry', Odometry, self.on_localization_odometry, queue_size=1
+                self.localization_odom_sub = self.ros_node.create_subscription(
+                    Odometry, '/Odometry', self.on_localization_odometry, 1
                 )
-                self.base_odom_sub = rospy.Subscriber(
-                    '/odom', Odometry, self.on_base_odometry, queue_size=1
+                self.base_odom_sub = self.ros_node.create_subscription(
+                    Odometry, '/odom', self.on_base_odometry, 1
                 )
-                self.motion_state_sub = rospy.Subscriber(
-                    '/motion_state', RangerMotionState,
-                    self.on_motion_state, queue_size=1
+                self.motion_state_sub = self.ros_node.create_subscription(
+                    RangerMotionState, '/motion_state',
+                    self.on_motion_state, 1
                 )
-                self.record_pose_sub = rospy.Subscriber(
-                    RVIZ_RECORD_POSE_TOPIC,
-                    PoseStamped,
-                    self.on_record_pose,
-                    queue_size=1,
+                self.record_pose_sub = self.ros_node.create_subscription(
+                    PoseStamped, RVIZ_RECORD_POSE_TOPIC,
+                    self.on_record_pose, 1,
                 )
-                self.diagnostics_sub = rospy.Subscriber(
-                    '/diagnostics', DiagnosticArray,
-                    self.on_diagnostics_message, queue_size=10,
+                self.diagnostics_sub = self.ros_node.create_subscription(
+                    DiagnosticArray, '/diagnostics',
+                    self.on_diagnostics_message, 10,
                 )
             except Exception as error:
                 print(f"ROS status subscription failed: {error}")
@@ -385,11 +402,11 @@ class MyWindow(QWidget):
             self.ros_available,
         )
         if not self.ros_available and not self.preview_mode:
-            self.set_status('ROS 连接失败，请检查 ROS_MASTER_URI 或启动日志。', 'error')
+            self.set_status('ROS2 初始化失败，请检查环境与启动日志。', 'error')
             self.fault_center.report_condition(
                 '/anav/system_monitor', 'ANAV-SYS-001',
-                DiagnosticStatus.ERROR, 'ROS Master 无法连接', True,
-                action='检查 roscore、ROS_MASTER_URI 和网络连接。',
+                DiagnosticStatus.ERROR, 'ROS2 上下文初始化失败', True,
+                action='检查 ROS_DOMAIN_ID、DDS 网络和 ROS2 环境。',
             )
         self.setpointProcess = None
         self.rvizProcess = None
@@ -941,9 +958,11 @@ class MyWindow(QWidget):
 
         def call_service():
             try:
-                rospy.wait_for_service('/anav/nav_config', timeout=2.0)
-                proxy = rospy.ServiceProxy('/anav/nav_config', NavConfig)
-                request = NavConfigRequest()
+                if self.nav_config_client is None or not (
+                    self.nav_config_client.wait_for_service(timeout_sec=2.0)
+                ):
+                    raise RuntimeError('/anav/nav_config is unavailable')
+                request = NavConfig.Request()
                 request.apply = apply
                 request.blocked_timeout = settings['blocked_timeout']
                 request.blocked_cooldown_initial = (
@@ -962,7 +981,11 @@ class MyWindow(QWidget):
                 request.fixed_route_final_xy_tolerance = (
                     settings['fixed_route_final_xy_tolerance']
                 )
-                response = proxy(request)
+                response = wait_future(
+                    self.nav_config_client.call_async(request), 3.0
+                )
+                if response is None:
+                    raise RuntimeError('/anav/nav_config response timeout')
                 current = {
                     'blocked_timeout': response.blocked_timeout,
                     'blocked_cooldown_initial':
@@ -983,7 +1006,7 @@ class MyWindow(QWidget):
                 self.nav_config_received.emit(
                     current, response.message, response.success
                 )
-            except (rospy.ROSException, rospy.ServiceException) as error:
+            except Exception as error:
                 self.nav_config_received.emit(
                     {'_update_widgets': False},
                     f'AutoNAV 参数服务不可用：{error}', False
@@ -1615,7 +1638,7 @@ class MyWindow(QWidget):
             self.fault_center_button.setStyleSheet('')
 
     def on_diagnostics_message(self, message):
-        # rospy callbacks do not touch Qt widgets. They only update a bounded,
+        # ROS2 callbacks do not touch Qt widgets. They only update a bounded,
         # thread-safe transition inbox consumed by the GUI timer.
         self.diagnostic_inbox.submit_array(message)
 
@@ -1884,22 +1907,16 @@ class MyWindow(QWidget):
         self.loop_refresh_button.setEnabled(not running)
         self.loop_route_mode_combo.setEnabled(not running)
 
-    def rosservice_is_ready(self, service_name):
-        try:
-            result = subprocess.run(
-                ['rosservice', 'info', service_name],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=1,
-            )
-            return result.returncode == 0
-        except (OSError, subprocess.TimeoutExpired):
-            return False
+    def service_is_ready_graph(self, service_name):
+        return bool(
+            self.ros_node is not None
+            and service_is_ready(self.ros_node, service_name)
+        )
 
     def is_loop_navigation_ready(self):
         return (
-            self.rosservice_is_ready('/plan_path_and_go')
-            and self.rosservice_is_ready('/anav/cancel_navigation')
+            self.service_is_ready_graph('/plan_path_and_go')
+            and self.service_is_ready_graph('/anav/cancel_navigation')
         )
 
     def start_loop_navigation(self):
@@ -1965,14 +1982,15 @@ class MyWindow(QWidget):
             if self.tf_buffer is None:
                 raise RuntimeError('TF buffer is unavailable')
             base_transform = self.tf_buffer.lookup_transform(
-                'map', 'base_link', rospy.Time(0), rospy.Duration(0.20)
+                'map', 'base_link', Time(), Duration(seconds=0.20)
             )
             current_x = base_transform.transform.translation.x
             current_y = base_transform.transform.translation.y
-            transform_stamp = base_transform.header.stamp
+            transform_stamp = Time.from_msg(base_transform.header.stamp)
             localization_age = (
-                (rospy.Time.now() - transform_stamp).to_sec()
-                if transform_stamp != rospy.Time() else math.inf
+                (self.ros_node.get_clock().now() - transform_stamp).nanoseconds
+                / 1.0e9
+                if transform_stamp.nanoseconds != 0 else math.inf
             )
         except (tf2_ros.LookupException,
                 tf2_ros.ConnectivityException,
@@ -2055,12 +2073,15 @@ class MyWindow(QWidget):
 
     def call_topology_target(self, target_id, current_id, run_mode):
         request = (
-            f'{{data: {int(target_id)}, currentID: {int(current_id)}, '
+            f'{{data: {int(target_id)}, current_id: {int(current_id)}, '
             f'run: {int(run_mode)}}}'
         )
         try:
             result = subprocess.run(
-                ['rosservice', 'call', '/plan_path_and_go', request],
+                [
+                    'ros2', 'service', 'call', '/plan_path_and_go',
+                    'x2bot_teleop/srv/SetInt', request,
+                ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -2068,16 +2089,9 @@ class MyWindow(QWidget):
         except OSError as error:
             return False, str(error)
         output = result.stdout or ''
-        success = False
+        success = parse_service_success(output)
         detail = (result.stderr or '').strip()
-        for line in output.splitlines():
-            stripped = line.strip()
-            if stripped.lower().startswith('success:'):
-                success = stripped.split(':', 1)[1].strip().lower() in (
-                    'true', '1'
-                )
-            elif stripped.lower().startswith('message:'):
-                detail = stripped.split(':', 1)[1].strip().strip('"\'')
+        detail = parse_service_message(output) or detail
         if result.returncode != 0:
             success = False
         return success, detail or ('已到达' if success else '导航服务未返回成功')
@@ -2159,7 +2173,11 @@ class MyWindow(QWidget):
             pause_fallback = False
             try:
                 result = subprocess.run(
-                    ['rosservice', 'call', '/anav/cancel_navigation'],
+                    [
+                        'ros2', 'service', 'call',
+                        '/anav/cancel_navigation',
+                        'std_srvs/srv/Trigger', '{}',
+                    ],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -2679,7 +2697,7 @@ class MyWindow(QWidget):
                 'pending': True,
             })
 
-        stamp = rospy.Time.now()
+        stamp = self.ros_node.get_clock().now().to_msg()
         for index, pose in enumerate(poses):
             pending = pose.get('pending', False)
             arrow = Marker()
@@ -2906,16 +2924,16 @@ class MyWindow(QWidget):
                 except (OSError, ValueError):
                     pass
             try:
-                result = subprocess.run(
-                    ['rosnode', 'list'], capture_output=True, text=True, timeout=2
+                snapshot['ros'] = bool(
+                    self.ros_node is not None and rclpy.ok()
                 )
-                snapshot['ros'] = result.returncode == 0
                 if snapshot['ros']:
                     snapshot['nodes'] = {
-                        line.strip() for line in result.stdout.splitlines()
-                        if line.strip()
+                        f'{namespace.rstrip("/")}/{name}'.replace('//', '/')
+                        for name, namespace
+                        in self.ros_node.get_node_names_and_namespaces()
                     }
-            except (OSError, subprocess.TimeoutExpired):
+            except Exception:
                 pass
             self.health_snapshot_requested.emit(snapshot)
 
@@ -2932,9 +2950,9 @@ class MyWindow(QWidget):
         self.fault_center.report_condition(
             '/anav/system_monitor', 'ANAV-SYS-001',
             DiagnosticStatus.ERROR if not ros_ok else DiagnosticStatus.OK,
-            'ROS Master 连接中断' if not ros_ok else 'ROS Master 连接已恢复',
+            'ROS2 通信上下文中断' if not ros_ok else 'ROS2 通信已恢复',
             active=not ros_ok,
-            action='检查 roscore、ROS_MASTER_URI 和网络连接。',
+            action='检查 ROS_DOMAIN_ID、DDS 网络和 ROS2 环境。',
         )
 
         can_exists = snapshot.get('can_exists', False)
@@ -3003,7 +3021,7 @@ class MyWindow(QWidget):
                 DiagnosticStatus.STALE if missing else DiagnosticStatus.OK,
                 message if missing else f'{message}状态已恢复',
                 active=missing,
-                action=f'检查 rosnode list 与 {node} 的启动日志。',
+                action=f'检查 ros2 node list 与 {node} 的启动日志。',
             )
 
         tag_nodes = {'/TagCtl_service', '/mm3v_serial_reader'}
@@ -3197,7 +3215,7 @@ class MyWindow(QWidget):
             )
 
     def start_managed_process(self, command):
-        """直接启动子进程并创建独立进程组，便于可靠停止 roslaunch 及其子节点。"""
+        """直接启动子进程并创建独立进程组，便于可靠停止 ROS2 launch。"""
         return subprocess.Popen(command, start_new_session=True)
 
     def start_terminal_tab_process(self, command, title):
@@ -3265,12 +3283,15 @@ class MyWindow(QWidget):
 
     def is_move_base_ready(self):
         try:
-            result = subprocess.run(
-                ['rosnode', 'list'], capture_output=True, text=True, timeout=1
+            return bool(
+                self.ros_node is not None
+                and '/mxb_move_base' in {
+                    f'{namespace.rstrip("/")}/{name}'.replace('//', '/')
+                    for name, namespace
+                    in self.ros_node.get_node_names_and_namespaces()
+                }
             )
-            nodes = {name.strip() for name in result.stdout.splitlines()}
-            return '/mxb_move_base' in nodes
-        except (OSError, subprocess.TimeoutExpired):
+        except Exception:
             return False
 
     def start_bspline_log(self):
@@ -3279,7 +3300,7 @@ class MyWindow(QWidget):
         log_command = (
             'echo "[B-spline] Only showing JGL reference path logs."; '
             'echo "[B-spline] Press Ctrl+C to stop this log view."; '
-            'rostopic echo /rosout_agg/msg | '
+            'ros2 topic echo /rosout rcl_interfaces/msg/Log --field msg | '
             'grep --line-buffered "JGL reference path"'
         )
         try:
@@ -3356,7 +3377,7 @@ class MyWindow(QWidget):
             return
         try:
             self.mappingProcess = self.start_terminal_tab_process(
-                ['roslaunch', 'robot_r', 's2lam.launch'], '地图构建'
+                ['ros2', 'launch', 'robot_r', 's2lam.launch.py'], '地图构建'
             )
         except (OSError, RuntimeError) as error:
             self.set_status(f'地图构建启动失败：{error}', 'error')
@@ -3380,7 +3401,7 @@ class MyWindow(QWidget):
             return
         try:
             self.g2dProcess = self.start_terminal_tab_process(
-                ['roslaunch', 'robot_r', '4genmap.launch'], '生成二维地图'
+                ['ros2', 'launch', 'robot_r', '4genmap.launch.py'], '生成二维地图'
             )
         except (OSError, RuntimeError) as error:
             self.set_status(f'二维地图生成启动失败：{error}', 'error')
@@ -3403,7 +3424,7 @@ class MyWindow(QWidget):
         try:
             os.makedirs(os.path.dirname(MAP_OUTPUT_PREFIX), exist_ok=True)
             self.mapSaverProcess = self.start_managed_process([
-                'rosrun', 'map_server', 'map_saver', '__name:=map_saver',
+                'ros2', 'run', 'nav2_map_server', 'map_saver_cli',
                 '-f', MAP_OUTPUT_PREFIX,
             ])
         except OSError as error:
@@ -3499,11 +3520,14 @@ class MyWindow(QWidget):
         yy = f"{float(posY):.3f}"
         aa = f"{float(posAngle):.3f}"
          # 构建完整的 ROS 命令
-        ros_command = f'rosservice call {service_name} "{{target_x: {xx}, target_y: {yy}, target_angle: {aa}}}"'
+        request = (
+            f'{{target_x: {xx}, target_y: {yy}, target_angle: {aa}}}'
+        )
        # 构建终端命令，使用 gnome-terminal 打开新的终端窗口并执行 ROS 命令
         terminal_command = [
             'gnome-terminal', '--tab', '--active', '--title=目标微调',
-            '--', 'bash', '-c', ros_command,
+            '--', 'ros2', 'service', 'call', service_name,
+            'x2bot_teleop/srv/SetTagY', request,
         ]
             # 使用 subprocess.Popen 启动新的终端
         try:
@@ -3527,13 +3551,15 @@ class MyWindow(QWidget):
         run = str(int(self.navigation_route_mode_combo.currentData()))
 
         # 构建完整的 ROS 命令
-        ros_command = f'rosservice call {service_name} {data} {curid} {run}'
+        request = f'{{data: {data}, current_id: {curid}, run: {run}}}'
         
         try:
             # 使用 subprocess 调用 ROS 服务并捕获输出
             result = subprocess.run(
-                ros_command,
-                shell=True,
+                [
+                    'ros2', 'service', 'call', service_name,
+                    'x2bot_teleop/srv/SetInt', request,
+                ],
                 check=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -3570,8 +3596,11 @@ class MyWindow(QWidget):
         run = str(int(self.navigation_route_mode_combo.currentData()))
 
         # 构建完整的 ROS 命令
-        request = f"{{data: {data}, currentID: {curid}, run: {run}}}"
-        command = ['rosservice', 'call', service_name, request]
+        request = f"{{data: {data}, current_id: {curid}, run: {run}}}"
+        command = [
+            'ros2', 'service', 'call', service_name,
+            'x2bot_teleop/srv/SetInt', request,
+        ]
 
         target_name = f'导航点 {id + 1}' if id >= 0 else f'工位 W{-id}'
         self.set_status(f'正在下发目标：{target_name}…', 'info')
@@ -3586,21 +3615,12 @@ class MyWindow(QWidget):
                     text=True
                 )
                 print("plan_path_and_go successful:", result.stdout)
-                response_lines = [line.strip() for line in result.stdout.splitlines()]
-                success_value = next(
-                    (line.split(':', 1)[1].strip().lower()
-                     for line in response_lines if line.lower().startswith('success:')),
-                    '',
-                )
-                message = next(
-                    (line.split(':', 1)[1].strip().strip('"\'')
-                     for line in response_lines if line.lower().startswith('message:')),
-                    '',
-                )
-                if success_value in ('true', '1') and 'arrived:' in result.stdout.lower():
+                success = parse_service_success(result.stdout)
+                message = parse_service_message(result.stdout)
+                if success and 'arrived:' in result.stdout.lower():
                     self.currentID = id
                     self.status_requested.emit(f'已到达：{target_name}', 'success')
-                elif success_value in ('true', '1'):
+                elif success:
                     self.currentID = id
                     self.status_requested.emit(f'任务已完成：{target_name}', 'success')
                 else:
@@ -3628,7 +3648,10 @@ class MyWindow(QWidget):
             return
         try:
             self.joyProcess = self.start_terminal_tab_process(
-                ['roslaunch', 'x2bot_teleop', 'x2bot_joy_PXN.launch'], '手柄'
+                [
+                    'ros2', 'launch', 'x2bot_teleop',
+                    'x2bot_joy_PXN.launch.py',
+                ], '手柄'
             )
         except (OSError, RuntimeError) as error:
             self.set_status(f'手柄驱动启动失败：{error}', 'error')
@@ -3641,7 +3664,10 @@ class MyWindow(QWidget):
             return
         try:
             self.baseProcess = self.start_terminal_tab_process(
-                ['roslaunch', 'ranger_bringup', 'ranger_mini_v2.launch'], '底盘'
+                [
+                    'ros2', 'launch', 'ranger_bringup',
+                    'ranger_mini_v2.launch.py',
+                ], '底盘'
             )
         except (OSError, RuntimeError) as error:
             self.set_status(f'底盘驱动启动失败：{error}', 'error')
@@ -3649,7 +3675,7 @@ class MyWindow(QWidget):
                 '/anav/process_monitor/ranger_base', 'ANAV-BASE-003',
                 DiagnosticStatus.ERROR, '底盘启动失败', True,
                 detail=str(error),
-                action='检查 CAN 接口、roslaunch 环境和启动终端。',
+                action='检查 CAN 接口、ROS2 launch 环境和启动终端。',
             )
             return
         self.set_status('底盘驱动已在新标签页启动。', 'success')
@@ -3668,7 +3694,10 @@ class MyWindow(QWidget):
         try:
             self.tagProcesses = []
             self.tagProcesses.append(self.start_terminal_tab_process(
-                ['roslaunch', 'robot_r', '6tagReadAndCtl_mm3v.launch'],
+                [
+                    'ros2', 'launch', 'robot_r',
+                    '6tagReadAndCtl_mm3v.launch.py',
+                ],
                 'MM3V Tag',
             ))
             self.tagProcesses.append(self.start_terminal_tab_process(
@@ -3691,8 +3720,10 @@ class MyWindow(QWidget):
     def start_can(self):
         try:
             self.can_start_requested_at = time.monotonic()
-            # 调试阶段使用设备的默认 sudo 密码。
-            can_command = "echo '1' | sudo -S ip link set can0 up type can bitrate 500000"
+            # 在可见终端中由操作者输入 sudo 凭据，源码不保存密码。
+            can_command = (
+                'sudo ip link set can0 up type can bitrate 500000'
+            )
 
             # 构建完整的终端命令
             terminal_command = [
@@ -3790,8 +3821,13 @@ class MyWindow(QWidget):
             self.set_status('已在 RViz 中请求显示点位。', 'success')
 
     def publish_safety_stop(self):
-        if self.safety_pub is not None:
+        if self.safety_pub is None or self.ros_runtime is None:
+            return
+        try:
             self.safety_pub.publish(Twist())
+        except Exception as error:
+            if not self.shutdown_in_progress:
+                print(f'Failed to publish software stop: {error}')
 
     def publish_stop_burst(self):
         self.publish_safety_stop()
@@ -3799,15 +3835,24 @@ class MyWindow(QWidget):
             QTimer.singleShot(delay, self.publish_safety_stop)
 
     def request_motion_finish(self, source, reason, service_timeout=0.5):
-        if not self.ros_available or self.finish_motion_proxy is None:
+        if not self.ros_available or self.finish_motion_client is None:
             return False, 'ROS 或回正服务未初始化'
         try:
-            rospy.wait_for_service(
-                '/cmd_vel_arbiter/finish_motion', timeout=service_timeout
+            if not self.finish_motion_client.wait_for_service(
+                timeout_sec=service_timeout
+            ):
+                return False, '回正服务不可用'
+            request = FinishMotion.Request()
+            request.source = source
+            request.reason = int(reason)
+            response = wait_future(
+                self.finish_motion_client.call_async(request),
+                service_timeout + 8.0,
             )
-            response = self.finish_motion_proxy(source=source, reason=reason)
+            if response is None:
+                return False, '回正服务响应超时'
             return bool(response.centered), response.message
-        except (rospy.ROSException, rospy.ServiceException) as error:
+        except Exception as error:
             return False, str(error)
 
     def activate_emergency_stop(self):
@@ -3823,7 +3868,7 @@ class MyWindow(QWidget):
         self.nav_runstart.setEnabled(False)
         self.nav_resume.setEnabled(False)
         safety_connections = (
-            self.safety_pub.get_num_connections()
+            self.safety_pub.get_subscription_count()
             if self.safety_pub is not None else 0
         )
         if safety_connections:
@@ -3869,7 +3914,7 @@ class MyWindow(QWidget):
             return
         self.send_joy_message('NavPause')
         centered, center_message = self.request_motion_finish(
-            'nav', FinishMotionRequest.TASK_CANCELED
+            'nav', FinishMotion.Request.TASK_CANCELED
         )
         self.stop_managed_process(self.runPntsNavProcess, 'auto navigation')
         self.runPntsNavProcess = None
@@ -3936,7 +3981,10 @@ class MyWindow(QWidget):
         if not rviz_mode:
             try:
                 self.setpointProcess = self.start_terminal_tab_process(
-                    ['roslaunch', 'robot_r', '3settinglocation.launch'], '点位设置'
+                    [
+                        'ros2', 'launch', 'robot_r',
+                        '3settinglocation.launch.py',
+                    ], '点位设置'
                 )
             except (OSError, RuntimeError) as error:
                 self.set_status(f'点位设置启动失败：{error}', 'error')
@@ -4020,20 +4068,22 @@ class MyWindow(QWidget):
     def is_rviz_running(self):
         if self.rvizProcess and self.rvizProcess.poll() is None:
             return True
-        result = subprocess.run(['pgrep', '-x', 'rviz'], capture_output=True, text=True)
+        result = subprocess.run(
+            ['pgrep', '-x', 'rviz2'], capture_output=True, text=True
+        )
         return bool(result.stdout.strip())
 
     def start_plain_rviz(self):
         if self.is_rviz_running():
             return
         config = PLAIN_RVIZ_CONFIG if os.path.exists(PLAIN_RVIZ_CONFIG) else PANEL_RVIZ_CONFIG
-        command = ['rviz', '-d', config]
+        command = ['rviz2', '-d', config]
         self.rvizProcess = subprocess.Popen(command, preexec_fn=os.setpgrp)
         self.rviz_panel_mode = False
 
     def start_navgation(self):
         if self.localizationProcess and self.localizationProcess.poll() is None:
-            print('3startlocation.launch is already running.')
+            print('3startlocation.launch.py is already running.')
             if self.localization_ready:
                 self.set_status('定位已成功，位姿数据正在持续更新。', 'success')
             else:
@@ -4041,7 +4091,10 @@ class MyWindow(QWidget):
         else:
             self.localization_ready = False
             self.last_odom_monotonic = 0.0
-            command = ['roslaunch', 'robot_r', '3startlocation.launch', 'rviz_enable:=false']
+            command = [
+                'ros2', 'launch', 'robot_r', '3startlocation.launch.py',
+                'rviz_enable:=false',
+            ]
             self.localizationProcess = subprocess.Popen(command, preexec_fn=os.setpgrp)
             self.g2d_button.setEnabled(False)
             self.g2d_exit_button.setEnabled(True)
@@ -4054,7 +4107,7 @@ class MyWindow(QWidget):
         if self.is_rviz_running():
             self.set_status('RViz 已在运行。', 'info')
             return
-        command = ['rviz', '-d', PANEL_RVIZ_CONFIG]
+        command = ['rviz2', '-d', PANEL_RVIZ_CONFIG]
         self.rvizProcess = subprocess.Popen(command, preexec_fn=os.setpgrp)
         self.rviz_panel_mode = True
         self.rviz_button.setEnabled(False)
@@ -4071,7 +4124,7 @@ class MyWindow(QWidget):
             return True
         try:
             self.moveBaseProcess = self.start_terminal_tab_process(
-                ['roslaunch', 'robot_r', '5nav.launch'], 'MoveBase'
+                ['ros2', 'launch', 'robot_r', '5nav.launch.py'], 'MoveBase'
             )
         except (OSError, RuntimeError) as error:
             self.set_status(f'MoveBase 启动失败：{error}', 'error')
@@ -4079,7 +4132,7 @@ class MyWindow(QWidget):
                 '/anav/process_monitor/move_base', 'ANAV-NAV-003',
                 DiagnosticStatus.ERROR, 'MoveBase 启动失败', True,
                 detail=str(error),
-                action='检查 5nav.launch 和 ROS 启动环境。',
+                action='检查 5nav.launch.py 和 ROS2 启动环境。',
             )
             return False
         self.start_bspline_log()
@@ -4155,7 +4208,10 @@ class MyWindow(QWidget):
     def launch_auto_navigation(self):
         try:
             self.runPntsNavProcess = self.start_terminal_tab_process(
-                ['roslaunch', 'robot_r', '3navlocations.launch'], 'AutoNav'
+                [
+                    'ros2', 'launch', 'robot_r',
+                    '3navlocations.launch.py',
+                ], 'AutoNav'
             )
         except (OSError, RuntimeError) as error:
             self.nav_button.setEnabled(True)
@@ -4164,7 +4220,7 @@ class MyWindow(QWidget):
                 '/anav/process_monitor/navigation', 'ANAV-NAV-002',
                 DiagnosticStatus.ERROR, 'AutoNAV 启动失败', True,
                 detail=str(error),
-                action='检查 3navlocations.launch 与地图、点位、拓扑文件。',
+                action='检查 3navlocations.launch.py 与地图、点位、拓扑文件。',
             )
             return
         self.nav_button.setEnabled(False)
@@ -4187,7 +4243,7 @@ class MyWindow(QWidget):
         self.set_status('正在停止自动导航和 MoveBase…', 'info')
         if stopped:
             self.request_motion_finish(
-                'nav', FinishMotionRequest.TASK_CANCELED
+                'nav', FinishMotion.Request.TASK_CANCELED
             )
         self.stop_managed_process(self.runPntsNavProcess, 'auto navigation')
         self.runPntsNavProcess = None
@@ -4246,7 +4302,7 @@ class MyWindow(QWidget):
         self.health_timer.stop()
         self.diagnostic_flush_timer.stop()
         if self.diagnostics_sub is not None:
-            self.diagnostics_sub.unregister()
+            self.ros_node.destroy_subscription(self.diagnostics_sub)
             self.diagnostics_sub = None
         self.flush_diagnostics()
         self.stop_loop_navigation(notify=False)
@@ -4254,7 +4310,7 @@ class MyWindow(QWidget):
         self.estop_timer.start(100)
         self.publish_stop_burst()
         centered, center_message = self.request_motion_finish(
-            'safety', FinishMotionRequest.SOFTWARE_ESTOP,
+            'safety', FinishMotion.Request.SOFTWARE_ESTOP,
             service_timeout=1.0,
         )
         if not centered:
@@ -4275,6 +4331,9 @@ class MyWindow(QWidget):
         self.publish_stop_burst()
         self.estop_timer.stop()
         self.fault_center.shutdown()
+        if self.ros_runtime is not None:
+            self.ros_runtime.shutdown()
+            self.ros_runtime = None
         event.accept()
         
 
@@ -4287,4 +4346,7 @@ if __name__ == '__main__':
     mainWin = MyWindow()
     mainWin.show()
 
-    sys.exit(app.exec_())
+    exit_code = app.exec_()
+    if rclpy.ok():
+        rclpy.shutdown()
+    sys.exit(exit_code)
