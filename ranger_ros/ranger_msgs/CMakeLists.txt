@@ -31,7 +31,7 @@ set(msg_file
 
 rosidl_generate_interfaces(${PROJECT_NAME}
     ${msg_file}
-  DEPENDENCIES 
+  DEPENDENCIES
     builtin_interfaces std_msgs)
 
 if(BUILD_TESTING)
