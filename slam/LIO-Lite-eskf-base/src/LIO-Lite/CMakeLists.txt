@@ -113,7 +113,17 @@ install(TARGETS
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 install(DIRECTORY include/ DESTINATION include)
-install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
+install(FILES
+  config/hesaixt16_ros2.yaml
+  config/mid360_ros2.yaml
+  DESTINATION share/${PROJECT_NAME}/config
+)
+install(DIRECTORY launch/
+  DESTINATION share/${PROJECT_NAME}/launch
+  FILES_MATCHING
+  PATTERN "*.launch.py"
+  PATTERN "*.rviz"
+)
 
 ament_export_include_directories(include)
 ament_export_dependencies(rosidl_default_runtime)
