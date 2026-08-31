@@ -1,0 +1,23 @@
+navigation_benchmark:
+  ros__parameters:
+    map_frame: map
+    base_frame: base_link
+
+    sample_rate: 10.0
+    sync_interval: 1.0
+    settle_window: 0.5
+    bspline_status_timeout: 0.5
+
+    # Tracking-only metrics. Start/final rotations and safety stops are excluded.
+    tracking_min_speed: 0.02
+    # Exclude distance-to-entry while projection is clamped to a new path start.
+    reference_entry_projection_epsilon: 1.0e-6
+    stop_speed: 0.02
+    stop_duration: 0.5
+    sharp_turn_omega: 0.3
+    sharp_turn_duration: 0.3
+
+    max_pose_jump: 0.5
+    localization_gap_threshold: 0.5
+    disk_warning_mb: 512.0
+    recovery_window: 30.0
