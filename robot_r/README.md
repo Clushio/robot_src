@@ -39,7 +39,7 @@ robot_r/3navlocations.launch.py
 | `s2lam.launch.py` | MID360s 驱动 + LIO 三维建图 | 当前 GUI 建图入口 |
 | `3startlocation.launch.py` | 静态 TF + MID360s + lifecycle map_server + LIO 定位 + 可选 RViz2 | 当前 GUI 定位入口 |
 | `5nav.launch.py` | 点云转换、Nav2 兼容层、代价地图、B 样条局部规划 | 当前导航入口 |
-| `3navlocations.launch.py` | 启动 `runnav`，提供拓扑任务服务 | Nav2 就绪后启动 |
+| `3navlocations.launch.py` | 启动 `runnav` 与只读 `nav_benchmark`，提供拓扑任务服务并记录验收数据 | Nav2 就绪后启动 |
 | `3settinglocation.launch.py` | 启动实车点位记录节点 | 实车采点模式使用 |
 | `4genmap.launch.py` | `GlobalMap.pcd` 转二维 `/map` + 可选 RViz2 | 二维地图生成 |
 | `6tagReadAndCtl_mm3v.launch.py` | MM3V 串口读取 + TagCtl | 当前 Tag 精调入口 |
