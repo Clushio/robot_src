@@ -56,7 +56,11 @@ def diagnostic_events_from_array(message):
     for status in message.status:
         values = {item.key: item.value for item in status.values}
         code = values.get('code', 'ANAV-SYS-999')
-        level = int(status.level)
+        # level = int(status.level)
+        if isinstance(status.level, (bytes, bytearray)):
+            level = status.level[0]
+        else:
+            level = int(status.level)
         events.append({
             'module': status.name or 'unknown',
             'code': code,
