@@ -31,6 +31,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cmath>
 #include <cstdlib>
@@ -116,7 +117,10 @@ public:
     {
     }
 
-    void waitForServer() { client_->wait_for_action_server(); }
+    bool waitForServer(const std::chrono::seconds &timeout)
+    {
+        return client_->wait_for_action_server(timeout);
+    }
 
     void sendGoal(const Action::Goal &goal)
     {
@@ -291,7 +295,6 @@ public:
                 fixed_route_behavior_tree_.c_str());
         }
 
-        initializeGlobalAC();
         const auto cmd_vel_topic = declare_parameter<std::string>("cmd_vel_topic", "/cmd_vel/nav");
         vel_pub_ = create_publisher<geometry_msgs::msg::Twist>(cmd_vel_topic, 1);
         topology_safety_phase_topic_ = declare_parameter<std::string>(
@@ -361,12 +364,19 @@ public:
             std::bind(&mynav::planPathCallback, this, std::placeholders::_1, std::placeholders::_2),
             rmw_qos_profile_services_default, plan_callback_group_);
         RCLCPP_INFO(get_logger(), "Topology navigation service /plan_path_and_go started.");
+        initializeGlobalAC();
     }
 
     ~mynav()
     {
-        setTopologySafetyPhase(TOPOLOGY_SAFETY_NORMAL);
-        safety_phase_timer_->cancel();
+        if (rclcpp::ok())
+        {
+            setTopologySafetyPhase(TOPOLOGY_SAFETY_NORMAL);
+        }
+        if (safety_phase_timer_)
+        {
+            safety_phase_timer_->cancel();
+        }
         if (runth_ && runth_->joinable())
         {
             runth_->join();
@@ -2592,8 +2602,14 @@ private:
         RCLCPP_INFO(
             get_logger(), "Waiting for navigation action server %s to start...",
             action_name.c_str());
-        global_ac->waitForServer();
-        RCLCPP_INFO(get_logger(), "Connected to navigation action server");
+        while (rclcpp::ok())
+        {
+            if (global_ac->waitForServer(std::chrono::seconds(1)))
+            {
+                RCLCPP_INFO(get_logger(), "Connected to navigation action server");
+                return;
+            }
+        }
     }
 
     enum ReferenceStatusCode
@@ -3326,6 +3342,10 @@ int main(int argc, char **argv)
     rclcpp::init(argc, argv);
 
     auto current_nav = std::make_shared<mynav>();
+    if (!rclcpp::ok())
+    {
+        return 0;
+    }
     if (!current_nav->loadNavPnts())
     {
         current_nav->publishDiagnostic(
