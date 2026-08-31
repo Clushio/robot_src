@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.5.1)
 project(ugv_sdk VERSION 0.8.0)
 
+find_package(ament_cmake REQUIRED)
+
 find_program(CCACHE_PROGRAM ccache)
 if(CCACHE_PROGRAM)
     message(STATUS "Found ccache")
@@ -13,21 +15,8 @@ option(STATIC_CHECK "Run static check" OFF)
 # set(CMAKE_BUILD_TYPE Release)
 # set(CMAKE_BUILD_TYPE Debug)
 
-## Check if pkg is built with ROS catkin
-if(CATKIN_DEVEL_PREFIX)
-    message(STATUS "Build package with catkin")
-    set(BUILD_WITHOUT_ROS OFF)
-    find_package(catkin REQUIRED)
-    catkin_package(
-        LIBRARIES ${PROJECT_NAME}
-        INCLUDE_DIRS include 
-        # CATKIN_DEPENDS async_port
-        # DEPENDS system_lib
-    )
-else()
-    message(STATUS "Build package with cmake")
-    set(BUILD_WITHOUT_ROS ON)    
-endif()
+## Keep the upstream standalone layout while registering it as a ROS 2 package.
+set(BUILD_WITHOUT_ROS ON)
 
 ## Generate symbols for IDE indexer
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -128,7 +117,7 @@ if(BUILD_TESTS)
 endif()
 
 ## Installation configuration
-if(BUILD_WITHOUT_ROS) # BUILD_WITHOUT_ROS
+if(BUILD_WITHOUT_ROS)
     message(STATUS "Project will be installed to ${CMAKE_INSTALL_PREFIX} with 'make install'")
 
     # Offer the user the choice of overriding the installation directories
@@ -194,15 +183,8 @@ if(BUILD_WITHOUT_ROS) # BUILD_WITHOUT_ROS
     set(CPACK_SOURCE_IGNORE_FILES .git dist .*build.* /\\\\.DS_Store)
     include(CPack)
 
-else() # BUILD_WITHOUT_ROS
+endif()
 
-    ## Add catkin install targets
-    install(TARGETS ${PROJECT_NAME}
-      RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
-      LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-      ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION})
-
-    install(DIRECTORY include/${PROJECT_NAME}
-      DESTINATION ${CATKIN_GLOBAL_INCLUDE_DESTINATION})
-
-endif() # BUILD_WITHOUT_ROS
+ament_export_targets(ugv_sdkTargets HAS_LIBRARY_TARGET)
+ament_export_dependencies(Threads)
+ament_package()
