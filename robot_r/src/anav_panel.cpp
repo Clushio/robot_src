@@ -244,7 +244,7 @@ void ANavPanel::startTag()
 
 void ANavPanel::startCan()
 {
-  startTerminal("can", "echo '1' | sudo -S ip link set can0 up type can bitrate 500000; exec bash");
+  startTerminal("can", "sudo ip link set can0 up type can bitrate 500000; exec bash");
 }
 
 void ANavPanel::navStart()
