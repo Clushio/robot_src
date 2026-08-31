@@ -1,4 +1,10 @@
 # LIO-Lite
+
+> This workspace uses the ROS 2 Humble port. Build it with `colcon` and launch
+> `mapping_360.launch.py` or `location_360.launch.py`; the ROS 1 instructions
+> below are retained only as upstream historical documentation. See
+> `docs/ROS2_HUMBLE_INSTALL.md` from the workspace root for deployment.
+
 A lightweight LIO (Lidar Odometry) system was deployed on a UAV utilizing the Livox Mid-360 sensor.  
 * The project incorporates incremental refinements to the existing [faster-lio](https://github.com/gaoxiang12/faster-lio.git) framework.  
 * Add location node.

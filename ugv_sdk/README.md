@@ -1,5 +1,9 @@
 # UGV SDK
 
+> This workspace registers UGV SDK as a ROS 2 Humble `ament_cmake` package.
+> Build it with the workspace `colcon build`; catkin commands below are retained
+> only as upstream historical documentation.
+
 ![GitHub Workflow Status](https://github.com/westonrobot/ugv_sdk/workflows/Cpp/badge.svg)
 ![GitHub Workflow Status](https://github.com/westonrobot/ugv_sdk/workflows/ROS/badge.svg)
 
@@ -132,7 +136,7 @@ There are certain cases where you may want to use the C++ interface from the SDK
 
 The complete pipeline from the robot base to a ROS application is illustrated in the following diagram. A main function of the SDK is to translate between raw CAN frames and C++ data structures so that you can programmatically interact with the robot.
 
-![Interface Hierarchy](./docs/interface_hierarchy.png)
+[Interface hierarchy source](./docs/interface_hierachy.drawio)
 
 With this structure in mind, whenever you are facing issues communicating with the robot, you can follow the pipeline to locate the cause of the problem: 
 

@@ -1,4 +1,9 @@
 # LIO-Lite
+
+> 当前工作区使用 ROS 2 Humble 移植版。请用 `colcon` 编译，并启动
+> `mapping_360.launch.py` 或 `location_360.launch.py`。下方 ROS 1 命令仅保留为
+> 上游历史说明；部署以工作区 `docs/ROS2_HUMBLE_INSTALL.md` 为准。
+
 一个可以用在无人机上的轻量级 LIO 系统：适配了Livox Mid-360雷达。  
 * 整个项目是在[faster-lio](https://github.com/gaoxiang12/faster-lio.git)的基础上做适配.[faster-lio](https://github.com/gaoxiang12/faster-lio.git)纯度：98%
 * 增加了场景中的重定位  

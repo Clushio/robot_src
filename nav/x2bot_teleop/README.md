@@ -138,7 +138,7 @@ Tag 数据连续失效、任务超时、成功或失败后都会停止命令并�
 
 主要私有参数在 `TagCtl_srv.cpp` 中读取，可由 launch 覆盖，包括速度上限、到达阈值、
 滤波、yaw PD、稳定帧数和 Tag 丢失超时。读头协议、坐标符号与偏置位于
-`robot_r/launch/6tagReadAndCtl_mm3v.launch`。
+`robot_r/launch/6tagReadAndCtl_mm3v.launch.py`。
 
 ## 手柄与 `/joy` 复用
 
@@ -148,7 +148,7 @@ GUI 也使用 `/joy` 发送“记录点位、开始、暂停、继续”等兼�
 启用手柄前确认：
 
 - 当前是否仍需要 GUI 的 `/joy` 控制；
-- `x2bot_joy_PXN.launch` 的设备和轴映射；
+- `x2bot_joy_PXN.launch.py` 的设备和轴映射；
 - 输出是 `/cmd_vel/teleop`，不是直接 `/cmd_vel`；
 - 遥控来源可能处于人工碰撞旁路。
 

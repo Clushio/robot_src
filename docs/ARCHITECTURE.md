@@ -17,11 +17,11 @@
 
 ## 启动所有权
 
-- `ranger_bringup/ranger_mini_v2.launch` 启动底盘。
+- `ranger_bringup/ranger_mini_v2.launch.py` 启动底盘。
 - 底盘的 include launch 同时启动 `cmd_vel_arbiter` 和 `collision_monitor`。
-- `robot_r/3startlocation.launch` 启动 MID360s、地图服务器、LIO 定位和可选 RViz。
-- `robot_r/5nav.launch` 启动定制 MoveBase 并加载规划/代价地图参数。
-- `robot_r/3navlocations.launch` 启动 `runnav` 拓扑任务服务。
+- `robot_r/3startlocation.launch.py` 启动 MID360s、地图服务器、LIO 定位和可选 RViz2。
+- `robot_r/5nav.launch.py` 启动 Nav2 和定制规划/代价地图 plugin。
+- `robot_r/3navlocations.launch.py` 启动 `runnav` 拓扑任务服务和 benchmark。
 - GUI 只是编排和交互入口，不替代上述 ROS 节点的职责。
 
 详细 launch 对照见 [`robot_r/README.md`](../robot_r/README.md)。
@@ -56,7 +56,7 @@ map.yaml + map.pgm + robot_positions.txt
              topology.yaml
                     │
                     v
- /plan_path_and_go ─> runnav ─> Dijkstra 拓扑路径 ─> move_base action
+ /plan_path_and_go ─> runnav ─> Dijkstra 拓扑路径 ─> /navigate_to_pose action
                                          │
                                          ├── /topology_plan
                                          ├── /topology_markers
@@ -75,7 +75,7 @@ map.yaml + map.pgm + robot_positions.txt
 | `1` | 自动绕路；边堵塞后可暂时封锁并重新规划 |
 | `2` 或更大 | 固定路线；堵塞时停车等待，不换路 |
 
-## B 样条与 MoveBase
+## B 样条与 Nav2
 
 `myglobal_planner` 生成栅格全局路径，定制 `jgl_dwa_local_planner` 从路径构造参考
 曲线。当前默认 `reference_curve_type: bspline`，优化目标包括：
@@ -123,7 +123,7 @@ map.yaml + map.pgm + robot_positions.txt
 - `collision_monitor/config/robot_footprint.yaml`：物理 footprint。
 
 监控可能输出原速、75%/50%/25% 减速或零速度，并通过
-`/collision_monitor/status` 给出原因。地图、TF、odom 或命令超时等关键数据不可信
+`/diagnostics` 给出原因。地图、TF、odom 或命令超时等关键数据不可信
 时采取失败即停车。完整状态机见
 [`collision_monitor/README.md`](../collision_monitor/README.md)。
 
@@ -160,19 +160,19 @@ MM3V 串口 ─> mm3v_serial_reader.py ─> /tag_position
 
 | 接口 | 类型/方向 | 用途 |
 |---|---|---|
-| `/Odometry` | `nav_msgs/Odometry` | LIO 全局位姿 |
-| `/odom` | `nav_msgs/Odometry` | Ranger 实测速度/里程计 |
-| `/motion_state` | `ranger_msgs/MotionState` | 轮组姿态 |
-| `/move_base` | `move_base_msgs/MoveBaseAction` | 单段导航执行 |
-| `/plan_path_and_go` | `x2bot_teleop/SetInt` | 拓扑规划/执行 |
-| `/anav/cancel_navigation` | `std_srvs/Trigger` | 取消当前拓扑任务 |
-| `/anav/reload_topology` | `std_srvs/Trigger` | 重新加载拓扑 |
-| `/anav/nav_config` | `x2bot_teleop/NavConfig` | 读取/应用 AutoNAV 参数 |
-| `/anav/task_status` | `std_msgs/String` | GUI 任务状态 |
-| `/set_target_y` | `x2bot_teleop/SetTagY` | Tag 精调目标 |
-| `/cmd_vel_arbiter/finish_motion` | `cmd_vel_arbiter/FinishMotion` | 结束速度来源并请求回正 |
-| `/stop_and_center` | `ranger_msgs/StopAndCenterAction` | 底盘停车与轮组回正 |
-| `/collision_monitor/status` | `diagnostic_msgs/DiagnosticArray` | 安全状态和原因码 |
+| `/Odometry` | `nav_msgs/msg/Odometry` | LIO 全局位姿 |
+| `/odom` | `nav_msgs/msg/Odometry` | Ranger 实测速度/里程计 |
+| `/motion_state` | `ranger_msgs/msg/MotionState` | 轮组姿态 |
+| `/navigate_to_pose` | `nav2_msgs/action/NavigateToPose` | 单段导航执行 |
+| `/plan_path_and_go` | `x2bot_teleop/srv/SetInt` | 拓扑规划/执行 |
+| `/anav/cancel_navigation` | `std_srvs/srv/Trigger` | 取消当前拓扑任务 |
+| `/anav/reload_topology` | `std_srvs/srv/Trigger` | 重新加载拓扑 |
+| `/anav/nav_config` | `x2bot_teleop/srv/NavConfig` | 读取/应用 AutoNAV 参数 |
+| `/anav/task_status` | `std_msgs/msg/String` | GUI 任务状态 |
+| `/set_target_y` | `x2bot_teleop/srv/SetTagY` | Tag 精调目标 |
+| `/cmd_vel_arbiter/finish_motion` | `cmd_vel_arbiter/srv/FinishMotion` | 结束速度来源并请求回正 |
+| `/stop_and_center` | `ranger_msgs/action/StopAndCenter` | 底盘停车与轮组回正 |
+| `/diagnostics` | `diagnostic_msgs/msg/DiagnosticArray` | 安全状态和原因码 |
 
 ## 配置所有权
 
@@ -180,7 +180,7 @@ MM3V 串口 ─> mm3v_serial_reader.py ─> /tag_position
 - 速度来源上限：`cmd_vel_arbiter/config/cmd_vel_arbiter.yaml`。
 - 最终运动/制动上限：`collision_monitor/config/collision_monitor.yaml`。
 - 路径生成和跟踪：`nav/jgl_dwa_local_planner/param/dwa_local_planner_params.yaml`。
-- LIO 和 MID360s：`robot_r/lio/config/mid360.yaml`。
+- LIO 和 MID360s：`robot_r/lio/config/mid360_ros2.yaml`。
 - AutoNAV 运行策略：`~/maps/autonav_params.yaml`。
 
 同一个物理量在多层可能各有上限，最终有效值通常取最保守者。修改时必须沿整条链路核对，不能只看单个 YAML。

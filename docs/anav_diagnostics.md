@@ -41,7 +41,7 @@ AutoNAV / TagCtl / cmd_vel_arbiter / collision_monitor / ranger_base
               ┌───────────────┴────────────────┐
               │                                │
         ROS 模块诊断                    GUI 本地监控
-                                      - ROS Master
+                                      - ROS 2/DDS 通信
                                       - CAN 接口
                                       - 子进程退出
                                       - 节点失联
@@ -234,7 +234,7 @@ kind=STATE
 
 | 前缀 | 模块 |
 | --- | --- |
-| `ANAV-SYS-*` | GUI、ROS Master 与总体运行环境 |
+| `ANAV-SYS-*` | GUI、ROS 2/DDS 通信与总体运行环境 |
 | `ANAV-LOC-*` | 定位进程与定位数据 |
 | `ANAV-MAP-*` | 静态地图、点位文件与导航拓扑 |
 | `ANAV-NAV-*` | AutoNAV、MoveBase 与导航任务 |
@@ -251,7 +251,7 @@ kind=STATE
 
 | 错误码 | 级别 | 检测者 | 触发条件 | 恢复条件 |
 | --- | --- | --- | --- | --- |
-| `ANAV-SYS-001` | ERROR | GUI | ROS Master 启动检查失败或健康检查无法执行 `rosnode list` | ROS Master 可重新连接 |
+| `ANAV-SYS-001` | ERROR | GUI | ROS 2 上下文初始化失败或 DDS 通信健康检查失败 | ROS 2/DDS 通信恢复 |
 | `ANAV-SYS-999` | 动态 | 状态中心兜底 | 收到的诊断消息没有 `values.code` | 修复发布者消息格式 |
 | `ANAV-LOC-000` | OK | GUI | 定位未启动，作为正常状态 | 不适用 |
 | `ANAV-LOC-001` | WARN | GUI | 定位已启动，但尚未收到 `/Odometry` | 收到定位里程计 |
@@ -348,9 +348,9 @@ kind=STATE
 
 GUI 每 1 秒发起一次异步健康检查，避免阻塞界面。
 
-### 7.1 ROS Master
+### 7.1 ROS 2 通信
 
-通过带 2 秒超时的 `rosnode list` 判断 ROS Master 是否可达。失败时更新顶部 ROS
+在后台检查 rclpy 上下文和 ROS 2 graph；初始化或 DDS 通信失败时更新顶部 ROS
 状态并激活 `ANAV-SYS-001`，恢复后关闭异常。
 
 ### 7.2 CAN
@@ -429,7 +429,7 @@ GUI 监听 `/Odometry`：
 - 主窗口状态中心入口、未恢复计数和颜色提示；
 - ERROR/STALE 新事件自动打开独立窗口；
 - `/diagnostics` 订阅、去重、恢复和详情展示；
-- ROS Master、CAN、受管进程、预期节点和定位数据监控；
+- ROS 2/DDS、CAN、受管进程、预期节点和定位数据监控；
 - AutoNAV 启动前的地图、点位、拓扑检查；
 - 导航任务失败；
 - 标签短时无效、持续超时、控制忙和停车回正失败；
@@ -486,7 +486,7 @@ GUI 监听 `/Odometry`：
 7. `message` 面向现场人员，`detail` 保留研发上下文；
 8. `action` 必须给出可执行检查项，不能只写“请联系管理员”；
 9. 为激活、重复、恢复和再次发生四种情况编写测试；
-10. 验证节点退出或 ROS Master 失联时 GUI 不阻塞。
+10. 验证节点退出或 DDS 通信隔离时 GUI 不阻塞。
 
 不要把正常控制循环调试、每帧传感器数据、普通任务进度、无操作意义的内部状态
 切换，以及风险等级未变化的采样数值全部转为故障。
@@ -510,7 +510,7 @@ GUI 监听 `/Odometry`：
 
 | 场景 | 预期错误码 |
 | --- | --- |
-| 停止 roscore 或断开 ROS Master 网络 | `ANAV-SYS-001` |
+| 使用错误 `ROS_DOMAIN_ID` 或隔离 DDS 网络 | `ANAV-SYS-001` |
 | 定位运行后停止 `/Odometry` 超过 2 秒 | `ANAV-LOC-002` |
 | 移走 `map.yaml` 后启动 AutoNAV | `ANAV-MAP-002` |
 | 破坏 `robot_positions.txt` 格式 | `ANAV-MAP-004` |
@@ -528,7 +528,10 @@ GUI 监听 `/Odometry`：
 ### 11.3 构建与静态检查
 
 ```bash
-catkin_make --source . -DCATKIN_WHITELIST_PACKAGES="cmd_vel_arbiter;collision_monitor;x2bot_teleop;ranger_base"
+source /opt/ros/humble/setup.bash
+cd /workspace
+colcon build --packages-up-to \
+  cmd_vel_arbiter collision_monitor x2bot_teleop ranger_base --symlink-install
 python3 -m py_compile src/script/aNAV_ranger.py src/script/fault_center.py
 ```
 

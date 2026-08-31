@@ -174,7 +174,8 @@ ros2 action info /stop_and_center
 
 ### `/cmd_vel/candidate` 正常但底盘不动
 
-继续检查 `/collision_monitor/status` 和最终 `/cmd_vel`。这通常已经不是仲裁选择问题。
+继续检查 `/diagnostics` 中 `collision_monitor` 的状态和最终 `/cmd_vel`。这通常已经
+不是仲裁选择问题。
 
 ### 任务结束后不回正
 

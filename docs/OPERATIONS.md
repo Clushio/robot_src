@@ -7,13 +7,13 @@
 
 ### 软件和数据
 
-- 工作区已经成功编译，当前终端已 source `devel/setup.bash`。
+- 工作区已经成功编译，当前终端已 source `/workspace/install/setup.bash`。
 - `~/maps` 存在，且当前任务所需文件齐全。
 - `map.yaml` 中的 `image` 能解析到正确的 PGM。
 - `robot_positions.txt` 与当前地图属于同一坐标系。
 - `topology.yaml` 由当前地图和点位生成，不是旧环境文件。
 - MID360s、底盘、USB-CAN 和 MM3V 串口权限正确。
-- `ROS_MASTER_URI`、Tag TCP/UDP IP 与目标机器网络一致。
+- `ROS_DOMAIN_ID`、DDS 网络、Tag TCP/UDP IP 与目标机器网络一致。
 
 ### 机械和现场
 
@@ -27,7 +27,7 @@
 仓库仍包含需要按部署环境确认的固定配置：
 
 - 源码或 launch 中的固定绝对地图路径，应统一参数化为 `~/maps`；
-- GUI 中用于调试设备的固定 sudo 密码；
+- GUI 的 CAN 操作会在终端中请求 sudo 密码，不应把密码写入源码；
 - Tag TCP 默认绑定 `192.168.3.216:12345`；
 - MM3V UDP 默认发送到 `192.168.3.17:22222`；
 - MM3V 默认串口 `/dev/ttyUSB0`。
@@ -37,13 +37,13 @@
 ## 启动 GUI
 
 ```bash
-source /opt/ros/noetic/setup.bash
-source ~/catkin_ws/devel/setup.bash
-cd ~/catkin_ws
-python3 src/script/aNAV_ranger.py
+source /opt/ros/humble/setup.bash
+source /workspace/install/setup.bash
+cd /workspace
+ros2 run anav_ranger aNAV_ranger.py
 ```
 
-推荐通过 GUI 完成日常作业。GUI 会把大多数 roslaunch 放到独立终端标签页，关闭
+推荐通过 GUI 完成日常作业。GUI 会把大多数 ros2 launch 放到独立终端标签页，关闭
 主窗口时会尝试停止自己管理的子进程。地图保存依赖正常退出，不要用 `kill -9`。
 
 ## GUI 界面与使用方法
@@ -52,13 +52,13 @@ python3 src/script/aNAV_ranger.py
 
 窗口顶部显示 ROS、定位和导航状态，底部状态栏显示最近一次操作结果。右上角
 “状态中心”用于查看按时间记录的告警和异常；启动失败时还应同时查看 GUI 打开的
-终端标签页，因为 roslaunch、驱动和规划器的完整日志都在那里。
+终端标签页，因为 ros2 launch、驱动和规划器的完整日志都在那里。
 
 GUI 共包含六个页面：
 
 | 页面 | 主要用途 |
 |---|---|
-| 导航作业 | 启停定位、MoveBase、AutoNAV，下发目标、暂停、取消、急停和 Tag 微调 |
+| 导航作业 | 启停定位、Nav2、AutoNAV，下发目标、暂停、取消、急停和 Tag 微调 |
 | 循环任务 | 选择两个拓扑点并持续往返 |
 | 导航参数 | 设置路线策略、堵塞重规划和到达判定参数 |
 | 点位管理 | 实车/RViz 采点，编辑、排序、导入和导出点位 |
@@ -72,15 +72,15 @@ GUI 共包含六个页面：
 
 推荐按以下顺序使用：
 
-1. 点击“启动 CAN”，等待 CAN 状态正常。该按钮当前依赖目标机器本地配置的 sudo
-   密码，部署方法见[新机器最小执行方案](最小执行方案.md)第 12 节。
+1. 点击“启动 CAN”，在弹出的终端中输入目标机器的 sudo 密码并等待 CAN 状态正常。
+   部署方法见 [ROS 2 Humble 新机安装与构建](ROS2_HUMBLE_INSTALL.md)。
 2. 点击“启动底盘”。它会启动 Ranger 驱动，同时带起速度仲裁器和碰撞监控。
 3. 如需 Tag 工位精调，点击“启动标签读取”；GUI 会同时启动 MM3V ROS 节点和 TCP
    服务。
 4. 只有确实需要 PXN 手柄遥控时才点击“启动手柄”。手柄和 GUI 会复用 `/joy`，启用
    前必须确认按键映射，避免 GUI 控制消息被解释为遥控命令。
 
-“实时运行状态”会显示 CAN、底盘、速度仲裁、定位、MoveBase、AutoNAV 和标签读取。
+“实时运行状态”会显示 CAN、底盘、速度仲裁、定位、Nav2、AutoNAV 和标签读取。
 “实时数据”用于核对机器人位姿与最新 Tag 数据。“构建导航拓扑”根据当前
 `robot_positions.txt` 和 `map.yaml` 生成 `~/maps/topology.yaml`；点位或地图变化后
 必须重新执行。
@@ -89,15 +89,15 @@ GUI 共包含六个页面：
 
 #### 启动定位和导航
 
-1. 点击“启动定位”。GUI 启动 `3startlocation.launch`，并在 RViz 尚未运行时自动打开
+1. 点击“启动定位”。GUI 启动 `3startlocation.launch.py`，并在 RViz 尚未运行时自动打开
    RViz。
 2. 等待定位数据持续更新，在 RViz 确认地图、点云、机器人姿态和 TF 对齐。
-3. 点击“启动自动导航”。如果 MoveBase 尚未运行，GUI 会先自动启动 MoveBase，等待
-   就绪后再启动 AutoNAV；“启动 MoveBase”按钮主要用于需要单独调试规划器的情况。
+3. 点击“启动自动导航”。如果 Nav2 尚未运行，GUI 会先自动启动 Nav2，等待
+   就绪后再启动 AutoNAV；“启动 Nav2”按钮主要用于需要单独调试规划器的情况。
 4. AutoNAV 就绪后，工位快捷按钮和“点位管理”中的“导航到选中点”才可用。
 
 “停止定位”只停止定位。“取消当前任务”会取消正在执行的 AutoNAV 目标并请求停车
-回正，但保留 MoveBase 待命；“停止导航”会停止 AutoNAV、MoveBase 和相关日志进程。
+回正，但保留 Nav2 待命；“停止导航”会停止 AutoNAV、Nav2 和相关日志进程。
 日常取消单个目标使用“取消当前任务”，结束整套导航时才使用“停止导航”。
 
 #### 下发目标和任务控制
@@ -132,7 +132,7 @@ Y 快捷值按钮会把该值写入 Y，并**立即发送**当前 X、Y、角度
 1. 点击“刷新 topo 点位”，确认至少有两个有效点。
 2. 选择不同的循环点 A、B。
 3. 选择“固定路线”或“自动绕路”。
-4. 点击“开始循环”。如果导航服务尚未运行，GUI 会尝试启动 MoveBase 和 AutoNAV，
+4. 点击“开始循环”。如果导航服务尚未运行，GUI 会尝试启动 Nav2 和 AutoNAV，
    最长等待约 40 秒。
 5. 观察“正在前往”和“已完成单程”计数；一次 A→B 或 B→A 计为一个单程。
 6. 点击“停止循环”会取消当前目标并结束往返。
@@ -164,7 +164,7 @@ Y 快捷值按钮会把该值写入 Y，并**立即发送**当前 X、Y、角度
 - “进入点位设置”：备份现有 `robot_positions.txt` 后开始一份全新的点位文件；
 - “继续添加点位”：备份并保留已有点位，在文件末尾继续添加。
 
-采集完成后点击“结束点位设置”。RViz 采点时如果 MoveBase 正在运行，GUI 会拒绝进入
+采集完成后点击“结束点位设置”。RViz 采点时如果 Nav2 正在运行，GUI 会拒绝进入
 设置模式，避免记录箭头被导航插件误当成运动目标。
 
 列表支持刷新、导航、修改、删除、上下移动、撤销、恢复最近备份、导入和导出。修改
@@ -173,7 +173,7 @@ Y 快捷值按钮会把该值写入 Y，并**立即发送**当前 X、Y、角度
 
 ### “地图构建”页面
 
-建图前先停止定位、MoveBase 和 AutoNAV，避免同时启动多套雷达/LIO 处理链：
+建图前先停止定位、Nav2 和 AutoNAV，避免同时启动多套雷达/LIO 处理链：
 
 1. 点击“开始构建地图”，缓慢控制机器人覆盖场地并形成闭环。
 2. 点击“结束地图构建”正常停止，让 LIO 执行 PCD 和特征地图保存逻辑。
@@ -187,7 +187,7 @@ Y 快捷值按钮会把该值写入 Y，并**立即发送**当前 X、Y、角度
 
 完成作业后先取消当前任务，停止导航和定位，再点击“退出控制台”。关闭窗口也会尝试
 发布软件停车、请求轮组回正，并停止由 GUI 启动的子进程；手工从其他终端启动的进程
-不一定属于 GUI 管理范围，退出后仍需用 `rosnode list` 确认没有残留运动节点。
+不一定属于 GUI 管理范围，退出后仍需用 `ros2 node list` 确认没有残留运动节点。
 
 ## 标准导航流程
 
@@ -197,12 +197,12 @@ Y 快捷值按钮会把该值写入 Y，并**立即发送**当前 X、Y、角度
 4. 启动定位，等待 GUI 显示持续有效的定位数据。
 5. 在 RViz 检查地图、机器人姿态、点云与 TF 是否重合。
 6. 确认 `map.yaml`、点位和拓扑来自当前环境。
-7. 启动自动导航；GUI 会先启动/等待 MoveBase，再启动 AutoNAV。
+7. 启动自动导航；GUI 会先启动/等待 Nav2，再启动 AutoNAV。
 8. 选择普通导航策略：
    - 自动绕路：堵塞边临时封锁，等待后重新选路；
    - 固定路线：保持原拓扑路线，堵塞时停车等待。
 9. 下发一个近距离目标进行首次验证。
-10. 观察 `/collision_monitor/status`、局部代价地图和现场运动。
+10. 观察 `/diagnostics`、局部代价地图和现场运动。
 
 任务结束、取消或失败后，系统会请求停车和轮组回正。如果 GUI 提示回正未确认，
 不要立即下发新任务，应先检查底盘状态。
@@ -212,21 +212,21 @@ Y 快捷值按钮会把该值写入 Y，并**立即发送**当前 X、Y、角度
 每个终端先执行：
 
 ```bash
-source /opt/ros/noetic/setup.bash
-source ~/catkin_ws/devel/setup.bash
+source /opt/ros/humble/setup.bash
+source /workspace/install/setup.bash
 ```
 
 按顺序启动：
 
 ```bash
 sudo ip link set can0 up type can bitrate 500000
-roslaunch ranger_bringup ranger_mini_v2.launch
-roslaunch robot_r 3startlocation.launch
-roslaunch robot_r 5nav.launch
-roslaunch robot_r 3navlocations.launch
+ros2 launch ranger_bringup ranger_mini_v2.launch.py
+ros2 launch robot_r 3startlocation.launch.py
+ros2 launch robot_r 5nav.launch.py
+ros2 launch robot_r 3navlocations.launch.py
 ```
 
-停止时先取消 AutoNAV，再停止 MoveBase，最后停止定位和底盘。不要先杀掉仲裁器或
+停止时先取消 AutoNAV，再停止 Nav2，最后停止定位和底盘。不要先杀掉仲裁器或
 碰撞监控后继续保留底盘运动节点。必要时先使用物理急停。
 
 ## 三维建图
@@ -234,7 +234,7 @@ roslaunch robot_r 3navlocations.launch
 GUI“地图构建”页的“开始构建地图”对应：
 
 ```bash
-roslaunch robot_r s2lam.launch
+ros2 launch robot_r s2lam.launch.py
 ```
 
 操作要点：
@@ -242,11 +242,11 @@ roslaunch robot_r s2lam.launch
 1. 缓慢覆盖作业区域，尽量形成闭环。
 2. 避免大量人员或车辆长期遮挡固定结构。
 3. 观察 `/cloud_registered` 以及静态/动态调试点云。
-4. 结束时通过 GUI 正常停止 roslaunch，让 LIO 执行保存逻辑。
+4. 结束时通过 GUI 正常停止 ros2 launch，让 LIO 执行保存逻辑。
 5. 检查 `~/maps/GlobalMap.pcd`、`FeatureMap.pcd`、可选的
    `GlobalMap_raw.pcd` 和 `split_map/`。
 
-动态点过滤参数在 `robot_r/lio/config/mid360.yaml` 的 `dynamic_filter` 下。改变体素、
+动态点过滤参数在 `robot_r/lio/config/mid360_ros2.yaml` 的 `dynamic_filter` 下。改变体素、
 命中次数或自由空间删除阈值后，需要重新建图并对静态结构保留率进行验证。
 
 ## 生成二维地图
@@ -254,24 +254,24 @@ roslaunch robot_r s2lam.launch
 GUI“生成并保存二维地图”会启动点云转二维地图，并调用 `map_saver`。命令行入口：
 
 ```bash
-roslaunch robot_r 4genmap.launch
+ros2 launch robot_r 4genmap.launch.py
 ```
 
 确认 `/map` 正常后：
 
 ```bash
-rosrun map_server map_saver -f ~/maps/map
+ros2 run nav2_map_server map_saver_cli -f ~/maps/map
 ```
 
 输出应包含 `~/maps/map.pgm` 和 `map.yaml`。二维过滤、高度范围、分辨率等在
-`robot_r/launch/pcd2pgm.launch` 中。生成后在 RViz 检查墙体、通道宽度、未知区域和
+`robot_r/launch/pcd2pgm.launch.py` 中。生成后在 RViz 检查墙体、通道宽度、未知区域和
 低矮障碍物是否符合实际。
 
 ## 记录和维护点位
 
 GUI 支持两种模式：
 
-- 实车采点：启动 `robot_r/3settinglocation.launch`，把机器人移动到目标姿态后记录。
+- 实车采点：启动 `robot_r/3settinglocation.launch.py`，把机器人移动到目标姿态后记录。
 - RViz 采点：无需动车，在地图上使用“记录点位”工具（快捷键 `R`）拖出位置和朝向。
 
 点位保存在 `~/maps/robot_positions.txt`。每行格式为：
@@ -293,7 +293,7 @@ GUI 会在覆盖点位前建立时间戳备份。提交或复制地图时，应�
 只审计，不覆盖现有文件：
 
 ```bash
-cd ~/catkin_ws
+cd /workspace
 python3 src/script/build_topology.py --audit
 ```
 
@@ -341,7 +341,7 @@ python3 src/script/build_topology.py --report /tmp/topology-report.json
 运行：
 
 ```bash
-python3 ~/catkin_ws/src/script/transfer_robot_positions.py
+python3 /workspace/src/script/transfer_robot_positions.py
 ```
 
 输出默认为 `robot_positions_transformed.txt`。工具通过新旧 PGM 特征匹配估计刚体
@@ -364,14 +364,14 @@ GUI“循环任务”页从当前 `topology.yaml` 中选择两个不同点，持
 启动：
 
 ```bash
-roslaunch robot_r 6tagReadAndCtl_mm3v.launch
-python3 ~/catkin_ws/src/script/tcpserver.py
+ros2 launch robot_r 6tagReadAndCtl_mm3v.launch.py
+python3 /workspace/src/script/tcpserver.py
 ```
 
 常见覆盖参数：
 
 ```bash
-roslaunch robot_r 6tagReadAndCtl_mm3v.launch \
+ros2 launch robot_r 6tagReadAndCtl_mm3v.launch.py \
   port:=/dev/ttyUSB0 \
   udp_feedback_host:=192.168.3.17 \
   x_sign:=1.0 y_sign:=1.0 yaw_sign:=-1.0
@@ -421,7 +421,7 @@ GUI 软件急停持续发布 `/cmd_vel/safety` 零速度；仲裁器将其作为
 1. 优先按物理急停。
 2. 确认现场安全后再检查软件。
 3. 查看 `/cmd_vel/safety`、`/cmd_vel/candidate`、`/cmd_vel`。
-4. 查看 `/collision_monitor/status` 的 state、reason、source 和 collision time。
+4. 查看 `/diagnostics` 的 state、reason、source 和 collision time。
 5. 检查 `/odom`、TF、静态地图和局部代价地图是否新鲜。
 6. 不要在原因未明时通过关闭碰撞监控继续运行。
 
@@ -431,24 +431,24 @@ GUI 软件急停持续发布 `/cmd_vel/safety` 零速度；仲裁器将其作为
 
 ```bash
 # 节点和接口
-rosnode list
-rosservice list
-rostopic list
+ros2 node list
+ros2 service list
+ros2 topic list -t
 
 # 传感器和定位
-rostopic hz /livox/lidar
-rostopic hz /livox/imu
-rostopic hz /Odometry
-rostopic hz /odom
+ros2 topic hz /livox/lidar
+ros2 topic hz /livox/imu
+ros2 topic hz /Odometry
+ros2 topic hz /odom
 
 # 速度链路
-rostopic echo /cmd_vel/nav
-rostopic echo /cmd_vel/candidate
-rostopic echo /cmd_vel
-rostopic echo /collision_monitor/status
+ros2 topic echo /cmd_vel/nav
+ros2 topic echo /cmd_vel/candidate
+ros2 topic echo /cmd_vel
+ros2 topic echo /diagnostics
 
 # TF
-rosrun tf tf_echo map base_link
+ros2 run tf2_ros tf2_echo map base_link
 
 # CAN
 ip -details link show can0
