@@ -137,6 +137,7 @@ catkin_package(
 ## Your package locations should be listed before other locations
 # include_directories(include)
 include_directories(
+  include
   ${catkin_INCLUDE_DIRS}
 )
 
@@ -225,3 +226,8 @@ target_link_libraries(TagCtl ${catkin_LIBRARIES})
 
 ## Add folders to be run by python nosetests
 # catkin_add_nosetests(test)
+
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(terminal_goal_policy_test
+    test/terminal_goal_policy_test.cpp)
+endif()

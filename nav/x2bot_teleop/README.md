@@ -52,6 +52,7 @@ x y z roll pitch yaw [label]
 | `/anav/task_status` | `std_msgs/String` | GUI 使用的任务状态 |
 | `/anav/fixed_route_mode` | `std_msgs/Bool` | 通知局部规划器当前是否固定路线 |
 | `/anav/topology_safety_phase` | `std_msgs/UInt8` | 10 Hz 发布拓扑首段、中间段、末段安全阶段 |
+| `/anav/terminal_motion_state` | `std_msgs/UInt8` | 局部控制器发布直线跟踪、终点位置捕获、最终旋转和完成状态 |
 | `/topology_plan` | `nav_msgs/Path` | 当前拓扑路径 |
 | `/topology_markers` | `visualization_msgs/MarkerArray` | RViz 拓扑显示 |
 | `/cmd_vel/nav` | `geometry_msgs/Twist` | AutoNAV 直接控制阶段的导航速度输入 |

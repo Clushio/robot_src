@@ -25,6 +25,7 @@
 #include <visualization_msgs/MarkerArray.h>
 #include <x2bot_teleop/NavConfig.h>
 #include <x2bot_teleop/SetInt.h>
+#include <x2bot_teleop/terminal_goal_policy.h>
 
 #include <algorithm>
 #include <atomic>
@@ -143,6 +144,7 @@ public:
           fixed_route_final_xy_tolerance_(0.03),
           validate_pass_through_action_success_distance_(false),
           goal_timeout_(120.0),
+          terminal_yaw_wait_timeout_(60.0),
           block_bidirectional_(true),
           static_map_loaded_(false),
           static_map_width_(0),
@@ -187,6 +189,11 @@ public:
                          validate_pass_through_action_success_distance_,
                          validate_pass_through_action_success_distance_);
         private_nh.param("goal_timeout", goal_timeout_, goal_timeout_);
+        private_nh.param("terminal_yaw_wait_timeout",
+                         terminal_yaw_wait_timeout_,
+                         terminal_yaw_wait_timeout_);
+        terminal_yaw_wait_timeout_ =
+            std::max(1.0, terminal_yaw_wait_timeout_);
         private_nh.param("block_bidirectional", block_bidirectional_, block_bidirectional_);
         private_nh.param("static_map_inflation_radius", static_map_inflation_radius_,
                          static_map_inflation_radius_);
@@ -244,6 +251,12 @@ public:
                 boost::bind(&mynav::referenceStatusCallback, this, _1),
                 ros::VoidPtr(), &reference_status_queue_);
         reference_status_sub_ = nh_.subscribe(status_options);
+        ros::SubscribeOptions terminal_options =
+            ros::SubscribeOptions::create<std_msgs::UInt8>(
+                "/anav/terminal_motion_state", 1,
+                boost::bind(&mynav::terminalMotionStateCallback, this, _1),
+                ros::VoidPtr(), &reference_status_queue_);
+        terminal_motion_state_sub_ = nh_.subscribe(terminal_options);
         reference_status_spinner_.start();
 
         plan_path_service = nh_.advertiseService("plan_path_and_go", &mynav::planPathCallback, this);
@@ -268,13 +281,14 @@ public:
                            const std::string &message,
                            const std::string &detail,
                            const std::string &action,
-                           bool active)
+                           bool active,
+                           const std::string &name = "/anav/navigation")
     {
         diagnostic_msgs::DiagnosticArray array;
         array.header.stamp = ros::Time::now();
         diagnostic_msgs::DiagnosticStatus status;
         status.level = level;
-        status.name = "/anav/navigation";
+        status.name = name;
         status.hardware_id = "ranger";
         status.message = message;
         addDiagnosticValue(status, "code", code);
@@ -645,6 +659,7 @@ private:
     ros::CallbackQueue reference_status_queue_;
     ros::AsyncSpinner reference_status_spinner_;
     ros::Subscriber reference_status_sub_;
+    ros::Subscriber terminal_motion_state_sub_;
     ros::NodeHandle safety_phase_nh_;
     ros::CallbackQueue safety_phase_callback_queue_;
     ros::AsyncSpinner safety_phase_spinner_;
@@ -658,6 +673,9 @@ private:
     ros::Time reference_status_stamp_;
     int reference_status_path_index_ = -1;
     int reference_status_code_ = 0;
+    std::mutex terminal_motion_state_mutex_;
+    ros::Time terminal_motion_state_stamp_;
+    uint8_t terminal_motion_state_ = x2bot_teleop::TERMINAL_TRACKING;
     ros::ServiceServer plan_path_service;
     ros::ServiceServer cancel_navigation_service_;
     ros::ServiceServer nav_config_service_;
@@ -687,6 +705,7 @@ private:
     double fixed_route_final_xy_tolerance_;
     bool validate_pass_through_action_success_distance_;
     double goal_timeout_;
+    double terminal_yaw_wait_timeout_;
     bool block_bidirectional_;
     std::atomic<bool> navigation_active_{false};
     std::mutex nav_config_mutex_;
@@ -2458,6 +2477,38 @@ private:
         reference_status_code_ = static_cast<int>(std::lround(msg->vector.z));
     }
 
+    void terminalMotionStateCallback(const std_msgs::UInt8::ConstPtr &msg)
+    {
+        if (msg->data > x2bot_teleop::TERMINAL_COMPLETE)
+        {
+            ROS_WARN_THROTTLE(1.0, "Ignore invalid terminal motion state %u.",
+                              static_cast<unsigned int>(msg->data));
+            return;
+        }
+        std::lock_guard<std::mutex> lock(terminal_motion_state_mutex_);
+        terminal_motion_state_stamp_ = ros::Time::now();
+        terminal_motion_state_ = msg->data;
+    }
+
+    void resetTerminalMotionState()
+    {
+        std::lock_guard<std::mutex> lock(terminal_motion_state_mutex_);
+        terminal_motion_state_stamp_ = ros::Time(0);
+        terminal_motion_state_ = x2bot_teleop::TERMINAL_TRACKING;
+    }
+
+    bool currentTerminalMotionState(const ros::Time &goal_start_time,
+                                    uint8_t &state)
+    {
+        std::lock_guard<std::mutex> lock(terminal_motion_state_mutex_);
+        if (terminal_motion_state_stamp_ < goal_start_time)
+        {
+            return false;
+        }
+        state = terminal_motion_state_;
+        return true;
+    }
+
     void resetReferenceStatus()
     {
         std::lock_guard<std::mutex> lock(reference_status_mutex_);
@@ -2507,6 +2558,7 @@ private:
 
         active_next_index_ = target_index;
         resetReferenceStatus();
+        resetTerminalMotionState();
         publishTopologyMarkers();
         ROS_INFO_STREAM("Sending topology " << (final_goal ? "final" : "pass-through")
                                             << " goal P" << target_index << ": ("
@@ -2518,6 +2570,16 @@ private:
         bool have_progress_pose = getCurrentRobotPose(last_progress_pose);
         ros::Time last_progress_time = ros::Time::now();
         const ros::Time start_time = last_progress_time;
+        x2bot_teleop::TerminalGoalPolicy terminal_policy(
+            terminal_yaw_wait_timeout_, progress_yaw_);
+
+        const auto clear_terminal_error = [&](const std::string &detail)
+        {
+            publishDiagnostic(
+                diagnostic_msgs::DiagnosticStatus::OK,
+                "ANAV-NAV-000", "终点旋转等待已恢复", detail, "", false,
+                "/anav/navigation/terminal_yaw");
+        };
 
         while (ros::ok())
         {
@@ -2525,13 +2587,60 @@ private:
             {
                 global_ac->cancelAllGoals();
                 stopRobot();
+                if (terminal_policy.errorActive())
+                {
+                    clear_terminal_error("终点旋转等待已由人工取消。");
+                }
                 return GOAL_CANCELED;
             }
             if (stop_and_quit)
             {
                 global_ac->cancelAllGoals();
                 stopRobot();
+                if (terminal_policy.errorActive())
+                {
+                    clear_terminal_error("导航停止，终点旋转等待状态结束。");
+                }
                 return GOAL_FAILED;
+            }
+
+            geometry_msgs::PoseStamped current_pose;
+            const bool have_current_pose = getCurrentRobotPose(current_pose);
+            uint8_t terminal_motion_state = x2bot_teleop::TERMINAL_TRACKING;
+            if (final_goal &&
+                currentTerminalMotionState(goal_start_time,
+                                           terminal_motion_state))
+            {
+                const x2bot_teleop::TerminalGoalUpdate terminal_update =
+                    terminal_policy.update(
+                        terminal_motion_state, have_current_pose,
+                        have_current_pose
+                            ? tf::getYaw(current_pose.pose.orientation)
+                            : 0.0,
+                        ros::Time::now().toSec());
+                if (terminal_update.error_activated)
+                {
+                    std::ostringstream detail;
+                    detail << "终点 P" << target_index
+                           << " 已锁定，最终旋转连续 "
+                           << std::fixed << std::setprecision(1)
+                           << terminal_yaw_wait_timeout_
+                           << " 秒没有有效角度进展；保持停车等待，不进行拓扑重规划。";
+                    publishDiagnostic(
+                        diagnostic_msgs::DiagnosticStatus::ERROR,
+                        "ANAV-NAV-016", "终点旋转等待超时",
+                        detail.str(),
+                        "检查终点周围障碍物；障碍清除后车辆会继续原地旋转。",
+                        true, "/anav/navigation/terminal_yaw");
+                    ROS_ERROR_STREAM(detail.str());
+                }
+                else if (terminal_update.error_recovered)
+                {
+                    clear_terminal_error(
+                        "检测到有效角度进展，继续完成当前终点的原地旋转。");
+                    ROS_INFO("Terminal yaw at P%d resumed after a prolonged stop.",
+                             target_index);
+                }
             }
 
             if (pause_reentry_requested_.load())
@@ -2544,6 +2653,10 @@ private:
                     {
                         global_ac->cancelAllGoals();
                         stopRobot();
+                        if (terminal_policy.errorActive())
+                        {
+                            clear_terminal_error("终点旋转等待已由人工取消。");
+                        }
                         return GOAL_CANCELED;
                     }
                     stopRobot();
@@ -2551,6 +2664,10 @@ private:
                 }
                 if (!ros::ok())
                 {
+                    if (terminal_policy.errorActive())
+                    {
+                        clear_terminal_error("导航节点停止，终点旋转等待状态结束。");
+                    }
                     return GOAL_FAILED;
                 }
 
@@ -2559,6 +2676,15 @@ private:
                                            REFERENCE_PASSED,
                                            goal_start_time);
                 pause_reentry_requested_.store(false);
+                if (terminal_policy.locked())
+                {
+                    active_next_index_ = target_index;
+                    publishTopologyMarkers();
+                    ROS_INFO("Resume the locked terminal goal P%d after pause; topology re-entry is disabled.",
+                             target_index);
+                    global_ac->sendGoal(mb_goal);
+                    continue;
+                }
                 active_next_index_ = -1;
                 publishTopologyMarkers();
                 ROS_INFO("Resume via topology re-entry after pausing at path index %d%s.",
@@ -2567,7 +2693,8 @@ private:
                 return current_goal_passed ? GOAL_PAUSED_AFTER_PASS : GOAL_PAUSED;
             }
 
-            if (referenceStatusMatches(topology_path_index,
+            if (!terminal_policy.locked() &&
+                referenceStatusMatches(topology_path_index,
                                        REFERENCE_PATH_DEVIATED,
                                        goal_start_time))
             {
@@ -2587,6 +2714,10 @@ private:
                 {
                     global_ac->cancelAllGoals();
                     stopRobot();
+                    if (terminal_policy.errorActive())
+                    {
+                        clear_terminal_error("终点旋转等待已由人工取消。");
+                    }
                     return GOAL_CANCELED;
                 }
                 // pause() cancels the action from the independent Joy callback
@@ -2596,7 +2727,8 @@ private:
                 {
                     continue;
                 }
-                if (referenceStatusMatches(topology_path_index,
+                if (!terminal_policy.locked() &&
+                    referenceStatusMatches(topology_path_index,
                                            REFERENCE_PATH_DEVIATED,
                                            goal_start_time))
                 {
@@ -2609,10 +2741,9 @@ private:
                 const actionlib::SimpleClientGoalState state = global_ac->getState();
                 if (state == actionlib::SimpleClientGoalState::SUCCEEDED)
                 {
-                    geometry_msgs::PoseStamped current_pose;
                     if (!final_goal &&
                         validate_pass_through_action_success_distance_ &&
-                        getCurrentRobotPose(current_pose))
+                        have_current_pose)
                     {
                         const double target_distance = distanceToNode(current_pose, target_index);
                         if (target_distance > waypoint_reached_distance_)
@@ -2623,7 +2754,7 @@ private:
                             continue;
                         }
                     }
-                    else if (!final_goal && getCurrentRobotPose(current_pose))
+                    else if (!final_goal && have_current_pose)
                     {
                         const double target_distance = distanceToNode(current_pose, target_index);
                         ROS_INFO("Pass-through P%d accepted by move_base action success at %.2f m "
@@ -2634,7 +2765,23 @@ private:
                     current_pose_index = target_index;
                     active_next_index_ = -1;
                     publishTopologyMarkers();
+                    if (terminal_policy.errorActive())
+                    {
+                        clear_terminal_error(
+                            "最终朝向已经完成，终点旋转等待故障解除。");
+                    }
                     return GOAL_REACHED;
+                }
+                if (terminal_policy.locked())
+                {
+                    ROS_WARN_STREAM(
+                        "Locked terminal goal P" << target_index
+                        << " returned state " << state.toString()
+                        << "; stop and retry the same terminal goal without topology replanning.");
+                    stopRobot();
+                    ros::Duration(0.5).sleep();
+                    global_ac->sendGoal(mb_goal);
+                    continue;
                 }
                 ROS_WARN_STREAM("Goal P" << target_index << " failed with state: " << state.toString());
                 while (ros::ok() &&
@@ -2664,8 +2811,7 @@ private:
                 return GOAL_REACHED;
             }
 
-            geometry_msgs::PoseStamped current_pose;
-            if (getCurrentRobotPose(current_pose))
+            if (have_current_pose)
             {
                 const double target_distance = distanceToNode(current_pose, target_index);
                 if (!final_goal && target_distance <= waypoint_reached_distance_)
@@ -2713,11 +2859,12 @@ private:
             const ros::Time now = ros::Time::now();
             if ((now - last_progress_time).toSec() >= blocked_timeout_)
             {
-                if (fixed_route)
+                if (fixed_route || terminal_policy.locked())
                 {
                     ROS_WARN_THROTTLE(
                         2.0,
-                        "Fixed route P%d: no motion for %.1f seconds; keep the same goal and wait without replanning.",
+                        "%s P%d: no motion for %.1f seconds; keep the same goal and wait without replanning.",
+                        terminal_policy.locked() ? "Locked terminal" : "Fixed route",
                         target_index,
                         (now - last_progress_time).toSec());
                     continue;
@@ -2732,11 +2879,12 @@ private:
             }
             if ((now - start_time).toSec() >= goal_timeout_)
             {
-                if (fixed_route)
+                if (fixed_route || terminal_policy.locked())
                 {
                     ROS_WARN_THROTTLE(
                         2.0,
-                        "Fixed route P%d: goal remains active after %.1f seconds; wait indefinitely without replanning.",
+                        "%s P%d: goal remains active after %.1f seconds; wait indefinitely without replanning.",
+                        terminal_policy.locked() ? "Locked terminal" : "Fixed route",
                         target_index,
                         (now - start_time).toSec());
                     continue;
@@ -2751,6 +2899,10 @@ private:
         }
 
         stopRobot();
+        if (terminal_policy.errorActive())
+        {
+            clear_terminal_error("导航节点停止，终点旋转等待状态结束。");
+        }
         active_next_index_ = -1;
         publishTopologyMarkers();
         return GOAL_FAILED;

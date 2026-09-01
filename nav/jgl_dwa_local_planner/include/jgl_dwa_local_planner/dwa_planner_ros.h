@@ -76,6 +76,7 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <visualization_msgs/Marker.h>
 #include <std_msgs/Bool.h>
+#include <std_msgs/UInt8.h>
 
 namespace jgl_dwa_local_planner
 {
@@ -221,6 +222,14 @@ namespace jgl_dwa_local_planner
         REFERENCE_PATH_DEVIATED = 3
       };
       void publishReferenceStatus(ReferenceStatus status);
+      enum TerminalMotionState
+      {
+        TERMINAL_TRACKING = 0,
+        TERMINAL_POSITION_CAPTURED = 1,
+        TERMINAL_ROTATING = 2,
+        TERMINAL_COMPLETE = 3
+      };
+      void publishTerminalMotionState(TerminalMotionState state);
       bool shouldUseReferencePath();
       bool prepareReferencePath(bool &generation_pending,
                                 bool &generation_failed);
@@ -266,7 +275,8 @@ namespace jgl_dwa_local_planner
 
       // for visualisation, publishers of global and local plan
       ros::Publisher g_plan_pub_, l_plan_pub_, reference_path_pub_,
-          reference_path_marker_pub_, reference_status_pub_;
+          reference_path_marker_pub_, reference_status_pub_,
+          terminal_motion_state_pub_;
       ros::Subscriber fixed_route_mode_sub_;
 
       base_local_planner::LocalPlannerUtil planner_util_;
@@ -328,6 +338,7 @@ namespace jgl_dwa_local_planner
       double yaw_goal_tolerance;                        //允许到达目标点的角度误差
       double xy_goal_tolerance;                         //允许到达目标点的距离误差
       int status;                                       //直线控制状态，0代表进行纯追踪，1代表运行过程中(起点)角度偏离过大进行旋转，2代表到达终点后的旋转
+      int published_terminal_motion_state_;
       double max_vel_x;                                 //最大运行速度
       double brake_distance;                            //刹车距离
       double lfc, forwNum;                              //pure pursuit coefficient
