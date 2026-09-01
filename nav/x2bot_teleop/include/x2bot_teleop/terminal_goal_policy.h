@@ -15,6 +15,22 @@ enum TerminalMotionState : uint8_t
     TERMINAL_COMPLETE = 3
 };
 
+enum PathControlMode : uint8_t
+{
+    PATH_CONTROL_UNKNOWN = 0,
+    REFERENCE_TRACKING = 1,
+    LEGACY_FALLBACK = 2
+};
+
+inline bool legacyIntermediateWaypointReached(uint8_t mode, bool final_goal,
+                                              double distance,
+                                              double tolerance)
+{
+    return mode == LEGACY_FALLBACK && !final_goal &&
+           std::isfinite(distance) && std::isfinite(tolerance) &&
+           tolerance >= 0.0 && distance >= 0.0 && distance <= tolerance;
+}
+
 struct TerminalGoalUpdate
 {
     bool locked = false;

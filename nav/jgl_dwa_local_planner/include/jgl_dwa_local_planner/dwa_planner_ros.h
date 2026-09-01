@@ -230,6 +230,13 @@ namespace jgl_dwa_local_planner
         TERMINAL_COMPLETE = 3
       };
       void publishTerminalMotionState(TerminalMotionState state);
+      enum PathControlMode
+      {
+        PATH_CONTROL_UNKNOWN = 0,
+        REFERENCE_TRACKING = 1,
+        LEGACY_FALLBACK = 2
+      };
+      void publishPathControlMode(PathControlMode mode, bool force = false);
       bool shouldUseReferencePath();
       bool prepareReferencePath(bool &generation_pending,
                                 bool &generation_failed);
@@ -276,7 +283,7 @@ namespace jgl_dwa_local_planner
       // for visualisation, publishers of global and local plan
       ros::Publisher g_plan_pub_, l_plan_pub_, reference_path_pub_,
           reference_path_marker_pub_, reference_status_pub_,
-          terminal_motion_state_pub_;
+          terminal_motion_state_pub_, path_control_mode_pub_;
       ros::Subscriber fixed_route_mode_sub_;
 
       base_local_planner::LocalPlannerUtil planner_util_;
@@ -339,6 +346,7 @@ namespace jgl_dwa_local_planner
       double xy_goal_tolerance;                         //允许到达目标点的距离误差
       int status;                                       //直线控制状态，0代表进行纯追踪，1代表运行过程中(起点)角度偏离过大进行旋转，2代表到达终点后的旋转
       int published_terminal_motion_state_;
+      int published_path_control_mode_;
       double max_vel_x;                                 //最大运行速度
       double brake_distance;                            //刹车距离
       double lfc, forwNum;                              //pure pursuit coefficient

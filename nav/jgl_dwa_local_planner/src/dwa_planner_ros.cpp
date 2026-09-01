@@ -133,6 +133,7 @@ namespace jgl_dwa_local_planner
     xy_goal_tolerance = 0.0;
     status = 0;
     published_terminal_motion_state_ = -1;
+    published_path_control_mode_ = -1;
     is_start_rotating = false;
     state4counter = 0;
     state5counter = 0;
@@ -213,6 +214,20 @@ namespace jgl_dwa_local_planner
     message.data = static_cast<uint8_t>(value);
     terminal_motion_state_pub_.publish(message);
     ROS_INFO("Terminal motion state changed to %d.", value);
+  }
+
+  void DWAPlannerROS::publishPathControlMode(PathControlMode mode, bool force)
+  {
+    const int value = static_cast<int>(mode);
+    if (!force && published_path_control_mode_ == value)
+    {
+      return;
+    }
+    published_path_control_mode_ = value;
+    std_msgs::UInt8 message;
+    message.data = static_cast<uint8_t>(value);
+    path_control_mode_pub_.publish(message);
+    ROS_INFO("Path control mode changed to %d.", value);
   }
 
   void DWAPlannerROS::updateLineGoalRelativeState()
@@ -1146,6 +1161,7 @@ namespace jgl_dwa_local_planner
     {
       return false;
     }
+    publishPathControlMode(REFERENCE_TRACKING);
     reference_path_manager_.advanceCurrentPathIndex(new_index);
     cmd_vel.linear.y = 0.0;
 
@@ -1283,7 +1299,10 @@ namespace jgl_dwa_local_planner
             node_nh.advertise<geometry_msgs::Vector3Stamped>("/bspline_status", 1, false);
         terminal_motion_state_pub_ =
             node_nh.advertise<std_msgs::UInt8>("/anav/terminal_motion_state", 1, true);
+        path_control_mode_pub_ =
+            node_nh.advertise<std_msgs::UInt8>("/anav/path_control_mode", 1, true);
         publishTerminalMotionState(TERMINAL_TRACKING);
+        publishPathControlMode(PATH_CONTROL_UNKNOWN, true);
         fixed_route_mode_sub_ = node_nh.subscribe<std_msgs::Bool>(
             "/anav/fixed_route_mode", 1,
             &DWAPlannerROS::fixedRouteModeCallback, this);
@@ -1347,6 +1366,7 @@ namespace jgl_dwa_local_planner
         ROS_ERROR("This planner has not been initialized, please call initialize() before using this planner");
         return false;
     }
+    publishPathControlMode(PATH_CONTROL_UNKNOWN, true);
     //add by mxb
     if((lastz>0&&orig_global_plan[0].pose.position.z==0)||(lastz==-1&&orig_global_plan[0].pose.position.z<=0))//modify to back up
     {
@@ -1999,12 +2019,14 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::PoseS
       }
       if (reference_hard_failure)
       {
+        publishPathControlMode(PATH_CONTROL_UNKNOWN);
         stopCmd(cmd_vel);
         return false;
       }
       // Only the legacy straight-line fallback keeps the original hard-stop
       // check. Active reference paths were already handled above with staged
       // slowdown, so the two policies cannot mask each other.
+      publishPathControlMode(LEGACY_FALLBACK);
       if (fixedRouteBlocked())
       {
         path_follower_.reset();

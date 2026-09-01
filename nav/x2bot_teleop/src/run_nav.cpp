@@ -142,6 +142,7 @@ public:
           progress_yaw_(6.0 * M_PI / 180.0),
           waypoint_reached_distance_(0.20),
           fixed_route_final_xy_tolerance_(0.03),
+          legacy_waypoint_reached_distance_(0.05),
           validate_pass_through_action_success_distance_(false),
           goal_timeout_(120.0),
           terminal_yaw_wait_timeout_(60.0),
@@ -185,6 +186,11 @@ public:
         private_nh.param("fixed_route_final_xy_tolerance",
                          fixed_route_final_xy_tolerance_,
                          fixed_route_final_xy_tolerance_);
+        private_nh.param("legacy_waypoint_reached_distance",
+                         legacy_waypoint_reached_distance_,
+                         legacy_waypoint_reached_distance_);
+        legacy_waypoint_reached_distance_ =
+            std::max(0.01, legacy_waypoint_reached_distance_);
         private_nh.param("validate_pass_through_action_success_distance",
                          validate_pass_through_action_success_distance_,
                          validate_pass_through_action_success_distance_);
@@ -257,6 +263,12 @@ public:
                 boost::bind(&mynav::terminalMotionStateCallback, this, _1),
                 ros::VoidPtr(), &reference_status_queue_);
         terminal_motion_state_sub_ = nh_.subscribe(terminal_options);
+        ros::SubscribeOptions control_mode_options =
+            ros::SubscribeOptions::create<std_msgs::UInt8>(
+                "/anav/path_control_mode", 1,
+                boost::bind(&mynav::pathControlModeCallback, this, _1),
+                ros::VoidPtr(), &reference_status_queue_);
+        path_control_mode_sub_ = nh_.subscribe(control_mode_options);
         reference_status_spinner_.start();
 
         plan_path_service = nh_.advertiseService("plan_path_and_go", &mynav::planPathCallback, this);
@@ -660,6 +672,7 @@ private:
     ros::AsyncSpinner reference_status_spinner_;
     ros::Subscriber reference_status_sub_;
     ros::Subscriber terminal_motion_state_sub_;
+    ros::Subscriber path_control_mode_sub_;
     ros::NodeHandle safety_phase_nh_;
     ros::CallbackQueue safety_phase_callback_queue_;
     ros::AsyncSpinner safety_phase_spinner_;
@@ -676,6 +689,9 @@ private:
     std::mutex terminal_motion_state_mutex_;
     ros::Time terminal_motion_state_stamp_;
     uint8_t terminal_motion_state_ = x2bot_teleop::TERMINAL_TRACKING;
+    std::mutex path_control_mode_mutex_;
+    ros::Time path_control_mode_stamp_;
+    uint8_t path_control_mode_ = x2bot_teleop::PATH_CONTROL_UNKNOWN;
     ros::ServiceServer plan_path_service;
     ros::ServiceServer cancel_navigation_service_;
     ros::ServiceServer nav_config_service_;
@@ -703,6 +719,7 @@ private:
     double progress_yaw_;
     double waypoint_reached_distance_;
     double fixed_route_final_xy_tolerance_;
+    double legacy_waypoint_reached_distance_;
     bool validate_pass_through_action_success_distance_;
     double goal_timeout_;
     double terminal_yaw_wait_timeout_;
@@ -2509,6 +2526,38 @@ private:
         return true;
     }
 
+    void pathControlModeCallback(const std_msgs::UInt8::ConstPtr &msg)
+    {
+        if (msg->data > x2bot_teleop::LEGACY_FALLBACK)
+        {
+            ROS_WARN_THROTTLE(1.0, "Ignore invalid path control mode %u.",
+                              static_cast<unsigned int>(msg->data));
+            return;
+        }
+        std::lock_guard<std::mutex> lock(path_control_mode_mutex_);
+        path_control_mode_stamp_ = ros::Time::now();
+        path_control_mode_ = msg->data;
+    }
+
+    void resetPathControlMode()
+    {
+        std::lock_guard<std::mutex> lock(path_control_mode_mutex_);
+        path_control_mode_stamp_ = ros::Time(0);
+        path_control_mode_ = x2bot_teleop::PATH_CONTROL_UNKNOWN;
+    }
+
+    bool currentPathControlMode(const ros::Time &goal_start_time,
+                                uint8_t &mode)
+    {
+        std::lock_guard<std::mutex> lock(path_control_mode_mutex_);
+        if (path_control_mode_stamp_ < goal_start_time)
+        {
+            return false;
+        }
+        mode = path_control_mode_;
+        return true;
+    }
+
     void resetReferenceStatus()
     {
         std::lock_guard<std::mutex> lock(reference_status_mutex_);
@@ -2524,16 +2573,6 @@ private:
         return reference_status_stamp_ >= goal_start_time &&
                reference_status_path_index_ == topology_path_index &&
                reference_status_code_ == status_code;
-    }
-
-    bool referenceTrackingOrPassed(int topology_path_index,
-                                   const ros::Time &goal_start_time)
-    {
-        std::lock_guard<std::mutex> lock(reference_status_mutex_);
-        return reference_status_stamp_ >= goal_start_time &&
-               reference_status_path_index_ == topology_path_index &&
-               (reference_status_code_ == REFERENCE_ACTIVE ||
-                reference_status_code_ == REFERENCE_PASSED);
     }
 
     GoalMonitorResult sendGoalAndMonitor(int target_index, int previous_index,
@@ -2559,6 +2598,7 @@ private:
         active_next_index_ = target_index;
         resetReferenceStatus();
         resetTerminalMotionState();
+        resetPathControlMode();
         publishTopologyMarkers();
         ROS_INFO_STREAM("Sending topology " << (final_goal ? "final" : "pass-through")
                                             << " goal P" << target_index << ": ("
@@ -2607,6 +2647,9 @@ private:
             geometry_msgs::PoseStamped current_pose;
             const bool have_current_pose = getCurrentRobotPose(current_pose);
             uint8_t terminal_motion_state = x2bot_teleop::TERMINAL_TRACKING;
+            uint8_t path_control_mode = x2bot_teleop::PATH_CONTROL_UNKNOWN;
+            const bool have_path_control_mode =
+                currentPathControlMode(goal_start_time, path_control_mode);
             if (final_goal &&
                 currentTerminalMotionState(goal_start_time,
                                            terminal_motion_state))
@@ -2741,7 +2784,22 @@ private:
                 const actionlib::SimpleClientGoalState state = global_ac->getState();
                 if (state == actionlib::SimpleClientGoalState::SUCCEEDED)
                 {
-                    if (!final_goal &&
+                    if (!final_goal && have_path_control_mode &&
+                        path_control_mode == x2bot_teleop::LEGACY_FALLBACK &&
+                        have_current_pose)
+                    {
+                        const double target_distance =
+                            distanceToNode(current_pose, target_index);
+                        if (target_distance > legacy_waypoint_reached_distance_)
+                        {
+                            ROS_WARN("Legacy controller reported P%d reached at %.3f m; require %.3f m and retry the same goal.",
+                                     target_index, target_distance,
+                                     legacy_waypoint_reached_distance_);
+                            global_ac->sendGoal(mb_goal);
+                            continue;
+                        }
+                    }
+                    else if (!final_goal &&
                         validate_pass_through_action_success_distance_ &&
                         have_current_pose)
                     {
@@ -2798,7 +2856,8 @@ private:
                 return GOAL_FAILED;
             }
 
-            if (!final_goal &&
+            if (!final_goal && have_path_control_mode &&
+                path_control_mode == x2bot_teleop::REFERENCE_TRACKING &&
                 referenceStatusMatches(topology_path_index, REFERENCE_PASSED,
                                        goal_start_time))
             {
@@ -2814,32 +2873,33 @@ private:
             if (have_current_pose)
             {
                 const double target_distance = distanceToNode(current_pose, target_index);
-                if (!final_goal && target_distance <= waypoint_reached_distance_)
+                if (!final_goal && have_path_control_mode &&
+                    path_control_mode == x2bot_teleop::REFERENCE_TRACKING &&
+                    target_distance <= waypoint_reached_distance_)
                 {
-                    const bool bspline_tracking =
-                        referenceTrackingOrPassed(topology_path_index, goal_start_time);
                     // A live B-spline reference owns its waypoint-completion
                     // policy.  In particular, its terminal reference waypoint
                     // must run into reference_terminal_xy_tolerance instead of
                     // being preempted by this legacy 0.20 m fallback.
-                    if (bspline_tracking)
-                    {
-                        ROS_DEBUG_THROTTLE(
-                            1.0,
-                            "Ignore legacy XY arrival for B-spline waypoint P%d "
-                            "at %.3f m; wait for REFERENCE_PASSED.",
-                            target_index, target_distance);
-                    }
-                    else
-                    {
-                        ROS_INFO("Pass-through waypoint P%d reached by XY distance %.2f m.",
-                                 target_index, target_distance);
-                        global_ac->cancelGoal();
-                        current_pose_index = target_index;
-                        active_next_index_ = -1;
-                        publishTopologyMarkers();
-                        return GOAL_REACHED;
-                    }
+                    ROS_DEBUG_THROTTLE(
+                        1.0,
+                        "Ignore XY arrival for B-spline waypoint P%d at %.3f m; "
+                        "wait for REFERENCE_PASSED.",
+                        target_index, target_distance);
+                }
+                else if (have_path_control_mode &&
+                         x2bot_teleop::legacyIntermediateWaypointReached(
+                             path_control_mode, final_goal, target_distance,
+                             legacy_waypoint_reached_distance_))
+                {
+                    ROS_INFO("Legacy waypoint P%d reached by XY distance %.3f m (limit %.3f m).",
+                             target_index, target_distance,
+                             legacy_waypoint_reached_distance_);
+                    global_ac->cancelGoal();
+                    current_pose_index = target_index;
+                    active_next_index_ = -1;
+                    publishTopologyMarkers();
+                    return GOAL_REACHED;
                 }
                 if (final_goal && target_distance <= waypoint_reached_distance_)
                 {
