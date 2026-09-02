@@ -794,7 +794,10 @@ private:
     double local_replan_cost_weight_;
     collision_monitor::CollisionChecker local_replan_collision_checker_;
     collision_monitor::GridPolicy local_replan_grid_policy_;
+    mutable std::mutex local_replan_footprint_mutex_;
     bool local_replan_footprint_ready_ = false;
+    int local_replan_footprint_source_priority_ = 0;
+    ros::WallTime local_replan_footprint_retry_at_;
     double local_replan_max_corner_step_ = 0.025;
 
     bool notifyMotionFinished(uint8_t reason)
@@ -1833,83 +1836,150 @@ private:
         return true;
     }
 
-    void configureLocalReplanFootprint()
+    bool installLocalReplanFootprint(
+        const std::vector<geometry_msgs::Point> &footprint,
+        const std::string &footprint_source, int source_priority)
     {
-        XmlRpc::XmlRpcValue footprint_value;
-        std::string footprint_source = "/collision_monitor/footprint";
-        bool have_footprint = ros::param::get(footprint_source, footprint_value);
-        if (!have_footprint)
-        {
-            footprint_source = "/mxb_move_base/local_costmap/footprint";
-            have_footprint = ros::param::get(footprint_source, footprint_value);
-        }
-
-        std::vector<geometry_msgs::Point> footprint;
-        std::string error;
-        if (have_footprint)
-        {
-            if (!parseFootprint(footprint_value, footprint, error))
-            {
-                ROS_ERROR("Local topology replanning disabled: invalid %s: %s.",
-                          footprint_source.c_str(), error.c_str());
-                return;
-            }
-        }
-        else
-        {
-            // Safe deployment fallback matching robot_footprint.yaml. Normal
-            // launches use the collision monitor parameter above, so there is
-            // only one runtime source of truth.
-            const double coordinates[4][2] = {
-                {0.36, 0.25}, {0.36, -0.25},
-                {-0.36, -0.25}, {-0.36, 0.25}};
-            for (const auto &coordinate : coordinates)
-            {
-                geometry_msgs::Point point;
-                point.x = coordinate[0];
-                point.y = coordinate[1];
-                footprint.push_back(point);
-            }
-            footprint_source = "built-in robot_footprint.yaml fallback";
-            ROS_WARN("Neither collision monitor nor local costmap footprint parameter is available; "
-                     "using the deployed 0.72 x 0.50 m footprint fallback.");
-        }
-
         double footprint_padding = 0.10;
         ros::param::param("/collision_monitor/navigation_footprint_padding",
                           footprint_padding, footprint_padding);
         footprint_padding = std::max(0.0, footprint_padding);
+        collision_monitor::GridPolicy grid_policy;
         ros::param::param("/collision_monitor/local_occupied_threshold",
-                          local_replan_grid_policy_.occupied_threshold,
+                          grid_policy.occupied_threshold,
                           local_replan_block_threshold_);
         ros::param::param("/collision_monitor/local_unknown_is_obstacle",
-                          local_replan_grid_policy_.unknown_is_obstacle, false);
+                          grid_policy.unknown_is_obstacle, false);
         ros::param::param("/collision_monitor/local_outside_is_obstacle",
-                          local_replan_grid_policy_.outside_is_obstacle, false);
+                          grid_policy.outside_is_obstacle, false);
+        double max_corner_step = 0.025;
         ros::param::param("/collision_monitor/max_corner_step",
-                          local_replan_max_corner_step_,
-                          local_replan_max_corner_step_);
-        local_replan_grid_policy_.occupied_threshold = std::max(
-            0, std::min(100, local_replan_grid_policy_.occupied_threshold));
-        local_replan_max_corner_step_ =
-            std::max(0.005, local_replan_max_corner_step_);
+                          max_corner_step, max_corner_step);
+        grid_policy.occupied_threshold = std::max(
+            0, std::min(100, grid_policy.occupied_threshold));
+        max_corner_step = std::max(0.005, max_corner_step);
 
-        if (!local_replan_collision_checker_.setFootprint(
-                footprint, footprint_padding, &error))
+        collision_monitor::CollisionChecker checker;
+        std::string error;
+        if (!checker.setFootprint(footprint, footprint_padding, &error))
         {
-            ROS_ERROR("Local topology replanning disabled: footprint setup failed: %s.",
-                      error.c_str());
-            return;
+            ROS_ERROR("Cannot install local topology replanning footprint from %s: %s.",
+                      footprint_source.c_str(), error.c_str());
+            return false;
         }
-        local_replan_footprint_ready_ = true;
+        {
+            std::lock_guard<std::mutex> lock(local_replan_footprint_mutex_);
+            local_replan_collision_checker_ = checker;
+            local_replan_grid_policy_ = grid_policy;
+            local_replan_max_corner_step_ = max_corner_step;
+            local_replan_footprint_ready_ = true;
+            local_replan_footprint_source_priority_ = source_priority;
+        }
         ROS_INFO("Local topology replanning uses %s with %.3f m navigation padding "
                  "and collision threshold %d.",
                  footprint_source.c_str(), footprint_padding,
-                 local_replan_grid_policy_.occupied_threshold);
+                 grid_policy.occupied_threshold);
+        return true;
+    }
+
+    bool tryLocalReplanFootprintParameter(
+        const std::string &footprint_source, int source_priority,
+        bool warn_invalid)
+    {
+        XmlRpc::XmlRpcValue footprint_value;
+        if (!ros::param::get(footprint_source, footprint_value))
+        {
+            return false;
+        }
+
+        std::vector<geometry_msgs::Point> footprint;
+        std::string error;
+        if (!parseFootprint(footprint_value, footprint, error))
+        {
+            if (warn_invalid)
+            {
+                ROS_WARN("Invalid %s for local topology replanning: %s; trying a safe fallback.",
+                         footprint_source.c_str(), error.c_str());
+            }
+            else
+            {
+                ROS_WARN_THROTTLE(
+                    10.0,
+                    "Invalid %s for local topology replanning: %s; keep the current footprint.",
+                    footprint_source.c_str(), error.c_str());
+            }
+            return false;
+        }
+        return installLocalReplanFootprint(
+            footprint, footprint_source, source_priority);
+    }
+
+    void configureLocalReplanFootprint()
+    {
+        if (tryLocalReplanFootprintParameter(
+                "/collision_monitor/footprint", 2, true) ||
+            tryLocalReplanFootprintParameter(
+                "/mxb_move_base/local_costmap/footprint", 1, true))
+        {
+            return;
+        }
+
+        // AutoNAV is also used by itself in tests. Always keep local rerouting
+        // available when the other nodes have not loaded their parameters yet.
+        std::vector<geometry_msgs::Point> footprint;
+        const double coordinates[4][2] = {
+            {0.36, 0.25}, {0.36, -0.25},
+            {-0.36, -0.25}, {-0.36, 0.25}};
+        for (const auto &coordinate : coordinates)
+        {
+            geometry_msgs::Point point;
+            point.x = coordinate[0];
+            point.y = coordinate[1];
+            footprint.push_back(point);
+        }
+        ROS_WARN("No valid collision monitor or local costmap footprint is available; "
+                 "using the deployed 0.72 x 0.50 m footprint fallback.");
+        installLocalReplanFootprint(
+            footprint, "built-in robot_footprint.yaml fallback", 0);
+    }
+
+    void refreshLocalReplanFootprint()
+    {
+        const ros::WallTime now = ros::WallTime::now();
+        int source_priority = 0;
+        {
+            std::lock_guard<std::mutex> lock(local_replan_footprint_mutex_);
+            source_priority = local_replan_footprint_source_priority_;
+            if (source_priority >= 2 ||
+                (!local_replan_footprint_retry_at_.isZero() &&
+                 now < local_replan_footprint_retry_at_))
+            {
+                return;
+            }
+            local_replan_footprint_retry_at_ = now + ros::WallDuration(1.0);
+        }
+
+        if (tryLocalReplanFootprintParameter(
+                "/collision_monitor/footprint", 2, false))
+        {
+            return;
+        }
+        if (source_priority == 0)
+        {
+            tryLocalReplanFootprintParameter(
+                "/mxb_move_base/local_costmap/footprint", 1, false);
+        }
+    }
+
+    bool localReplanFootprintReady() const
+    {
+        std::lock_guard<std::mutex> lock(local_replan_footprint_mutex_);
+        return local_replan_footprint_ready_;
     }
 
     void localMapCallback(const nav_msgs::OccupancyGrid::ConstPtr &message)
     {
+        refreshLocalReplanFootprint();
         std::lock_guard<std::mutex> lock(local_map_mutex_);
         local_replan_map_ = *message;
         local_replan_map_received_at_ = ros::WallTime::now();
@@ -1980,6 +2050,8 @@ private:
                                       double x1, double y1) const
     {
         LocalSegmentCost result;
+        std::lock_guard<std::mutex> footprint_lock(
+            local_replan_footprint_mutex_);
         if (!local_replan_footprint_ready_)
         {
             result.blocked = true;
@@ -2756,7 +2828,7 @@ private:
             reason = "invalid target topology node";
             return false;
         }
-        if (!local_replan_footprint_ready_)
+        if (!localReplanFootprintReady())
         {
             reason = "collision-monitor footprint is unavailable";
             return false;
