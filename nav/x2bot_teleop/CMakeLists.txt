@@ -24,6 +24,7 @@ find_package(catkin REQUIRED COMPONENTS
 
 add_service_files(
   FILES
+  EdgeBlockState.srv
   NavConfig.srv
   SetInt.srv
   SetTagY.srv

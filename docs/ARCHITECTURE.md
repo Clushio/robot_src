@@ -168,6 +168,7 @@ MM3V 串口 ─> mm3v_serial_reader.py ─> /tag_position
 | `/anav/cancel_navigation` | `std_srvs/Trigger` | 取消当前拓扑任务 |
 | `/anav/reload_topology` | `std_srvs/Trigger` | 重新加载拓扑 |
 | `/anav/nav_config` | `x2bot_teleop/NavConfig` | 读取/应用 AutoNAV 参数 |
+| `/anav/edge_block_state` | `x2bot_teleop/EdgeBlockState` | 查询边封锁状态或清除指定边运行时记录 |
 | `/anav/task_status` | `std_msgs/String` | GUI 任务状态 |
 | `/set_target_y` | `x2bot_teleop/SetTagY` | Tag 精调目标 |
 | `/cmd_vel_arbiter/finish_motion` | `cmd_vel_arbiter/FinishMotion` | 结束速度来源并请求回正 |

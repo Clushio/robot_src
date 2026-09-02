@@ -49,6 +49,7 @@ x y z roll pitch yaw [label]
 | `/anav/cancel_navigation` | `std_srvs/Trigger` | 取消当前任务 |
 | `/anav/reload_topology` | `std_srvs/Trigger` | 重新加载并验证拓扑 |
 | `/anav/nav_config` | `x2bot_teleop/NavConfig` | 读取或应用运行参数 |
+| `/anav/edge_block_state` | `x2bot_teleop/EdgeBlockState` | 查询边封锁状态或清除指定边的运行时记录 |
 | `/anav/task_status` | `std_msgs/String` | GUI 使用的任务状态 |
 | `/anav/fixed_route_mode` | `std_msgs/Bool` | 通知局部规划器当前是否固定路线 |
 | `/anav/topology_safety_phase` | `std_msgs/UInt8` | 10 Hz 发布拓扑首段、中间段、末段安全阶段 |
@@ -106,10 +107,13 @@ rosservice call /anav/reload_topology
 
 自动绕路模式会在持续无进展后临时封锁问题边，按指数退避设置冷却时间，并尝试其他
 路径。默认封锁序列为 60、120、180 秒，无替代路线时最长等待 240 秒。封锁到期的
-失败边不会立即恢复为普通短边：选路会先最小化历史失败边数量，再比较路径长度；只有
-没有干净替代路线时才会重试失败边。堵塞后的重规划锚定在最后确认到达的拓扑点，避免
+失败边进入观察期：失败次数形成有限选路代价，并按首次冷却时长逐级衰减；成功通过后
+立即清零。堵塞后的重规划锚定在最后确认到达的拓扑点，避免
 最近点判断绕过刚刚封锁的边。固定路线模式不会换边，而是在原路线停车等待。参数通过
 GUI 或 `~/maps/autonav_params.yaml` 管理。
+
+GUI“导航参数”页显示每条拓扑边的运行时封锁次数、状态和剩余冷却时间。任务停止时可
+选择指定边清除运行时封锁记录；该操作不会解除 `topology.yaml` 中配置的永久禁用边。
 
 ## 点位记录
 
