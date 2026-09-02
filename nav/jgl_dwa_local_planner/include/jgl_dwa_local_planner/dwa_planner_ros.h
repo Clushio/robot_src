@@ -258,6 +258,10 @@ namespace jgl_dwa_local_planner
                                             bool &hard_failure);
       bool referencePathObstacleDistance(const nav_msgs::Path &path,
                                          double &obstacle_distance);
+      bool legacyPathObstacleDistance(double &obstacle_distance);
+      bool pathObstacleDistance(
+          const std::vector<geometry_msgs::PoseStamped> &path,
+          unsigned int start_index, double &obstacle_distance);
       bool fixedRouteBlocked();
       void fixedRouteModeCallback(const std_msgs::Bool::ConstPtr &mode);
       bool costmapPointBlocked(costmap_2d::Costmap2D *costmap,
