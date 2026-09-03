@@ -31,7 +31,9 @@ public:
   void initialize(ros::NodeHandle &private_nh, ros::NodeHandle &node_nh);
 
   bool generate(const std::vector<geometry_msgs::PoseStamped> &waypoints,
-                nav_msgs::Path &out_path);
+                nav_msgs::Path &out_path,
+                bool validate_local_snapshot = false,
+                const nav_msgs::OccupancyGrid *local_snapshot = NULL);
   bool checkCollision(const nav_msgs::Path &path);
   bool checkDeviationFromTopo(const nav_msgs::Path &path,
                               const std::vector<geometry_msgs::PoseStamped> &waypoints);
@@ -51,6 +53,13 @@ public:
     boost::mutex::scoped_lock lock(costmap_mutex_);
     global_costmap_ = grid;
     have_global_costmap_ = true;
+  }
+
+  void setLocalCostmapForTesting(const nav_msgs::OccupancyGrid &grid)
+  {
+    boost::mutex::scoped_lock lock(costmap_mutex_);
+    local_costmap_ = grid;
+    have_local_costmap_ = true;
   }
 
   void setReferenceLimitsForTesting(double sample_resolution,
@@ -107,6 +116,9 @@ private:
 	  };
 
 	  void globalCostmapCallback(const nav_msgs::OccupancyGrid::ConstPtr &msg);
+	  void localCostmapCallback(const nav_msgs::OccupancyGrid::ConstPtr &msg);
+	  bool poseCollidesLocal(const geometry_msgs::PoseStamped &pose,
+	                         const nav_msgs::OccupancyGrid &grid) const;
 
 	  bool generateBsplineReference(const std::vector<geometry_msgs::PoseStamped> &waypoints,
 	                                nav_msgs::Path &out_path);
@@ -227,9 +239,14 @@ private:
 	  Point2d pointScale(const Point2d &point, double scale) const;
 
 	  ros::Subscriber global_costmap_sub_;
+	  ros::Subscriber local_costmap_sub_;
 	  mutable boost::mutex costmap_mutex_;
   nav_msgs::OccupancyGrid global_costmap_;
   bool have_global_costmap_;
+  nav_msgs::OccupancyGrid local_costmap_;
+  nav_msgs::OccupancyGrid generation_local_costmap_;
+  bool have_local_costmap_;
+  bool validate_local_snapshot_;
 
   double sample_resolution_;
 	  double safe_distance_;

@@ -38,6 +38,8 @@ int TrajectoryGenerator::DistanceField::index(int mx, int my) const
 
 TrajectoryGenerator::TrajectoryGenerator()
     : have_global_costmap_(false),
+      have_local_costmap_(false),
+      validate_local_snapshot_(false),
       sample_resolution_(0.10),
       safe_distance_(0.25),
       max_deviation_from_topo_(0.50),
@@ -86,6 +88,16 @@ void TrajectoryGenerator::initialize(ros::NodeHandle &private_nh, ros::NodeHandl
 
   global_costmap_sub_ = node_nh.subscribe("/mxb_move_base/global_costmap/costmap", 1,
                                           &TrajectoryGenerator::globalCostmapCallback, this);
+  local_costmap_sub_ = node_nh.subscribe("/mxb_move_base/local_costmap/costmap", 1,
+                                         &TrajectoryGenerator::localCostmapCallback, this);
+}
+
+void TrajectoryGenerator::localCostmapCallback(
+    const nav_msgs::OccupancyGrid::ConstPtr &msg)
+{
+  boost::mutex::scoped_lock lock(costmap_mutex_);
+  local_costmap_ = *msg;
+  have_local_costmap_ = true;
 }
 
 void TrajectoryGenerator::globalCostmapCallback(const nav_msgs::OccupancyGrid::ConstPtr &msg)
@@ -96,8 +108,31 @@ void TrajectoryGenerator::globalCostmapCallback(const nav_msgs::OccupancyGrid::C
 }
 
 bool TrajectoryGenerator::generate(const std::vector<geometry_msgs::PoseStamped> &waypoints,
-                                   nav_msgs::Path &out_path)
+                                   nav_msgs::Path &out_path,
+                                   bool validate_local_snapshot,
+                                   const nav_msgs::OccupancyGrid *local_snapshot)
 {
+  validate_local_snapshot_ = validate_local_snapshot;
+  if (validate_local_snapshot_)
+  {
+    boost::mutex::scoped_lock lock(costmap_mutex_);
+    if (local_snapshot != NULL)
+    {
+      generation_local_costmap_ = *local_snapshot;
+    }
+    else if (!have_local_costmap_)
+    {
+      ROS_WARN("JGL frozen reference: cannot freeze a missing local costmap.");
+      out_path.poses.clear();
+      last_path_mode_ = PATH_MODE_INVALID;
+      last_fallback_segments_.clear();
+      return false;
+    }
+    else
+    {
+      generation_local_costmap_ = local_costmap_;
+    }
+  }
   out_path.poses.clear();
   const std::vector<geometry_msgs::PoseStamped> curve_waypoints =
       referenceCurveWaypoints(waypoints);
@@ -1820,6 +1855,8 @@ void TrajectoryGenerator::applyPathOrientations(
 bool TrajectoryGenerator::checkCollision(const nav_msgs::Path &path)
 {
   nav_msgs::OccupancyGrid grid;
+  nav_msgs::OccupancyGrid local_grid;
+  bool check_local = false;
   {
     boost::mutex::scoped_lock lock(costmap_mutex_);
     if (!have_global_costmap_)
@@ -1828,6 +1865,16 @@ bool TrajectoryGenerator::checkCollision(const nav_msgs::Path &path)
       return false;
     }
     grid = global_costmap_;
+    check_local = validate_local_snapshot_;
+    if (check_local)
+    {
+      if (generation_local_costmap_.data.empty())
+      {
+        ROS_WARN("JGL frozen reference: local costmap snapshot is unavailable.");
+        return false;
+      }
+      local_grid = generation_local_costmap_;
+    }
   }
 
   for (unsigned int i = 0; i < path.poses.size(); ++i)
@@ -1842,8 +1889,57 @@ bool TrajectoryGenerator::checkCollision(const nav_msgs::Path &path)
                safe_distance_);
       return false;
     }
+    if (check_local && poseCollidesLocal(path.poses[i], local_grid))
+    {
+      ROS_WARN("JGL frozen reference: local obstacle collision at sample %u (x=%.3f y=%.3f).",
+               i, path.poses[i].pose.position.x,
+               path.poses[i].pose.position.y);
+      return false;
+    }
   }
   return true;
+}
+
+bool TrajectoryGenerator::poseCollidesLocal(
+    const geometry_msgs::PoseStamped &pose,
+    const nav_msgs::OccupancyGrid &grid) const
+{
+  int mx = 0;
+  int my = 0;
+  // The local costmap is rolling. Samples outside its frozen window are
+  // checked by the global/static map and later by runtime Collision Monitor.
+  if (!worldToMap(grid, pose.pose.position.x, pose.pose.position.y, mx, my))
+  {
+    return false;
+  }
+  const double resolution = std::max(1e-6,
+      static_cast<double>(grid.info.resolution));
+  const int radius_cells = static_cast<int>(std::ceil(
+      safe_distance_ / resolution));
+  for (int dx = -radius_cells; dx <= radius_cells; ++dx)
+  {
+    for (int dy = -radius_cells; dy <= radius_cells; ++dy)
+    {
+      if (std::hypot(dx * resolution, dy * resolution) >
+          safe_distance_ + 0.5 * resolution)
+      {
+        continue;
+      }
+      const int x = mx + dx;
+      const int y = my + dy;
+      if (x < 0 || y < 0 || x >= static_cast<int>(grid.info.width) ||
+          y >= static_cast<int>(grid.info.height))
+      {
+        continue;
+      }
+      const int value = grid.data[y * grid.info.width + x];
+      if (value >= occupied_threshold_)
+      {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 bool TrajectoryGenerator::poseCollides(const geometry_msgs::PoseStamped &pose,

@@ -30,8 +30,14 @@ add_service_files(
   SetTagY.srv
 )
 
+add_message_files(
+  FILES
+  FrozenTopologyPlan.msg
+)
+
 generate_messages(
   DEPENDENCIES
+  nav_msgs
   std_msgs
   geometry_msgs
 )
@@ -174,9 +180,19 @@ add_executable(saveLocation src/save_Location.cpp)
 target_link_libraries(saveLocation ${catkin_LIBRARIES})
 
 
+add_library(hybrid_astar src/hybrid_astar.cpp)
+target_link_libraries(hybrid_astar ${catkin_LIBRARIES})
+
 add_executable(runnav src/run_nav.cpp)
-target_link_libraries(runnav ${catkin_LIBRARIES})
+target_link_libraries(runnav hybrid_astar ${catkin_LIBRARIES})
 add_dependencies(runnav ${PROJECT_NAME}_gencpp ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(hybrid_astar_test test/hybrid_astar_test.cpp)
+  if(TARGET hybrid_astar_test)
+    target_link_libraries(hybrid_astar_test hybrid_astar ${catkin_LIBRARIES})
+  endif()
+endif()
 
 add_executable(TagCtl src/TagCtl_srv.cpp)
 add_dependencies(TagCtl ${PROJECT_NAME}_gencpp ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})

@@ -19,6 +19,7 @@ find_package(catkin REQUIRED
             tf2_ros
             tf
             visualization_msgs
+            x2bot_teleop
         )
 
 find_package(Eigen3 REQUIRED)
@@ -50,6 +51,7 @@ catkin_package(
         tf2_ros
         tf
         visualization_msgs
+        x2bot_teleop
 )
 
 add_library(jgl_dwa_local_planner 

@@ -76,6 +76,7 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <visualization_msgs/Marker.h>
 #include <std_msgs/Bool.h>
+#include <std_msgs/UInt64.h>
 #include <std_msgs/UInt8.h>
 
 namespace jgl_dwa_local_planner
@@ -246,7 +247,8 @@ namespace jgl_dwa_local_planner
           int topology_version);
       void referencePathGenerationThread(
           std::vector<geometry_msgs::PoseStamped> waypoints,
-          int topology_version);
+          int topology_version, bool frozen_mode,
+          nav_msgs::OccupancyGrid frozen_local_map);
       bool consumeReferencePathJob();
       bool referencePathJobRunning() const;
       bool referencePathJobFailedForCurrentTopology() const;
@@ -288,6 +290,7 @@ namespace jgl_dwa_local_planner
       ros::Publisher g_plan_pub_, l_plan_pub_, reference_path_pub_,
           reference_path_marker_pub_, reference_status_pub_,
           terminal_motion_state_pub_, path_control_mode_pub_;
+      ros::Publisher frozen_plan_ready_pub_;
       ros::Subscriber fixed_route_mode_sub_;
 
       base_local_planner::LocalPlannerUtil planner_util_;

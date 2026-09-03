@@ -6,6 +6,8 @@
 #include <geometry_msgs/PoseStamped.h>
 #include <nav_msgs/Path.h>
 #include <ros/ros.h>
+#include <std_msgs/UInt64.h>
+#include <x2bot_teleop/FrozenTopologyPlan.h>
 
 #include <vector>
 
@@ -22,6 +24,9 @@ public:
   bool hasWaypoints() const;
   std::vector<geometry_msgs::PoseStamped> waypoints() const;
   int topologyVersion() const;
+  bool frozenMode() const;
+  uint64_t frozenPlanId() const;
+  bool frozenLocalMapSnapshot(nav_msgs::OccupancyGrid &snapshot) const;
 
   bool hasValidPath() const;
   nav_msgs::Path referencePath() const;
@@ -50,6 +55,8 @@ public:
 
 private:
   void topologyCallback(const nav_msgs::Path::ConstPtr &msg);
+  void frozenTopologyCallback(
+      const x2bot_teleop::FrozenTopologyPlan::ConstPtr &msg);
   bool sameTopology(const std::vector<geometry_msgs::PoseStamped> &a,
                     const std::vector<geometry_msgs::PoseStamped> &b) const;
   double poseDistance(const geometry_msgs::PoseStamped &a,
@@ -57,6 +64,8 @@ private:
   double pathDistance(unsigned int from_index, unsigned int to_index) const;
 
   ros::Subscriber topology_sub_;
+  ros::Subscriber frozen_topology_sub_;
+  ros::Publisher frozen_plan_received_pub_;
   mutable boost::mutex mutex_;
 
   std::vector<geometry_msgs::PoseStamped> topo_waypoints_;
@@ -64,6 +73,10 @@ private:
   bool have_reference_path_;
   bool topology_changed_;
   int topology_version_;
+  bool frozen_mode_;
+  uint64_t frozen_plan_id_;
+  std::vector<unsigned int> frozen_goal_waypoint_indices_;
+  nav_msgs::OccupancyGrid frozen_local_map_snapshot_;
   int path_version_;
   unsigned int current_path_index_;
   ros::Time last_regenerate_attempt_;

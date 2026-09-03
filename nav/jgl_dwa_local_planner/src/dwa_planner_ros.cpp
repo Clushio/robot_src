@@ -361,6 +361,15 @@ namespace jgl_dwa_local_planner
 
     waitForReferencePathJob();
 
+    const bool frozen_mode = reference_path_manager_.frozenMode();
+    nav_msgs::OccupancyGrid frozen_local_map;
+    if (frozen_mode &&
+        !reference_path_manager_.frozenLocalMapSnapshot(frozen_local_map))
+    {
+      ROS_ERROR("JGL frozen reference: missing planning-time local map snapshot.");
+      return false;
+    }
+
     {
       boost::mutex::scoped_lock lock(reference_job_mutex_);
       if (reference_job_running_)
@@ -378,7 +387,8 @@ namespace jgl_dwa_local_planner
 
     reference_job_thread_ =
         boost::thread(&DWAPlannerROS::referencePathGenerationThread,
-                      this, waypoints, topology_version);
+                      this, waypoints, topology_version,
+                      frozen_mode, frozen_local_map);
     ROS_INFO("JGL reference path: started async generation for topology version %d with %zu waypoints.",
              topology_version, waypoints.size());
     return true;
@@ -386,10 +396,13 @@ namespace jgl_dwa_local_planner
 
   void DWAPlannerROS::referencePathGenerationThread(
       std::vector<geometry_msgs::PoseStamped> waypoints,
-      int topology_version)
+      int topology_version, bool frozen_mode,
+      nav_msgs::OccupancyGrid frozen_local_map)
   {
     nav_msgs::Path reference_path;
-    const bool success = trajectory_generator_.generate(waypoints, reference_path);
+    const bool success = trajectory_generator_.generate(
+        waypoints, reference_path, frozen_mode,
+        frozen_mode ? &frozen_local_map : NULL);
     const TrajectoryGenerator::PathMode path_mode =
         success ? trajectory_generator_.lastPathMode()
                 : TrajectoryGenerator::PATH_MODE_INVALID;
@@ -477,6 +490,12 @@ namespace jgl_dwa_local_planner
     syncReferencePathIndex(&nearest_distance, &nearest_index);
     reference_path_pub_.publish(reference_path);
     publishReferencePathMarker(reference_path, reference_path_mode_);
+    if (reference_path_manager_.frozenMode())
+    {
+      std_msgs::UInt64 ready;
+      ready.data = reference_path_manager_.frozenPlanId();
+      frozen_plan_ready_pub_.publish(ready);
+    }
     ROS_INFO("JGL reference path: published /reference_path version %d mode=%s samples=%zu init_idx=%u init_dist=%.3f.",
              reference_path_manager_.pathVersion(),
              referencePathModeName(reference_path_mode_),
@@ -617,6 +636,14 @@ namespace jgl_dwa_local_planner
       return false;
     }
 
+    // A frozen Hybrid-A* route has already been accepted as one immutable
+    // reference.  Falling back to the legacy goal-to-point controller here
+    // would cut across the very obstacle which caused the re-entry plan.
+    if (reference_path_manager_.frozenMode())
+    {
+      return true;
+    }
+
     if (reference_path_mode_ == TrajectoryGenerator::PATH_MODE_POLYLINE_FALLBACK)
     {
       return false;
@@ -639,6 +666,10 @@ namespace jgl_dwa_local_planner
 
   bool DWAPlannerROS::referenceGoalExitsToFallback(int goal_index) const
   {
+    if (reference_path_manager_.frozenMode())
+    {
+      return false;
+    }
     if (reference_path_mode_ != TrajectoryGenerator::PATH_MODE_HYBRID ||
         goal_index < 0)
     {
@@ -1127,6 +1158,17 @@ namespace jgl_dwa_local_planner
     if (!referenceEntryHeadingAligned(reference_path,
                                       &reference_entry_heading_error))
     {
+      if (reference_path_manager_.frozenMode())
+      {
+        stopCmd(cmd_vel);
+        publishReferenceStatus(REFERENCE_PATH_DEVIATED);
+        hard_failure = true;
+        ROS_ERROR_THROTTLE(
+            1.0,
+            "JGL frozen reference: entry heading error %.3f rad; stop and reject instead of cutting directly to the topo goal.",
+            reference_entry_heading_error);
+        return false;
+      }
       forceLegacyLineRotate("reference_entry_heading_misaligned");
       ROS_WARN_THROTTLE(1.0,
                         "JGL reference path: entry heading error %.3f rad is too large, use legacy rotate-line before reference tracking.",
@@ -1342,6 +1384,8 @@ namespace jgl_dwa_local_planner
             node_nh.advertise<std_msgs::UInt8>("/anav/terminal_motion_state", 1, true);
         path_control_mode_pub_ =
             node_nh.advertise<std_msgs::UInt8>("/anav/path_control_mode", 1, true);
+        frozen_plan_ready_pub_ =
+            node_nh.advertise<std_msgs::UInt64>("/anav/frozen_plan_ready", 1, true);
         publishTerminalMotionState(TERMINAL_TRACKING);
         publishPathControlMode(PATH_CONTROL_UNKNOWN, true);
         fixed_route_mode_sub_ = node_nh.subscribe<std_msgs::Bool>(

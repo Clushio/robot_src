@@ -10,6 +10,8 @@ ReferencePathManager::ReferencePathManager()
     : have_reference_path_(false),
       topology_changed_(false),
       topology_version_(0),
+      frozen_mode_(false),
+      frozen_plan_id_(0),
       path_version_(0),
       current_path_index_(0),
       path_regenerate_cooldown_(1.0),
@@ -27,11 +29,23 @@ void ReferencePathManager::initialize(ros::NodeHandle &node_nh,
 
   topology_sub_ = node_nh.subscribe("/topology_plan", 1,
                                     &ReferencePathManager::topologyCallback, this);
+  frozen_topology_sub_ = node_nh.subscribe(
+      "/anav/frozen_topology_plan", 1,
+      &ReferencePathManager::frozenTopologyCallback, this);
+  frozen_plan_received_pub_ = node_nh.advertise<std_msgs::UInt64>(
+      "/anav/frozen_plan_received", 1, true);
 }
 
 void ReferencePathManager::topologyCallback(const nav_msgs::Path::ConstPtr &msg)
 {
   boost::mutex::scoped_lock lock(mutex_);
+  if (frozen_mode_)
+  {
+    ROS_WARN_THROTTLE(2.0,
+                      "JGL frozen reference: ignore ordinary topology update while plan %llu is active.",
+                      static_cast<unsigned long long>(frozen_plan_id_));
+    return;
+  }
   const bool repeated_delivery =
       sameTopology(topo_waypoints_, msg->poses) &&
       !msg->header.stamp.isZero() &&
@@ -41,6 +55,10 @@ void ReferencePathManager::topologyCallback(const nav_msgs::Path::ConstPtr &msg)
     return;
   }
   last_topology_stamp_ = msg->header.stamp;
+  frozen_mode_ = false;
+  frozen_plan_id_ = 0;
+  frozen_goal_waypoint_indices_.clear();
+  frozen_local_map_snapshot_.data.clear();
 
   if (msg->poses.size() < 2)
   {
@@ -63,6 +81,77 @@ void ReferencePathManager::topologyCallback(const nav_msgs::Path::ConstPtr &msg)
            topology_version_, topo_waypoints_.size());
 }
 
+void ReferencePathManager::frozenTopologyCallback(
+    const x2bot_teleop::FrozenTopologyPlan::ConstPtr &msg)
+{
+  boost::mutex::scoped_lock lock(mutex_);
+  if (msg->plan_id == 0 || msg->waypoints.poses.size() < 4)
+  {
+    if (msg->plan_id == 0 || msg->plan_id == frozen_plan_id_)
+    {
+      topo_waypoints_.clear();
+      reference_path_.poses.clear();
+      have_reference_path_ = false;
+      topology_changed_ = true;
+      current_path_index_ = 0;
+      frozen_mode_ = false;
+      frozen_plan_id_ = 0;
+      frozen_goal_waypoint_indices_.clear();
+      frozen_local_map_snapshot_.data.clear();
+      topology_version_++;
+      std_msgs::UInt64 cleared;
+      cleared.data = 0;
+      frozen_plan_received_pub_.publish(cleared);
+    }
+    return;
+  }
+  if (frozen_mode_ && msg->plan_id < frozen_plan_id_)
+  {
+    ROS_WARN("JGL frozen reference: ignore stale plan id %llu (current %llu).",
+             static_cast<unsigned long long>(msg->plan_id),
+             static_cast<unsigned long long>(frozen_plan_id_));
+    return;
+  }
+  if (msg->topo_node_ids.size() != msg->topo_waypoint_indices.size() ||
+      msg->topo_waypoint_indices.empty() ||
+      msg->local_map_snapshot.info.width == 0 ||
+      msg->local_map_snapshot.info.height == 0 ||
+      msg->local_map_snapshot.data.size() !=
+          static_cast<std::size_t>(msg->local_map_snapshot.info.width) *
+          msg->local_map_snapshot.info.height)
+  {
+    ROS_ERROR("JGL frozen reference: plan %llu has an invalid topo waypoint mapping.",
+              static_cast<unsigned long long>(msg->plan_id));
+    return;
+  }
+  for (unsigned int index : msg->topo_waypoint_indices)
+  {
+    if (index >= msg->waypoints.poses.size())
+    {
+      ROS_ERROR("JGL frozen reference: plan %llu contains out-of-range waypoint index %u.",
+                static_cast<unsigned long long>(msg->plan_id), index);
+      return;
+    }
+  }
+  topo_waypoints_ = msg->waypoints.poses;
+  frozen_goal_waypoint_indices_ = msg->topo_waypoint_indices;
+  frozen_local_map_snapshot_ = msg->local_map_snapshot;
+  last_topology_stamp_ = msg->waypoints.header.stamp;
+  reference_path_.poses.clear();
+  have_reference_path_ = false;
+  topology_changed_ = true;
+  current_path_index_ = 0;
+  frozen_mode_ = true;
+  frozen_plan_id_ = msg->plan_id;
+  topology_version_++;
+  std_msgs::UInt64 received;
+  received.data = frozen_plan_id_;
+  frozen_plan_received_pub_.publish(received);
+  ROS_INFO("JGL frozen reference: received plan %llu, version %d, %zu guide waypoints.",
+           static_cast<unsigned long long>(frozen_plan_id_),
+           topology_version_, topo_waypoints_.size());
+}
+
 bool ReferencePathManager::hasWaypoints() const
 {
   boost::mutex::scoped_lock lock(mutex_);
@@ -79,6 +168,30 @@ int ReferencePathManager::topologyVersion() const
 {
   boost::mutex::scoped_lock lock(mutex_);
   return topology_version_;
+}
+
+bool ReferencePathManager::frozenMode() const
+{
+  boost::mutex::scoped_lock lock(mutex_);
+  return frozen_mode_;
+}
+
+uint64_t ReferencePathManager::frozenPlanId() const
+{
+  boost::mutex::scoped_lock lock(mutex_);
+  return frozen_plan_id_;
+}
+
+bool ReferencePathManager::frozenLocalMapSnapshot(
+    nav_msgs::OccupancyGrid &snapshot) const
+{
+  boost::mutex::scoped_lock lock(mutex_);
+  if (!frozen_mode_ || frozen_local_map_snapshot_.data.empty())
+  {
+    return false;
+  }
+  snapshot = frozen_local_map_snapshot_;
+  return true;
 }
 
 bool ReferencePathManager::hasValidPath() const
@@ -182,13 +295,28 @@ int ReferencePathManager::goalIndex(const geometry_msgs::PoseStamped &goal) cons
 
   int best_index = -1;
   double best_distance = 1e9;
-  for (unsigned int i = 0; i < topo_waypoints_.size(); ++i)
+  if (frozen_mode_)
   {
-    const double distance = poseDistance(goal, topo_waypoints_[i]);
-    if (distance < best_distance)
+    for (unsigned int i : frozen_goal_waypoint_indices_)
     {
-      best_distance = distance;
-      best_index = static_cast<int>(i);
+      const double distance = poseDistance(goal, topo_waypoints_[i]);
+      if (distance < best_distance)
+      {
+        best_distance = distance;
+        best_index = static_cast<int>(i);
+      }
+    }
+  }
+  else
+  {
+    for (unsigned int i = 0; i < topo_waypoints_.size(); ++i)
+    {
+      const double distance = poseDistance(goal, topo_waypoints_[i]);
+      if (distance < best_distance)
+      {
+        best_distance = distance;
+        best_index = static_cast<int>(i);
+      }
     }
   }
   return best_distance <= waypoint_match_tolerance_ ? best_index : -1;
