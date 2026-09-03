@@ -22,6 +22,7 @@
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
 #include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/u_int8.hpp>
 #include <tf2_ros/buffer.hpp>
 #include <visualization_msgs/msg/marker.hpp>
 
@@ -109,11 +110,19 @@ private:
     REFERENCE_PASSED = 2,
     REFERENCE_PATH_DEVIATED = 3
   };
+  enum TerminalMotionState
+  {
+    TERMINAL_TRACKING = 0,
+    TERMINAL_POSITION_CAPTURED = 1,
+    TERMINAL_ROTATING = 2,
+    TERMINAL_COMPLETE = 3
+  };
 
   void publishLocalPlan(std::vector<geometry_msgs::msg::PoseStamped> &path);
   void publishGlobalPlan(std::vector<geometry_msgs::msg::PoseStamped> &path);
   void stopCmd(geometry_msgs::msg::Twist &cmd_vel) const;
   void publishReferenceStatus(ReferenceStatus status);
+  void publishTerminalMotionState(TerminalMotionState state);
   bool shouldUseReferencePath();
   bool prepareReferencePath(bool &generation_pending, bool &generation_failed);
   void maybeStartReferencePathJob();
@@ -174,6 +183,8 @@ private:
       reference_path_marker_pub_;
   rclcpp_lifecycle::LifecyclePublisher<geometry_msgs::msg::Vector3Stamped>::SharedPtr
       reference_status_pub_;
+  rclcpp_lifecycle::LifecyclePublisher<std_msgs::msg::UInt8>::SharedPtr
+      terminal_motion_state_pub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr fixed_route_mode_sub_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr
       parameter_callback_handle_;
@@ -224,6 +235,7 @@ private:
   double yaw_goal_tolerance{0.1};
   double xy_goal_tolerance{0.1};
   int status{0};
+  int published_terminal_motion_state_{-1};
   double max_vel_x{0.4};
   double brake_distance{1.0};
   double lfc{0.3};

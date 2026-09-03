@@ -271,6 +271,7 @@ kind=STATE
 | `ANAV-NAV-003` | ERROR | GUI | MoveBase 启动失败、启动后退出或意外退出 | MoveBase 重新正常运行 |
 | `ANAV-NAV-004` | ERROR | GUI | 启动 MoveBase 后 30 秒仍未发现 `/mxb_move_base` | 地图、TF、参数和启动日志 |
 | `ANAV-NAV-012` | ERROR | AutoNAV | `/plan_path_and_go` 任务执行失败 | 下一任务进入 running/arrived 时恢复 |
+| `ANAV-NAV-016` | ERROR | AutoNAV | 已捕获终点位置，但最终原地旋转持续无有效角度进展 | 清理终点周围障碍；任务锁定当前终点并自动等待恢复 |
 
 ### 6.3 标签靠站
 

@@ -39,6 +39,7 @@ ament_target_dependencies(
   saveLocation rclcpp sensor_msgs tf2 tf2_geometry_msgs tf2_ros)
 
 add_executable(runnav src/run_nav.cpp)
+target_include_directories(runnav PRIVATE include)
 ament_target_dependencies(
   runnav
   ament_index_cpp cmd_vel_arbiter diagnostic_msgs geometry_msgs nav2_msgs nav_msgs rclcpp
@@ -50,6 +51,14 @@ add_executable(TagCtl src/TagCtl_srv.cpp)
 ament_target_dependencies(
   TagCtl cmd_vel_arbiter diagnostic_msgs geometry_msgs rclcpp tf2 tf2_geometry_msgs)
 target_link_libraries(TagCtl "${cpp_typesupport_target}")
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(terminal_goal_policy_test test/terminal_goal_policy_test.cpp)
+  if(TARGET terminal_goal_policy_test)
+    target_include_directories(terminal_goal_policy_test PRIVATE include)
+  endif()
+endif()
 
 install(TARGETS x2bot_joy_PXN saveLocation runnav TagCtl
   DESTINATION lib/${PROJECT_NAME})

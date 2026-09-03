@@ -110,6 +110,21 @@ namespace jgl_dwa_local_planner
     reference_status_pub_->publish(message);
   }
 
+  void DWAPlannerROS::publishTerminalMotionState(TerminalMotionState state)
+  {
+    const int value = static_cast<int>(state);
+    if (published_terminal_motion_state_ == value || !terminal_motion_state_pub_ ||
+        !terminal_motion_state_pub_->is_activated())
+    {
+      return;
+    }
+    published_terminal_motion_state_ = value;
+    std_msgs::msg::UInt8 message;
+    message.data = static_cast<uint8_t>(value);
+    terminal_motion_state_pub_->publish(message);
+    RCLCPP_INFO(logger_, "Terminal motion state changed to %d.", value);
+  }
+
   void DWAPlannerROS::updateLineGoalRelativeState()
   {
     if (linePath.empty())
@@ -1298,6 +1313,9 @@ namespace jgl_dwa_local_planner
     reference_status_pub_ =
         node_->create_publisher<geometry_msgs::msg::Vector3Stamped>(
             "/bspline_status", rclcpp::QoS(1));
+    terminal_motion_state_pub_ =
+        node_->create_publisher<std_msgs::msg::UInt8>(
+            "/anav/terminal_motion_state", latched_qos);
     fixed_route_mode_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
         "/anav/fixed_route_mode", rclcpp::QoS(1),
         std::bind(&DWAPlannerROS::fixedRouteModeCallback, this,
@@ -1344,6 +1362,9 @@ namespace jgl_dwa_local_planner
     reference_path_pub_->on_activate();
     reference_path_marker_pub_->on_activate();
     reference_status_pub_->on_activate();
+    terminal_motion_state_pub_->on_activate();
+    published_terminal_motion_state_ = -1;
+    publishTerminalMotionState(TERMINAL_TRACKING);
     dwb_planner_->activate();
   }
 
@@ -1355,6 +1376,7 @@ namespace jgl_dwa_local_planner
     reference_path_pub_->on_deactivate();
     reference_path_marker_pub_->on_deactivate();
     reference_status_pub_->on_deactivate();
+    terminal_motion_state_pub_->on_deactivate();
   }
 
   void DWAPlannerROS::cleanup()
@@ -1372,6 +1394,7 @@ namespace jgl_dwa_local_planner
     reference_path_pub_.reset();
     reference_path_marker_pub_.reset();
     reference_status_pub_.reset();
+    terminal_motion_state_pub_.reset();
     sp.reset();
     ps.reset();
     initialized_ = false;
@@ -1402,6 +1425,7 @@ namespace jgl_dwa_local_planner
       //每次传进来的goal和上次传进来的goal不一样或者第一次传进来goal时，将控制状态设置为1
       if(linePath.size()==0){
         status=1;
+        publishTerminalMotionState(TERMINAL_TRACKING);
         terminal_yaw_controller_.reset();
         reference_goal_reached_ = false;
         legacy_line_forced_goal_index_ = -1;
@@ -1410,6 +1434,7 @@ namespace jgl_dwa_local_planner
         if(!comparePose(linePath.back(),orig_global_plan.back()))
         {
           status=1;
+          publishTerminalMotionState(TERMINAL_TRACKING);
           terminal_yaw_controller_.reset();
           reference_goal_reached_ = false;
           legacy_line_forced_goal_index_ = -1;
@@ -1779,6 +1804,7 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::msg::
     terminal_yaw_controller_.reset();
     RCLCPP_INFO(logger_, "Terminal position captured at %.3f m; switch to final-yaw preparation.",
              xy_error);
+    publishTerminalMotionState(TERMINAL_POSITION_CAPTURED);
   }else if(status==1 && xy_error<=terminal_no_realign_distance){
     status = 0;
     RCLCPP_WARN(logger_, "Suppress path realignment near goal at %.3f m.", xy_error);
@@ -1797,6 +1823,7 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::msg::
                                         &terminal_yaw_command))
     {
       status=3;
+      publishTerminalMotionState(TERMINAL_COMPLETE);
       RCLCPP_INFO(logger_, "Terminal yaw stable; goal completed.");
     }
   }
@@ -1805,6 +1832,7 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::msg::
   }
   else if((status==5) &&(state5counter<=0) ){
     status = 2;
+    publishTerminalMotionState(TERMINAL_ROTATING);
   }
 
   RCLCPP_INFO_STREAM(logger_, "---------------------CONTROL STATUS:"<<status);

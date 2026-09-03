@@ -28,6 +28,7 @@
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <x2bot_teleop/srv/nav_config.hpp>
 #include <x2bot_teleop/srv/set_int.hpp>
+#include <x2bot_teleop/terminal_goal_policy.h>
 
 #include <algorithm>
 #include <atomic>
@@ -240,6 +241,7 @@ public:
           fixed_route_final_xy_tolerance_(0.03),
           validate_pass_through_action_success_distance_(false),
           goal_timeout_(120.0),
+          terminal_yaw_wait_timeout_(60.0),
           block_bidirectional_(true),
           static_map_loaded_(false),
           static_map_width_(0),
@@ -282,6 +284,9 @@ public:
             "validate_pass_through_action_success_distance",
             validate_pass_through_action_success_distance_);
         goal_timeout_ = declare_parameter<double>("goal_timeout", goal_timeout_);
+        terminal_yaw_wait_timeout_ = declare_parameter<double>(
+            "terminal_yaw_wait_timeout", terminal_yaw_wait_timeout_);
+        terminal_yaw_wait_timeout_ = std::max(1.0, terminal_yaw_wait_timeout_);
         block_bidirectional_ = declare_parameter<bool>("block_bidirectional", block_bidirectional_);
         static_map_inflation_radius_ =
             declare_parameter<double>("static_map_inflation_radius", static_map_inflation_radius_);
@@ -358,6 +363,10 @@ public:
             "/bspline_status", 1,
             std::bind(&mynav::referenceStatusCallback, this, std::placeholders::_1),
             status_options);
+        terminal_motion_state_sub_ = create_subscription<std_msgs::msg::UInt8>(
+            "/anav/terminal_motion_state", rclcpp::QoS(1).transient_local(),
+            std::bind(&mynav::terminalMotionStateCallback, this, std::placeholders::_1),
+            status_options);
 
         plan_path_service = create_service<x2bot_teleop::srv::SetInt>(
             "plan_path_and_go",
@@ -395,13 +404,14 @@ public:
                            const std::string &message,
                            const std::string &detail,
                            const std::string &action,
-                           bool active)
+                           bool active,
+                           const std::string &name = "/anav/navigation")
     {
         diagnostic_msgs::msg::DiagnosticArray array;
         array.header.stamp = now();
         diagnostic_msgs::msg::DiagnosticStatus status;
         status.level = level;
-        status.name = "/anav/navigation";
+        status.name = name;
         status.hardware_id = "ranger";
         status.message = message;
         addDiagnosticValue(status, "code", code);
@@ -777,6 +787,7 @@ private:
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr task_status_pub_;
     rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diagnostics_pub_;
     rclcpp::Subscription<geometry_msgs::msg::Vector3Stamped>::SharedPtr reference_status_sub_;
+    rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr terminal_motion_state_sub_;
     rclcpp::TimerBase::SharedPtr safety_phase_timer_;
     rclcpp::TimerBase::SharedPtr marker_timer_;
     rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr topology_safety_phase_pub_;
@@ -788,6 +799,9 @@ private:
     rclcpp::Time reference_status_stamp_;
     int reference_status_path_index_ = -1;
     int reference_status_code_ = 0;
+    std::mutex terminal_motion_state_mutex_;
+    rclcpp::Time terminal_motion_state_stamp_;
+    uint8_t terminal_motion_state_ = x2bot_teleop::TERMINAL_TRACKING;
     rclcpp::Service<x2bot_teleop::srv::SetInt>::SharedPtr plan_path_service;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr cancel_navigation_service_;
     rclcpp::Service<x2bot_teleop::srv::NavConfig>::SharedPtr nav_config_service_;
@@ -817,6 +831,7 @@ private:
     double fixed_route_final_xy_tolerance_;
     bool validate_pass_through_action_success_distance_;
     double goal_timeout_;
+    double terminal_yaw_wait_timeout_;
     bool block_bidirectional_;
     std::atomic<bool> navigation_active_{false};
     std::mutex nav_config_mutex_;
@@ -2638,6 +2653,40 @@ private:
         reference_status_code_ = static_cast<int>(std::lround(msg->vector.z));
     }
 
+    void terminalMotionStateCallback(const std_msgs::msg::UInt8::ConstSharedPtr msg)
+    {
+        if (msg->data > x2bot_teleop::TERMINAL_COMPLETE)
+        {
+            RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 1000,
+                "Ignore invalid terminal motion state %u.",
+                static_cast<unsigned int>(msg->data));
+            return;
+        }
+        std::lock_guard<std::mutex> lock(terminal_motion_state_mutex_);
+        terminal_motion_state_stamp_ = now();
+        terminal_motion_state_ = msg->data;
+    }
+
+    void resetTerminalMotionState()
+    {
+        std::lock_guard<std::mutex> lock(terminal_motion_state_mutex_);
+        terminal_motion_state_stamp_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+        terminal_motion_state_ = x2bot_teleop::TERMINAL_TRACKING;
+    }
+
+    bool currentTerminalMotionState(const rclcpp::Time &goal_start_time,
+                                    uint8_t &state)
+    {
+        std::lock_guard<std::mutex> lock(terminal_motion_state_mutex_);
+        if (terminal_motion_state_stamp_ < goal_start_time)
+        {
+            return false;
+        }
+        state = terminal_motion_state_;
+        return true;
+    }
+
     void resetReferenceStatus()
     {
         std::lock_guard<std::mutex> lock(reference_status_mutex_);
@@ -2700,6 +2749,7 @@ private:
 
         active_next_index_ = target_index;
         resetReferenceStatus();
+        resetTerminalMotionState();
         publishTopologyMarkers();
         RCLCPP_INFO_STREAM(get_logger(), "Sending topology " << (final_goal ? "final" : "pass-through")
                                             << " goal P" << target_index << ": ("
@@ -2711,6 +2761,16 @@ private:
         bool have_progress_pose = getCurrentRobotPose(last_progress_pose);
         rclcpp::Time last_progress_time = now();
         const rclcpp::Time start_time = last_progress_time;
+        x2bot_teleop::TerminalGoalPolicy terminal_policy(
+            terminal_yaw_wait_timeout_, progress_yaw_);
+
+        const auto clear_terminal_error = [&](const std::string &detail)
+        {
+            publishDiagnostic(
+                diagnostic_msgs::msg::DiagnosticStatus::OK,
+                "ANAV-NAV-000", "终点旋转等待已恢复", detail, "", false,
+                "/anav/navigation/terminal_yaw");
+        };
 
         while (rclcpp::ok())
         {
@@ -2718,13 +2778,53 @@ private:
             {
                 global_ac->cancelAllGoals();
                 stopRobot();
+                if (terminal_policy.errorActive())
+                {
+                    clear_terminal_error("终点旋转等待已由人工取消。");
+                }
                 return GOAL_CANCELED;
             }
             if (stop_and_quit)
             {
                 global_ac->cancelAllGoals();
                 stopRobot();
+                if (terminal_policy.errorActive())
+                {
+                    clear_terminal_error("导航停止，终点旋转等待状态结束。");
+                }
                 return GOAL_FAILED;
+            }
+
+            geometry_msgs::msg::PoseStamped current_pose;
+            const bool have_current_pose = getCurrentRobotPose(current_pose);
+            uint8_t terminal_motion_state = x2bot_teleop::TERMINAL_TRACKING;
+            if (final_goal &&
+                currentTerminalMotionState(goal_start_time, terminal_motion_state))
+            {
+                const auto terminal_update = terminal_policy.update(
+                    terminal_motion_state, have_current_pose,
+                    have_current_pose ? tf2::getYaw(current_pose.pose.orientation) : 0.0,
+                    now().seconds());
+                if (terminal_update.error_activated)
+                {
+                    std::ostringstream detail;
+                    detail << "终点 P" << target_index << " 已锁定，最终旋转连续 "
+                           << std::fixed << std::setprecision(1)
+                           << terminal_yaw_wait_timeout_
+                           << " 秒没有有效角度进展；保持停车等待，不进行拓扑重规划。";
+                    publishDiagnostic(
+                        diagnostic_msgs::msg::DiagnosticStatus::ERROR,
+                        "ANAV-NAV-016", "终点旋转等待超时", detail.str(),
+                        "检查终点周围障碍物；障碍清除后车辆会继续原地旋转。",
+                        true, "/anav/navigation/terminal_yaw");
+                    RCLCPP_ERROR_STREAM(get_logger(), detail.str());
+                }
+                else if (terminal_update.error_recovered)
+                {
+                    clear_terminal_error("检测到有效角度进展，继续完成当前终点的原地旋转。");
+                    RCLCPP_INFO(get_logger(),
+                        "Terminal yaw at P%d resumed after a prolonged stop.", target_index);
+                }
             }
 
             if (pause_reentry_requested_.load())
@@ -2737,6 +2837,10 @@ private:
                     {
                         global_ac->cancelAllGoals();
                         stopRobot();
+                        if (terminal_policy.errorActive())
+                        {
+                            clear_terminal_error("终点旋转等待已由人工取消。");
+                        }
                         return GOAL_CANCELED;
                     }
                     stopRobot();
@@ -2744,6 +2848,10 @@ private:
                 }
                 if (!rclcpp::ok())
                 {
+                    if (terminal_policy.errorActive())
+                    {
+                        clear_terminal_error("导航节点停止，终点旋转等待状态结束。");
+                    }
                     return GOAL_FAILED;
                 }
 
@@ -2752,6 +2860,16 @@ private:
                                            REFERENCE_PASSED,
                                            goal_start_time);
                 pause_reentry_requested_.store(false);
+                if (terminal_policy.locked())
+                {
+                    active_next_index_ = target_index;
+                    publishTopologyMarkers();
+                    RCLCPP_INFO(get_logger(),
+                        "Resume the locked terminal goal P%d after pause; topology re-entry is disabled.",
+                        target_index);
+                    global_ac->sendGoal(mb_goal);
+                    continue;
+                }
                 active_next_index_ = -1;
                 publishTopologyMarkers();
                 RCLCPP_INFO(get_logger(), "Resume via topology re-entry after pausing at path index %d%s.",
@@ -2760,7 +2878,8 @@ private:
                 return current_goal_passed ? GOAL_PAUSED_AFTER_PASS : GOAL_PAUSED;
             }
 
-            if (referenceStatusMatches(topology_path_index,
+            if (!terminal_policy.locked() &&
+                referenceStatusMatches(topology_path_index,
                                        REFERENCE_PATH_DEVIATED,
                                        goal_start_time))
             {
@@ -2780,6 +2899,10 @@ private:
                 {
                     global_ac->cancelAllGoals();
                     stopRobot();
+                    if (terminal_policy.errorActive())
+                    {
+                        clear_terminal_error("终点旋转等待已由人工取消。");
+                    }
                     return GOAL_CANCELED;
                 }
                 // pause() cancels the action from the independent Joy callback
@@ -2789,7 +2912,8 @@ private:
                 {
                     continue;
                 }
-                if (referenceStatusMatches(topology_path_index,
+                if (!terminal_policy.locked() &&
+                    referenceStatusMatches(topology_path_index,
                                            REFERENCE_PATH_DEVIATED,
                                            goal_start_time))
                 {
@@ -2802,10 +2926,9 @@ private:
                 const MVGoalState state = global_ac->getState();
                 if (state.succeeded())
                 {
-                    geometry_msgs::msg::PoseStamped current_pose;
                     if (!final_goal &&
                         validate_pass_through_action_success_distance_ &&
-                        getCurrentRobotPose(current_pose))
+                        have_current_pose)
                     {
                         const double target_distance = distanceToNode(current_pose, target_index);
                         if (target_distance > waypoint_reached_distance_)
@@ -2816,7 +2939,7 @@ private:
                             continue;
                         }
                     }
-                    else if (!final_goal && getCurrentRobotPose(current_pose))
+                    else if (!final_goal && have_current_pose)
                     {
                         const double target_distance = distanceToNode(current_pose, target_index);
                         RCLCPP_INFO(get_logger(), "Pass-through P%d accepted by move_base action success at %.2f m "
@@ -2827,7 +2950,22 @@ private:
                     current_pose_index = target_index;
                     active_next_index_ = -1;
                     publishTopologyMarkers();
+                    if (terminal_policy.errorActive())
+                    {
+                        clear_terminal_error("最终朝向已经完成，终点旋转等待故障解除。");
+                    }
                     return GOAL_REACHED;
+                }
+                if (terminal_policy.locked())
+                {
+                    RCLCPP_WARN_STREAM(
+                        get_logger(), "Locked terminal goal P" << target_index
+                        << " returned state " << state.toString()
+                        << "; stop and retry the same terminal goal without topology replanning.");
+                    stopRobot();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    global_ac->sendGoal(mb_goal);
+                    continue;
                 }
                 RCLCPP_WARN_STREAM(get_logger(), "Goal P" << target_index << " failed with state: " << state.toString());
                 while (rclcpp::ok() &&
@@ -2857,8 +2995,7 @@ private:
                 return GOAL_REACHED;
             }
 
-            geometry_msgs::msg::PoseStamped current_pose;
-            if (getCurrentRobotPose(current_pose))
+            if (have_current_pose)
             {
                 const double target_distance = distanceToNode(current_pose, target_index);
                 if (!final_goal && target_distance <= waypoint_reached_distance_)
@@ -2904,9 +3041,10 @@ private:
             const rclcpp::Time current_time = now();
             if ((current_time - last_progress_time).seconds() >= blocked_timeout_)
             {
-                if (fixed_route)
+                if (fixed_route || terminal_policy.locked())
                 {
-                    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "Fixed route P%d: no motion for %.1f seconds; keep the same goal and wait without replanning.",
+                    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "%s P%d: no motion for %.1f seconds; keep the same goal and wait without replanning.",
+                        terminal_policy.locked() ? "Locked terminal" : "Fixed route",
                         target_index,
                         (current_time - last_progress_time).seconds());
                     continue;
@@ -2921,9 +3059,10 @@ private:
             }
             if ((current_time - start_time).seconds() >= goal_timeout_)
             {
-                if (fixed_route)
+                if (fixed_route || terminal_policy.locked())
                 {
-                    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "Fixed route P%d: goal remains active after %.1f seconds; wait indefinitely without replanning.",
+                    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "%s P%d: goal remains active after %.1f seconds; wait indefinitely without replanning.",
+                        terminal_policy.locked() ? "Locked terminal" : "Fixed route",
                         target_index,
                         (current_time - start_time).seconds());
                     continue;
@@ -2938,6 +3077,10 @@ private:
         }
 
         stopRobot();
+        if (terminal_policy.errorActive())
+        {
+            clear_terminal_error("导航节点停止，终点旋转等待状态结束。");
+        }
         active_next_index_ = -1;
         publishTopologyMarkers();
         return GOAL_FAILED;
