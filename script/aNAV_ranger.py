@@ -135,6 +135,7 @@ AUTONAV_DEFAULTS = {
     'waypoint_reached_distance': 0.20,
     'fixed_route_final_xy_tolerance': 0.03,
     'loop_endpoint_dwell_time': 2.0,
+    'enable_hybrid_astar_reentry': False,
 }
 RVIZ_RECORD_POSE_TOPIC = '/anav/record_pose'
 RVIZ_RECORD_MARKER_TOPIC = '/anav/record_markers'
@@ -928,6 +929,9 @@ class MyWindow(QWidget):
         settings['block_bidirectional'] = (
             self.block_bidirectional_checkbox.isChecked()
         )
+        settings['enable_hybrid_astar_reentry'] = (
+            self.hybrid_astar_reentry_checkbox.isChecked()
+        )
         settings['default_navigation_mode'] = int(
             self.navigation_route_mode_combo.currentData()
         )
@@ -946,6 +950,10 @@ class MyWindow(QWidget):
         if 'block_bidirectional' in settings:
             self.block_bidirectional_checkbox.setChecked(
                 bool(settings['block_bidirectional'])
+            )
+        if 'enable_hybrid_astar_reentry' in settings:
+            self.hybrid_astar_reentry_checkbox.setChecked(
+                bool(settings['enable_hybrid_astar_reentry'])
             )
 
     def set_nav_config_buttons_enabled(self, enabled):
@@ -996,6 +1004,9 @@ class MyWindow(QWidget):
                 request.fixed_route_final_xy_tolerance = (
                     settings['fixed_route_final_xy_tolerance']
                 )
+                request.enable_hybrid_astar_reentry = (
+                    settings['enable_hybrid_astar_reentry']
+                )
                 response = wait_future(
                     self.nav_config_client.call_async(request), 3.0
                 )
@@ -1015,6 +1026,8 @@ class MyWindow(QWidget):
                         response.waypoint_reached_distance,
                     'fixed_route_final_xy_tolerance':
                         response.fixed_route_final_xy_tolerance,
+                    'enable_hybrid_astar_reentry':
+                        response.enable_hybrid_astar_reentry,
                     '_navigation_active': response.navigation_active,
                     '_update_widgets': not apply or response.success,
                 }
@@ -1227,6 +1240,10 @@ class MyWindow(QWidget):
                         'block_bidirectional: '
                         f'{str(settings["block_bidirectional"]).lower()}\n'
                     )
+                    handle.write(
+                        'enable_hybrid_astar_reentry: '
+                        f'{str(settings["enable_hybrid_astar_reentry"]).lower()}\n'
+                    )
                     handle.flush()
                     os.fsync(handle.fileno())
                 os.replace(temporary_path, AUTONAV_CONFIG_FILE)
@@ -1248,8 +1265,8 @@ class MyWindow(QWidget):
     def build_navigation_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 10, 0, 0)
-        layout.setSpacing(14)
+        layout.setContentsMargins(0, 6, 0, 0)
+        layout.setSpacing(8)
 
         startup = QGroupBox('1  作业准备')
         startup_layout = QGridLayout(startup)
@@ -1422,6 +1439,9 @@ class MyWindow(QWidget):
 
         strategy = QGroupBox('1  默认任务策略')
         strategy_layout = QFormLayout(strategy)
+        strategy_layout.setContentsMargins(12, 8, 12, 8)
+        strategy_layout.setHorizontalSpacing(10)
+        strategy_layout.setVerticalSpacing(4)
         self.navigation_route_mode_combo = QComboBox()
         self.navigation_route_mode_combo.addItem(
             '自动绕路：堵塞后重新规划（run=1）', 1
@@ -1449,8 +1469,10 @@ class MyWindow(QWidget):
 
         parameters = QGroupBox('2  堵塞、重规划与到达判定')
         parameter_layout = QVBoxLayout(parameters)
+        parameter_layout.setContentsMargins(12, 8, 12, 8)
+        parameter_layout.setSpacing(6)
         parameter_columns = QHBoxLayout()
-        parameter_columns.setSpacing(16)
+        parameter_columns.setSpacing(12)
 
         blockage_group = QGroupBox('堵塞与重规划')
         blockage_layout = QFormLayout(blockage_group)
@@ -1463,8 +1485,9 @@ class MyWindow(QWidget):
             )
             form_layout.setFormAlignment(Qt.AlignTop)
             form_layout.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-            form_layout.setHorizontalSpacing(12)
-            form_layout.setVerticalSpacing(6)
+            form_layout.setContentsMargins(10, 7, 10, 7)
+            form_layout.setHorizontalSpacing(8)
+            form_layout.setVerticalSpacing(3)
 
         parameter_columns.addWidget(blockage_group, 1)
         parameter_columns.addWidget(arrival_group, 1)
@@ -1479,7 +1502,7 @@ class MyWindow(QWidget):
             editor.setSingleStep(step)
             editor.setSuffix(suffix)
             editor.setValue(float(self.autonav_settings[key]))
-            editor.setFixedWidth(125)
+            editor.setFixedWidth(112)
             editor.setAlignment(Qt.AlignRight)
             self.nav_parameter_widgets[key] = editor
             target_layout.addRow(label, editor)
@@ -1512,11 +1535,28 @@ class MyWindow(QWidget):
         self.block_bidirectional_checkbox.setChecked(
             bool(self.autonav_settings['block_bidirectional'])
         )
-        parameter_layout.addWidget(self.block_bidirectional_checkbox)
+        self.hybrid_astar_reentry_checkbox = QCheckBox(
+            '允许 Hybrid A* 生成换边引导点（调试功能）'
+        )
+        self.hybrid_astar_reentry_checkbox.setChecked(
+            bool(self.autonav_settings['enable_hybrid_astar_reentry'])
+        )
+        self.hybrid_astar_reentry_checkbox.setToolTip(
+            '仅用于自动绕路模式。阻塞后停车，Hybrid A* 只生成控制点，'
+            '最终曲线仍由现有 B 样条/折线生成器决定并冻结执行。'
+        )
+        option_row = QHBoxLayout()
+        option_row.setSpacing(18)
+        option_row.addWidget(self.block_bidirectional_checkbox)
+        option_row.addWidget(self.hybrid_astar_reentry_checkbox)
+        option_row.addStretch()
+        parameter_layout.addLayout(option_row)
         layout.addWidget(parameters)
 
         actions = QGroupBox('3  应用与保存')
         action_layout = QVBoxLayout(actions)
+        action_layout.setContentsMargins(12, 8, 12, 8)
+        action_layout.setSpacing(4)
         button_row = QHBoxLayout()
         self.nav_config_refresh_button = QPushButton('读取当前节点')
         self.nav_config_apply_button = QPushButton('应用到当前节点')

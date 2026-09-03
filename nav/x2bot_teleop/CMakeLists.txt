@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(ament_cmake REQUIRED)
 find_package(ament_index_cpp REQUIRED)
+find_package(anav_interfaces REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(cmd_vel_arbiter REQUIRED)
 find_package(collision_monitor REQUIRED)
@@ -40,15 +41,21 @@ add_executable(saveLocation src/save_Location.cpp)
 ament_target_dependencies(
   saveLocation rclcpp sensor_msgs tf2 tf2_geometry_msgs tf2_ros)
 
+add_library(hybrid_astar src/hybrid_astar.cpp)
+target_include_directories(hybrid_astar PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+
 add_executable(runnav src/run_nav.cpp)
 target_include_directories(runnav PRIVATE include)
 ament_target_dependencies(
   runnav
-  ament_index_cpp collision_monitor cmd_vel_arbiter diagnostic_msgs geometry_msgs nav2_msgs nav_msgs rclcpp
+  ament_index_cpp anav_interfaces collision_monitor cmd_vel_arbiter diagnostic_msgs geometry_msgs nav2_msgs nav_msgs rclcpp
   rclcpp_action sensor_msgs std_msgs std_srvs tf2 tf2_geometry_msgs tf2_ros
   visualization_msgs)
 target_link_libraries(runnav "${cpp_typesupport_target}")
 target_link_libraries(runnav collision_monitor::collision_checker)
+target_link_libraries(runnav hybrid_astar)
 
 add_executable(TagCtl src/TagCtl_srv.cpp)
 ament_target_dependencies(
@@ -61,10 +68,19 @@ if(BUILD_TESTING)
   if(TARGET terminal_goal_policy_test)
     target_include_directories(terminal_goal_policy_test PRIVATE include)
   endif()
+  ament_add_gtest(hybrid_astar_test test/hybrid_astar_test.cpp)
+  if(TARGET hybrid_astar_test)
+    target_link_libraries(hybrid_astar_test hybrid_astar)
+  endif()
 endif()
 
 install(TARGETS x2bot_joy_PXN saveLocation runnav TagCtl
   DESTINATION lib/${PROJECT_NAME})
+install(TARGETS hybrid_astar
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
+install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 
 ament_export_dependencies(rosidl_default_runtime)

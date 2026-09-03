@@ -23,6 +23,7 @@
 #include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/u_int8.hpp>
+#include <std_msgs/msg/u_int64.hpp>
 #include <tf2_ros/buffer.hpp>
 #include <visualization_msgs/msg/marker.hpp>
 
@@ -138,7 +139,8 @@ private:
       int topology_version);
   void referencePathGenerationThread(
       std::vector<geometry_msgs::msg::PoseStamped> waypoints,
-      int topology_version);
+      int topology_version, bool frozen_mode,
+      nav_msgs::msg::OccupancyGrid frozen_local_map);
   bool consumeReferencePathJob();
   bool referencePathJobRunning() const;
   bool referencePathJobFailedForCurrentTopology() const;
@@ -198,6 +200,8 @@ private:
       terminal_motion_state_pub_;
   rclcpp_lifecycle::LifecyclePublisher<std_msgs::msg::UInt8>::SharedPtr
       path_control_mode_pub_;
+  rclcpp_lifecycle::LifecyclePublisher<std_msgs::msg::UInt64>::SharedPtr
+      frozen_plan_ready_pub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr fixed_route_mode_sub_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr
       parameter_callback_handle_;

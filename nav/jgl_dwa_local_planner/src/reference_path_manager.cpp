@@ -12,6 +12,8 @@ ReferencePathManager::ReferencePathManager()
       have_reference_path_(false),
       topology_changed_(false),
       topology_version_(0),
+      frozen_mode_(false),
+      frozen_plan_id_(0),
       path_version_(0),
       current_path_index_(0),
       path_regenerate_cooldown_(1.0),
@@ -34,11 +36,25 @@ void ReferencePathManager::initialize(
       "/topology_plan", rclcpp::QoS(1),
       std::bind(&ReferencePathManager::topologyCallback, this,
                 std::placeholders::_1));
+  frozen_topology_sub_ = node->create_subscription<anav_interfaces::msg::FrozenTopologyPlan>(
+      "/anav/frozen_topology_plan", rclcpp::QoS(1).transient_local(),
+      std::bind(&ReferencePathManager::frozenTopologyCallback, this,
+                std::placeholders::_1));
+  frozen_plan_received_pub_ = node->create_publisher<std_msgs::msg::UInt64>(
+      "/anav/frozen_plan_received", rclcpp::QoS(1).transient_local());
 }
 
 void ReferencePathManager::topologyCallback(const nav_msgs::msg::Path::SharedPtr msg)
 {
   boost::mutex::scoped_lock lock(mutex_);
+  if (frozen_mode_)
+  {
+    RCLCPP_WARN_THROTTLE(
+        logger_, *clock_, 2000,
+        "JGL frozen reference: ignore ordinary topology update while plan %llu is active.",
+        static_cast<unsigned long long>(frozen_plan_id_));
+    return;
+  }
   const bool repeated_delivery =
       sameTopology(topo_waypoints_, msg->poses) &&
       rclcpp::Time(msg->header.stamp).nanoseconds() != 0 &&
@@ -48,6 +64,10 @@ void ReferencePathManager::topologyCallback(const nav_msgs::msg::Path::SharedPtr
     return;
   }
   last_topology_stamp_ = rclcpp::Time(msg->header.stamp);
+  frozen_mode_ = false;
+  frozen_plan_id_ = 0;
+  frozen_goal_waypoint_indices_.clear();
+  frozen_local_map_snapshot_.data.clear();
 
   if (msg->poses.size() < 2)
   {
@@ -71,6 +91,90 @@ void ReferencePathManager::topologyCallback(const nav_msgs::msg::Path::SharedPtr
               topology_version_, topo_waypoints_.size());
 }
 
+void ReferencePathManager::activate()
+{
+  if (frozen_plan_received_pub_) frozen_plan_received_pub_->on_activate();
+}
+
+void ReferencePathManager::deactivate()
+{
+  if (frozen_plan_received_pub_) frozen_plan_received_pub_->on_deactivate();
+}
+
+void ReferencePathManager::frozenTopologyCallback(
+    const anav_interfaces::msg::FrozenTopologyPlan::SharedPtr msg)
+{
+  boost::mutex::scoped_lock lock(mutex_);
+  if (msg->plan_id == 0 || msg->waypoints.poses.size() < 4)
+  {
+    if (msg->plan_id == 0 || msg->plan_id == frozen_plan_id_)
+    {
+      topo_waypoints_.clear();
+      reference_path_.poses.clear();
+      have_reference_path_ = false;
+      topology_changed_ = true;
+      current_path_index_ = 0;
+      frozen_mode_ = false;
+      frozen_plan_id_ = 0;
+      frozen_goal_waypoint_indices_.clear();
+      frozen_local_map_snapshot_.data.clear();
+      topology_version_++;
+      std_msgs::msg::UInt64 cleared;
+      cleared.data = 0;
+      frozen_plan_received_pub_->publish(cleared);
+    }
+    return;
+  }
+  if (frozen_mode_ && msg->plan_id < frozen_plan_id_)
+  {
+    RCLCPP_WARN(logger_, "JGL frozen reference: ignore stale plan id %llu (current %llu).",
+        static_cast<unsigned long long>(msg->plan_id),
+        static_cast<unsigned long long>(frozen_plan_id_));
+    return;
+  }
+  if (msg->topo_node_ids.size() != msg->topo_waypoint_indices.size() ||
+      msg->topo_waypoint_indices.empty() ||
+      msg->local_map_snapshot.info.width == 0 ||
+      msg->local_map_snapshot.info.height == 0 ||
+      msg->local_map_snapshot.data.size() !=
+          static_cast<std::size_t>(msg->local_map_snapshot.info.width) *
+          msg->local_map_snapshot.info.height)
+  {
+    RCLCPP_ERROR(logger_, "JGL frozen reference: plan %llu has an invalid topo waypoint mapping.",
+        static_cast<unsigned long long>(msg->plan_id));
+    return;
+  }
+  for (unsigned int index : msg->topo_waypoint_indices)
+  {
+    if (index >= msg->waypoints.poses.size())
+    {
+      RCLCPP_ERROR(logger_,
+          "JGL frozen reference: plan %llu contains out-of-range waypoint index %u.",
+          static_cast<unsigned long long>(msg->plan_id), index);
+      return;
+    }
+  }
+  topo_waypoints_ = msg->waypoints.poses;
+  frozen_goal_waypoint_indices_.assign(
+      msg->topo_waypoint_indices.begin(), msg->topo_waypoint_indices.end());
+  frozen_local_map_snapshot_ = msg->local_map_snapshot;
+  last_topology_stamp_ = rclcpp::Time(msg->waypoints.header.stamp);
+  reference_path_.poses.clear();
+  have_reference_path_ = false;
+  topology_changed_ = true;
+  current_path_index_ = 0;
+  frozen_mode_ = true;
+  frozen_plan_id_ = msg->plan_id;
+  topology_version_++;
+  std_msgs::msg::UInt64 received;
+  received.data = frozen_plan_id_;
+  frozen_plan_received_pub_->publish(received);
+  RCLCPP_INFO(logger_,
+      "JGL frozen reference: received plan %llu, version %d, %zu guide waypoints.",
+      static_cast<unsigned long long>(frozen_plan_id_),
+      topology_version_, topo_waypoints_.size());
+}
+
 bool ReferencePathManager::hasWaypoints() const
 {
   boost::mutex::scoped_lock lock(mutex_);
@@ -87,6 +191,27 @@ int ReferencePathManager::topologyVersion() const
 {
   boost::mutex::scoped_lock lock(mutex_);
   return topology_version_;
+}
+
+bool ReferencePathManager::frozenMode() const
+{
+  boost::mutex::scoped_lock lock(mutex_);
+  return frozen_mode_;
+}
+
+uint64_t ReferencePathManager::frozenPlanId() const
+{
+  boost::mutex::scoped_lock lock(mutex_);
+  return frozen_plan_id_;
+}
+
+bool ReferencePathManager::frozenLocalMapSnapshot(
+    nav_msgs::msg::OccupancyGrid &snapshot) const
+{
+  boost::mutex::scoped_lock lock(mutex_);
+  if (!frozen_mode_ || frozen_local_map_snapshot_.data.empty()) return false;
+  snapshot = frozen_local_map_snapshot_;
+  return true;
 }
 
 bool ReferencePathManager::hasValidPath() const
@@ -190,13 +315,28 @@ int ReferencePathManager::goalIndex(const geometry_msgs::msg::PoseStamped &goal)
 
   int best_index = -1;
   double best_distance = 1e9;
-  for (unsigned int i = 0; i < topo_waypoints_.size(); ++i)
+  if (frozen_mode_)
   {
-    const double distance = poseDistance(goal, topo_waypoints_[i]);
-    if (distance < best_distance)
+    for (unsigned int i : frozen_goal_waypoint_indices_)
     {
-      best_distance = distance;
-      best_index = static_cast<int>(i);
+      const double distance = poseDistance(goal, topo_waypoints_[i]);
+      if (distance < best_distance)
+      {
+        best_distance = distance;
+        best_index = static_cast<int>(i);
+      }
+    }
+  }
+  else
+  {
+    for (unsigned int i = 0; i < topo_waypoints_.size(); ++i)
+    {
+      const double distance = poseDistance(goal, topo_waypoints_[i]);
+      if (distance < best_distance)
+      {
+        best_distance = distance;
+        best_index = static_cast<int>(i);
+      }
     }
   }
   return best_distance <= waypoint_match_tolerance_ ? best_index : -1;

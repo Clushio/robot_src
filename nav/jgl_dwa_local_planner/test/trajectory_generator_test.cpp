@@ -197,6 +197,38 @@ TEST(TrajectoryGeneratorBspline, TwoCurveWaypointReferenceMarksSecondToThirdSegm
   EXPECT_TRUE(generator.checkCollision(path));
 }
 
+TEST(TrajectoryGeneratorBspline, FrozenGenerationChecksOneLocalMapSnapshot)
+{
+  const nav_msgs::msg::OccupancyGrid global =
+      makeFreeGrid(-1.0, -1.0, 0.05, 100, 40);
+  nav_msgs::msg::OccupancyGrid local = global;
+  const int obstacle_x = static_cast<int>((1.5 - local.info.origin.position.x) /
+                                          local.info.resolution);
+  const int obstacle_y = static_cast<int>((0.0 - local.info.origin.position.y) /
+                                          local.info.resolution);
+  local.data[obstacle_y * local.info.width + obstacle_x] = 100;
+
+  std::vector<geometry_msgs::msg::PoseStamped> waypoints;
+  waypoints.push_back(makePose(0.0, 0.0));
+  waypoints.push_back(makePose(0.5, 0.0));
+  waypoints.push_back(makePose(1.5, 0.0));
+  waypoints.push_back(makePose(2.5, 0.0));
+  waypoints.push_back(makePose(3.0, 0.0));
+
+  jgl_dwa_local_planner::TrajectoryGenerator normal_generator;
+  normal_generator.setGlobalCostmapForTesting(global);
+  normal_generator.setLocalCostmapForTesting(local);
+  normal_generator.setReferenceLimitsForTesting(0.05, 0.10, 0.50, 2.0, 0.48);
+  nav_msgs::msg::Path path;
+  ASSERT_TRUE(normal_generator.generate(waypoints, path, false));
+
+  jgl_dwa_local_planner::TrajectoryGenerator frozen_generator;
+  frozen_generator.setGlobalCostmapForTesting(global);
+  frozen_generator.setLocalCostmapForTesting(local);
+  frozen_generator.setReferenceLimitsForTesting(0.05, 0.10, 0.50, 2.0, 0.48);
+  EXPECT_FALSE(frozen_generator.generate(waypoints, path, true));
+}
+
 TEST(PathFollowerAckermannOnly, CommandNeverUsesCrabOrReverse)
 {
   jgl_dwa_local_planner::PathFollower follower;

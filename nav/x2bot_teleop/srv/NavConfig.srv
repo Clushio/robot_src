@@ -8,6 +8,7 @@ float64 goal_timeout
 bool block_bidirectional
 float64 waypoint_reached_distance
 float64 fixed_route_final_xy_tolerance
+bool enable_hybrid_astar_reentry
 ---
 bool success
 string message
@@ -21,3 +22,4 @@ float64 goal_timeout
 bool block_bidirectional
 float64 waypoint_reached_distance
 float64 fixed_route_final_xy_tolerance
+bool enable_hybrid_astar_reentry

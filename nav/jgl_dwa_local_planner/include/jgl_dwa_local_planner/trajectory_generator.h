@@ -34,7 +34,9 @@ public:
       const std::string &parameter_prefix);
 
   bool generate(const std::vector<geometry_msgs::msg::PoseStamped> &waypoints,
-                nav_msgs::msg::Path &out_path);
+                nav_msgs::msg::Path &out_path,
+                bool validate_local_snapshot = false,
+                const nav_msgs::msg::OccupancyGrid *local_snapshot = nullptr);
   bool checkCollision(const nav_msgs::msg::Path &path);
   bool checkDeviationFromTopo(const nav_msgs::msg::Path &path,
                               const std::vector<geometry_msgs::msg::PoseStamped> &waypoints);
@@ -54,6 +56,13 @@ public:
     boost::mutex::scoped_lock lock(costmap_mutex_);
     global_costmap_ = grid;
     have_global_costmap_ = true;
+  }
+
+  void setLocalCostmapForTesting(const nav_msgs::msg::OccupancyGrid &grid)
+  {
+    boost::mutex::scoped_lock lock(costmap_mutex_);
+    local_costmap_ = grid;
+    have_local_costmap_ = true;
   }
 
   void setReferenceLimitsForTesting(double sample_resolution,
@@ -110,6 +119,9 @@ private:
 	  };
 
 	  void globalCostmapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
+	  void localCostmapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
+	  bool poseCollidesLocal(const geometry_msgs::msg::PoseStamped &pose,
+	                         const nav_msgs::msg::OccupancyGrid &grid) const;
 
 	  bool generateBsplineReference(const std::vector<geometry_msgs::msg::PoseStamped> &waypoints,
 	                                nav_msgs::msg::Path &out_path);
@@ -230,11 +242,16 @@ private:
 	  Point2d pointScale(const Point2d &point, double scale) const;
 
 	  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr global_costmap_sub_;
+	  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr local_costmap_sub_;
 	  rclcpp::Clock::SharedPtr clock_;
 	  rclcpp::Logger logger_{rclcpp::get_logger("TrajectoryGenerator")};
 	  mutable boost::mutex costmap_mutex_;
   nav_msgs::msg::OccupancyGrid global_costmap_;
   bool have_global_costmap_;
+  nav_msgs::msg::OccupancyGrid local_costmap_;
+  nav_msgs::msg::OccupancyGrid generation_local_costmap_;
+  bool have_local_costmap_;
+  bool validate_local_snapshot_;
 
   double sample_resolution_;
 	  double safe_distance_;

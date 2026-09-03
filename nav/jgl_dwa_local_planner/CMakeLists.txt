@@ -7,6 +7,7 @@ endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(ament_cmake REQUIRED)
+find_package(anav_interfaces REQUIRED)
 find_package(angles REQUIRED)
 find_package(Boost REQUIRED COMPONENTS thread)
 find_package(dwb_core REQUIRED)
@@ -57,7 +58,7 @@ ament_target_dependencies(${PROJECT_NAME}
   tf2
   tf2_geometry_msgs
   tf2_ros
-  visualization_msgs)
+  visualization_msgs anav_interfaces)
 target_link_libraries(${PROJECT_NAME} Boost::thread)
 
 pluginlib_export_plugin_description_file(nav2_core blp_plugin.xml)
@@ -108,5 +109,5 @@ ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 ament_export_dependencies(
   angles dwb_core dwb_plugins geometry_msgs nav2_core nav2_costmap_2d
   nav_msgs pluginlib rcl_interfaces rclcpp rclcpp_lifecycle sensor_msgs std_msgs
-  tf2 tf2_geometry_msgs tf2_ros visualization_msgs)
+  tf2 tf2_geometry_msgs tf2_ros visualization_msgs anav_interfaces)
 ament_package()

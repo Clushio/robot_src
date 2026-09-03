@@ -12,6 +12,7 @@
 #include <geometry_msgs/msg/vector3_stamped.hpp>
 #include <nav2_msgs/action/navigate_to_pose.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
+#include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
@@ -19,6 +20,7 @@
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/u_int8.hpp>
+#include <std_msgs/msg/u_int64.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <tf2/exceptions.h>
 #include <tf2/LinearMath/Quaternion.h>
@@ -30,7 +32,9 @@
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <x2bot_teleop/srv/nav_config.hpp>
 #include <x2bot_teleop/srv/edge_block_state.hpp>
+#include <anav_interfaces/msg/frozen_topology_plan.hpp>
 #include <x2bot_teleop/srv/set_int.hpp>
+#include <x2bot_teleop/hybrid_astar.h>
 #include <x2bot_teleop/terminal_goal_policy.h>
 
 #include <algorithm>
@@ -86,11 +90,21 @@ struct NavConfigValues {
     bool block_bidirectional;
     double waypoint_reached_distance;
     double fixed_route_final_xy_tolerance;
+    bool enable_hybrid_astar_reentry;
 };
 
 struct LocalSegmentCost {
     bool blocked = false;
     double penalty = 0.0;
+};
+
+struct HybridReentryPlan {
+    bool success = false;
+    std::string reason;
+    std::vector<int> topology_path;
+    std::vector<x2bot_teleop::HybridPose> guide_path;
+    nav_msgs::msg::OccupancyGrid local_map_snapshot;
+    double total_cost = std::numeric_limits<double>::infinity();
 };
 
 class MVGoalState
@@ -248,6 +262,7 @@ public:
           progress_yaw_(6.0 * M_PI / 180.0),
           waypoint_reached_distance_(0.20),
           fixed_route_final_xy_tolerance_(0.03),
+          enable_hybrid_astar_reentry_(false),
           legacy_waypoint_reached_distance_(0.05),
           validate_pass_through_action_success_distance_(false),
           goal_timeout_(120.0),
@@ -293,6 +308,12 @@ public:
             declare_parameter<double>("waypoint_reached_distance", waypoint_reached_distance_);
         fixed_route_final_xy_tolerance_ =
             declare_parameter<double>("fixed_route_final_xy_tolerance", fixed_route_final_xy_tolerance_);
+        enable_hybrid_astar_reentry_ = declare_parameter<bool>(
+            "enable_hybrid_astar_reentry", enable_hybrid_astar_reentry_);
+        hybrid_astar_min_turn_radius_ = declare_parameter<double>(
+            "hybrid_astar_min_turn_radius", 0.55);
+        hybrid_astar_max_iterations_ = declare_parameter<int>(
+            "hybrid_astar_max_iterations", 60000);
         legacy_waypoint_reached_distance_ = declare_parameter<double>(
             "legacy_waypoint_reached_distance", legacy_waypoint_reached_distance_);
         legacy_waypoint_reached_distance_ =
@@ -382,6 +403,10 @@ public:
             "topology_markers", rclcpp::QoS(1).transient_local());
         path_pub_ = create_publisher<nav_msgs::msg::Path>(
             "topology_plan", rclcpp::QoS(1).transient_local());
+        frozen_plan_pub_ = create_publisher<anav_interfaces::msg::FrozenTopologyPlan>(
+            "/anav/frozen_topology_plan", rclcpp::QoS(1).transient_local());
+        hybrid_raw_path_pub_ = create_publisher<nav_msgs::msg::Path>(
+            "/anav/hybrid_astar/raw_path", rclcpp::QoS(1).transient_local());
         task_status_pub_ = create_publisher<std_msgs::msg::String>(
             "/anav/task_status", rclcpp::QoS(10).transient_local());
         diagnostics_pub_ =
@@ -404,6 +429,18 @@ public:
         local_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
             local_replan_map_topic_, rclcpp::QoS(1).best_effort(),
             std::bind(&mynav::localMapCallback, this, std::placeholders::_1),
+            status_options);
+        odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
+            "/odom", rclcpp::QoS(1).best_effort(),
+            std::bind(&mynav::odomCallback, this, std::placeholders::_1),
+            status_options);
+        frozen_plan_received_sub_ = create_subscription<std_msgs::msg::UInt64>(
+            "/anav/frozen_plan_received", rclcpp::QoS(1).transient_local(),
+            std::bind(&mynav::frozenPlanReceivedCallback, this, std::placeholders::_1),
+            status_options);
+        frozen_plan_ready_sub_ = create_subscription<std_msgs::msg::UInt64>(
+            "/anav/frozen_plan_ready", rclcpp::QoS(1).transient_local(),
+            std::bind(&mynav::frozenPlanReadyCallback, this, std::placeholders::_1),
             status_options);
 
         plan_path_service = create_service<x2bot_teleop::srv::SetInt>(
@@ -551,6 +588,7 @@ public:
             }
             const bool ok = runTopologyMission(
                 target_index, path_indices, fixed_route);
+            clearFrozenTopologyPlan();
             {
                 std::lock_guard<std::mutex> lock(nav_config_mutex_);
                 navigation_active_.store(false);
@@ -823,6 +861,8 @@ private:
     rclcpp::CallbackGroup::SharedPtr finish_client_callback_group_;
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr vel_pub_;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr fixed_route_mode_pub_;
+    rclcpp::Publisher<anav_interfaces::msg::FrozenTopologyPlan>::SharedPtr frozen_plan_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr hybrid_raw_path_pub_;
     rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr marker_pub;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_array_pub_;
@@ -833,10 +873,21 @@ private:
     rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr terminal_motion_state_sub_;
     rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr path_control_mode_sub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr local_map_sub_;
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+    rclcpp::Subscription<std_msgs::msg::UInt64>::SharedPtr frozen_plan_received_sub_;
+    rclcpp::Subscription<std_msgs::msg::UInt64>::SharedPtr frozen_plan_ready_sub_;
     std::mutex local_map_mutex_;
     nav_msgs::msg::OccupancyGrid local_replan_map_;
     std::chrono::steady_clock::time_point local_replan_map_received_at_;
     bool have_local_replan_map_ = false;
+    std::mutex odom_mutex_;
+    nav_msgs::msg::Odometry latest_odom_;
+    std::chrono::steady_clock::time_point odom_received_at_;
+    bool have_odom_ = false;
+    std::mutex frozen_plan_received_mutex_;
+    uint64_t frozen_plan_received_id_ = 0;
+    std::mutex frozen_plan_ready_mutex_;
+    uint64_t frozen_plan_ready_id_ = 0;
     rclcpp::TimerBase::SharedPtr safety_phase_timer_;
     rclcpp::TimerBase::SharedPtr marker_timer_;
     rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr topology_safety_phase_pub_;
@@ -882,6 +933,12 @@ private:
     double progress_yaw_;
     double waypoint_reached_distance_;
     double fixed_route_final_xy_tolerance_;
+    bool enable_hybrid_astar_reentry_;
+    uint64_t next_frozen_plan_id_ = 1;
+    uint64_t active_frozen_plan_id_ = 0;
+    std::map<int, int> active_frozen_status_indices_;
+    double hybrid_astar_min_turn_radius_ = 0.55;
+    int hybrid_astar_max_iterations_ = 60000;
     double legacy_waypoint_reached_distance_;
     bool validate_pass_through_action_success_distance_;
     double goal_timeout_;
@@ -1153,6 +1210,7 @@ private:
         config.block_bidirectional = block_bidirectional_;
         config.waypoint_reached_distance = waypoint_reached_distance_;
         config.fixed_route_final_xy_tolerance = fixed_route_final_xy_tolerance_;
+        config.enable_hybrid_astar_reentry = enable_hybrid_astar_reentry_;
         return config;
     }
 
@@ -1238,6 +1296,7 @@ private:
         waypoint_reached_distance_ = config.waypoint_reached_distance;
         fixed_route_final_xy_tolerance_ =
             config.fixed_route_final_xy_tolerance;
+        enable_hybrid_astar_reentry_ = config.enable_hybrid_astar_reentry;
     }
 
     void fillNavConfigResponse(x2bot_teleop::srv::NavConfig::Response &response)
@@ -1254,6 +1313,8 @@ private:
         response.waypoint_reached_distance = config.waypoint_reached_distance;
         response.fixed_route_final_xy_tolerance =
             config.fixed_route_final_xy_tolerance;
+        response.enable_hybrid_astar_reentry =
+            config.enable_hybrid_astar_reentry;
     }
 
     void navConfigCallback(
@@ -1293,6 +1354,8 @@ private:
         config.waypoint_reached_distance = request.waypoint_reached_distance;
         config.fixed_route_final_xy_tolerance =
             request.fixed_route_final_xy_tolerance;
+        config.enable_hybrid_astar_reentry =
+            request.enable_hybrid_astar_reentry;
         std::string reason;
         if (!validateNavConfig(config, reason))
         {
@@ -1501,6 +1564,8 @@ private:
                     config.waypoint_reached_distance = std::stod(value);
                 else if (key == "fixed_route_final_xy_tolerance")
                     config.fixed_route_final_xy_tolerance = std::stod(value);
+                else if (key == "enable_hybrid_astar_reentry")
+                    config.enable_hybrid_astar_reentry = parseBool(value, false);
             }
         }
         catch (const std::exception &error)
@@ -1995,6 +2060,96 @@ private:
         local_replan_map_ = *message;
         local_replan_map_received_at_ = std::chrono::steady_clock::now();
         have_local_replan_map_ = true;
+    }
+
+    void odomCallback(const nav_msgs::msg::Odometry::ConstSharedPtr message)
+    {
+        std::lock_guard<std::mutex> lock(odom_mutex_);
+        latest_odom_ = *message;
+        odom_received_at_ = std::chrono::steady_clock::now();
+        have_odom_ = true;
+    }
+
+    void frozenPlanReceivedCallback(const std_msgs::msg::UInt64::ConstSharedPtr message)
+    {
+        std::lock_guard<std::mutex> lock(frozen_plan_received_mutex_);
+        frozen_plan_received_id_ = message->data;
+    }
+
+    void frozenPlanReadyCallback(const std_msgs::msg::UInt64::ConstSharedPtr message)
+    {
+        std::lock_guard<std::mutex> lock(frozen_plan_ready_mutex_);
+        frozen_plan_ready_id_ = message->data;
+    }
+
+    bool waitForFrozenPlanReady(uint64_t plan_id, double timeout = 5.0)
+    {
+        const auto started = std::chrono::steady_clock::now();
+        while (rclcpp::ok() && std::chrono::duration<double>(
+                   std::chrono::steady_clock::now() - started).count() < timeout)
+        {
+            stopRobot();
+            {
+                std::lock_guard<std::mutex> lock(frozen_plan_ready_mutex_);
+                if (frozen_plan_ready_id_ == plan_id)
+                {
+                    RCLCPP_INFO(get_logger(),
+                        "Frozen reference plan %llu passed final trajectory checks.",
+                        static_cast<unsigned long long>(plan_id));
+                    return true;
+                }
+            }
+            if (cancel_requested_.load() || stop_and_quit) return false;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        RCLCPP_ERROR(get_logger(),
+            "Frozen reference plan %llu did not pass final trajectory checks within %.1f seconds.",
+            static_cast<unsigned long long>(plan_id), timeout);
+        return false;
+    }
+
+    bool waitForRobotStopped(double timeout = 2.0)
+    {
+        const auto started = std::chrono::steady_clock::now();
+        auto stopped_since = std::chrono::steady_clock::time_point{};
+        while (rclcpp::ok() && std::chrono::duration<double>(
+                   std::chrono::steady_clock::now() - started).count() < timeout)
+        {
+            stopRobot();
+            bool fresh = false;
+            bool stopped = false;
+            const auto now = std::chrono::steady_clock::now();
+            {
+                std::lock_guard<std::mutex> lock(odom_mutex_);
+                fresh = have_odom_ &&
+                    std::chrono::duration<double>(now - odom_received_at_).count() <= 0.30;
+                if (fresh)
+                {
+                    const auto &twist = latest_odom_.twist.twist;
+                    stopped = std::isfinite(twist.linear.x) &&
+                        std::isfinite(twist.linear.y) &&
+                        std::isfinite(twist.angular.z) &&
+                        std::hypot(twist.linear.x, twist.linear.y) <= 0.01 &&
+                        std::fabs(twist.angular.z) <= 0.02;
+                }
+            }
+            if (fresh && stopped)
+            {
+                if (stopped_since == std::chrono::steady_clock::time_point{})
+                    stopped_since = now;
+                if (std::chrono::duration<double>(now - stopped_since).count() >= 0.20)
+                    return true;
+            }
+            else
+            {
+                stopped_since = std::chrono::steady_clock::time_point{};
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        RCLCPP_ERROR(get_logger(),
+            "Hybrid-A* re-entry refused because /odom did not confirm a stable stop.");
+        stopRobot();
+        return false;
     }
 
     bool localMapSnapshot(nav_msgs::msg::OccupancyGrid &map, std::string &reason)
@@ -2810,6 +2965,152 @@ private:
         return path;
     }
 
+    bool hybridPoseFree(const nav_msgs::msg::OccupancyGrid &local_map,
+                        double x, double y, double yaw) const
+    {
+        int static_x = 0;
+        int static_y = 0;
+        if (!worldToStaticMap(x, y, static_x, static_y) ||
+            static_map_occupied_[static_y * static_map_width_ + static_x])
+        {
+            return false;
+        }
+        std::lock_guard<std::mutex> footprint_lock(local_replan_footprint_mutex_);
+        if (!local_replan_footprint_ready_) return false;
+        collision_monitor::Pose2D pose;
+        pose.x = x;
+        pose.y = y;
+        pose.yaw = yaw;
+        return !local_replan_collision_checker_.poseCollides(
+            pose, local_map, local_replan_grid_policy_);
+    }
+
+    HybridReentryPlan hybridAwareReroute(int goal)
+    {
+        HybridReentryPlan best_plan;
+        if (!validIndex(goal) || !localReplanFootprintReady())
+        {
+            best_plan.reason = "invalid goal or collision footprint unavailable";
+            return best_plan;
+        }
+        nav_msgs::msg::OccupancyGrid local_map;
+        if (!localMapSnapshot(local_map, best_plan.reason)) return best_plan;
+        best_plan.local_map_snapshot = local_map;
+        geometry_msgs::msg::PoseStamped robot_pose;
+        if (!getCurrentRobotPose(robot_pose))
+        {
+            best_plan.reason = "current robot pose is unavailable";
+            return best_plan;
+        }
+
+        double connector_radius = 0.0;
+        {
+            std::lock_guard<std::mutex> edge_lock(edge_block_mutex_);
+            for (const auto &edges : graph)
+                for (const TopoEdge &edge : edges.second)
+                    connector_radius = std::max(connector_radius, edge.length);
+        }
+        connector_radius = std::max(0.5, connector_radius);
+
+        struct Candidate
+        {
+            int node;
+            double lower_cost;
+            double topology_cost;
+            std::vector<int> route;
+        };
+        std::vector<Candidate> candidates;
+        for (int node = 0; node < static_cast<int>(target_poses.size()); ++node)
+        {
+            const double connector_distance = std::hypot(
+                target_poses[node].x - robot_pose.pose.position.x,
+                target_poses[node].y - robot_pose.pose.position.y);
+            if (connector_distance > connector_radius + 1e-9) continue;
+            double topology_cost = 0.0;
+            std::vector<int> route = dijkstraShortestPath(
+                node, goal, false, &local_map, &topology_cost, nullptr, false);
+            if (route.empty()) continue;
+            candidates.push_back(Candidate{
+                node, connector_distance + topology_cost, topology_cost, route});
+        }
+        std::sort(candidates.begin(), candidates.end(),
+            [](const Candidate &a, const Candidate &b) {
+                return a.lower_cost < b.lower_cost;
+            });
+        if (candidates.size() > 8) candidates.resize(8);
+
+        x2bot_teleop::HybridAStarOptions options;
+        options.min_turn_radius = hybrid_astar_min_turn_radius_;
+        options.max_iterations = static_cast<std::size_t>(
+            std::max(100, hybrid_astar_max_iterations_));
+        x2bot_teleop::HybridAStar planner(options);
+        x2bot_teleop::HybridPose start;
+        start.x = robot_pose.pose.position.x;
+        start.y = robot_pose.pose.position.y;
+        start.yaw = tf2::getYaw(robot_pose.pose.orientation);
+        std::size_t attempted = 0;
+        for (const Candidate &candidate : candidates)
+        {
+            ++attempted;
+            x2bot_teleop::HybridPose target;
+            target.x = target_poses[candidate.node].x;
+            target.y = target_poses[candidate.node].y;
+            target.yaw = candidate.route.size() > 1
+                ? yawBetween(candidate.route[0], candidate.route[1])
+                : target_poses[candidate.node].yaw;
+            const auto result = planner.plan(
+                start, target,
+                [&](double x, double y, double yaw) {
+                    return hybridPoseFree(local_map, x, y, yaw);
+                });
+            if (!result.success)
+            {
+                RCLCPP_WARN(get_logger(),
+                    "Hybrid-A* connector to P%d failed: %s (expanded=%zu).",
+                    candidate.node, result.reason.c_str(), result.expanded);
+                continue;
+            }
+            const double total_cost = result.cost + candidate.topology_cost;
+            if (!best_plan.success || total_cost < best_plan.total_cost)
+            {
+                best_plan.success = true;
+                best_plan.reason = "ok";
+                best_plan.total_cost = total_cost;
+                best_plan.topology_path = candidate.route;
+                best_plan.guide_path = x2bot_teleop::HybridAStar::guidePoints(result.poses);
+            }
+        }
+        if (!best_plan.success)
+        {
+            std::ostringstream reason;
+            reason << "no Hybrid-A* connector for " << attempted
+                   << " reachable candidate(s)";
+            best_plan.reason = reason.str();
+            return best_plan;
+        }
+
+        nav_msgs::msg::Path raw;
+        raw.header.frame_id = "map";
+        raw.header.stamp = now();
+        for (const auto &guide : best_plan.guide_path)
+        {
+            geometry_msgs::msg::PoseStamped pose;
+            pose.header = raw.header;
+            pose.pose.position.x = guide.x;
+            pose.pose.position.y = guide.y;
+            tf2::Quaternion q;
+            q.setRPY(0.0, 0.0, guide.yaw);
+            pose.pose.orientation = tf2::toMsg(q);
+            raw.poses.push_back(pose);
+        }
+        hybrid_raw_path_pub_->publish(raw);
+        RCLCPP_WARN(get_logger(),
+            "Hybrid-A* selected re-entry P%d with %zu guide points, total cost %.2f.",
+            best_plan.topology_path.front(), best_plan.guide_path.size(),
+            best_plan.total_cost);
+        return best_plan;
+    }
+
     bool localAwareReroute(
         int goal, std::vector<int> &path, bool &map_ready,
         std::string &reason,
@@ -3025,8 +3326,52 @@ private:
         return message;
     }
 
+    int referenceStatusIndex(int topology_node, int ordinary_index) const
+    {
+        const auto found = active_frozen_status_indices_.find(topology_node);
+        return found == active_frozen_status_indices_.end()
+                   ? ordinary_index : found->second;
+    }
+
+    void clearFrozenTopologyPlan()
+    {
+        if (active_frozen_plan_id_ == 0)
+        {
+            active_frozen_status_indices_.clear();
+            return;
+        }
+        const uint64_t clearing_id = active_frozen_plan_id_;
+        anav_interfaces::msg::FrozenTopologyPlan clear;
+        clear.plan_id = clearing_id;
+        clear.waypoints.header.frame_id = "map";
+        clear.waypoints.header.stamp = now();
+        {
+            std::lock_guard<std::mutex> lock(frozen_plan_received_mutex_);
+            frozen_plan_received_id_ = std::numeric_limits<uint64_t>::max();
+        }
+        frozen_plan_pub_->publish(clear);
+        const auto started = std::chrono::steady_clock::now();
+        while (rclcpp::ok() && std::chrono::duration<double>(
+                   std::chrono::steady_clock::now() - started).count() < 0.50)
+        {
+            bool cleared = false;
+            {
+                std::lock_guard<std::mutex> lock(frozen_plan_received_mutex_);
+                cleared = frozen_plan_received_id_ == 0;
+            }
+            if (cleared) break;
+            stopRobot();
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        RCLCPP_INFO(get_logger(), "Cleared frozen topology reference plan %llu.",
+            static_cast<unsigned long long>(clearing_id));
+        active_frozen_plan_id_ = 0;
+        active_frozen_status_indices_.clear();
+    }
+
     void publishTopologyPath(const std::vector<int> &path_indices)
     {
+        clearFrozenTopologyPlan();
         active_path_ = path_indices;
         nav_msgs::msg::Path path;
         path.header.frame_id = "map";
@@ -3040,6 +3385,116 @@ private:
         }
         path_pub_->publish(path);
         publishTopologyMarkers();
+    }
+
+    bool publishFrozenTopologyPath(const HybridReentryPlan &plan,
+                                   int context_index)
+    {
+        if (!plan.success || plan.topology_path.empty() || plan.guide_path.size() < 2)
+            return false;
+
+        anav_interfaces::msg::FrozenTopologyPlan message;
+        message.plan_id = next_frozen_plan_id_++;
+        message.waypoints.header.frame_id = "map";
+        message.waypoints.header.stamp = now();
+        message.local_map_snapshot = plan.local_map_snapshot;
+
+        geometry_msgs::msg::PoseStamped context;
+        if (validIndex(context_index))
+        {
+            context = toPoseStamped(target_poses[context_index]);
+        }
+        else
+        {
+            const auto &start = plan.guide_path.front();
+            context.header = message.waypoints.header;
+            context.pose.position.x = start.x - 0.30 * std::cos(start.yaw);
+            context.pose.position.y = start.y - 0.30 * std::sin(start.yaw);
+            tf2::Quaternion q;
+            q.setRPY(0.0, 0.0, start.yaw);
+            context.pose.orientation = tf2::toMsg(q);
+        }
+        message.waypoints.poses.push_back(context);
+
+        for (const auto &guide : plan.guide_path)
+        {
+            geometry_msgs::msg::PoseStamped pose;
+            pose.header = message.waypoints.header;
+            pose.pose.position.x = guide.x;
+            pose.pose.position.y = guide.y;
+            tf2::Quaternion q;
+            q.setRPY(0.0, 0.0, guide.yaw);
+            pose.pose.orientation = tf2::toMsg(q);
+            message.waypoints.poses.push_back(pose);
+        }
+
+        active_frozen_status_indices_.clear();
+        const auto reentry_index =
+            static_cast<uint32_t>(message.waypoints.poses.size() - 1);
+        message.topo_node_ids.push_back(plan.topology_path.front());
+        message.topo_waypoint_indices.push_back(reentry_index);
+        active_frozen_status_indices_[plan.topology_path.front()] =
+            static_cast<int>(reentry_index);
+        for (std::size_t i = 1; i < plan.topology_path.size(); ++i)
+        {
+            const int node = plan.topology_path[i];
+            message.waypoints.poses.push_back(toPoseStamped(target_poses[node]));
+            const auto waypoint_index =
+                static_cast<uint32_t>(message.waypoints.poses.size() - 1);
+            message.topo_node_ids.push_back(node);
+            message.topo_waypoint_indices.push_back(waypoint_index);
+            active_frozen_status_indices_[node] = static_cast<int>(waypoint_index);
+        }
+        if (plan.topology_path.size() == 1)
+        {
+            const int target = plan.topology_path.front();
+            const double yaw = target_poses[target].yaw;
+            auto tail = toPoseStamped(target_poses[target]);
+            tail.pose.position.x += 0.30 * std::cos(yaw);
+            tail.pose.position.y += 0.30 * std::sin(yaw);
+            message.waypoints.poses.push_back(tail);
+        }
+        if (message.waypoints.poses.size() < 4)
+        {
+            active_frozen_status_indices_.clear();
+            return false;
+        }
+
+        active_frozen_plan_id_ = message.plan_id;
+        active_path_ = plan.topology_path;
+        {
+            std::lock_guard<std::mutex> lock(frozen_plan_received_mutex_);
+            if (frozen_plan_received_id_ == message.plan_id)
+                frozen_plan_received_id_ = 0;
+        }
+        frozen_plan_pub_->publish(message);
+        publishTopologyMarkers();
+        const auto acknowledgement_start = std::chrono::steady_clock::now();
+        bool acknowledged = false;
+        while (rclcpp::ok() && std::chrono::duration<double>(
+                   std::chrono::steady_clock::now() - acknowledgement_start).count() < 1.0)
+        {
+            stopRobot();
+            {
+                std::lock_guard<std::mutex> lock(frozen_plan_received_mutex_);
+                acknowledged = frozen_plan_received_id_ == message.plan_id;
+            }
+            if (acknowledged) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (!acknowledged)
+        {
+            RCLCPP_ERROR(get_logger(),
+                "Frozen Hybrid-A* plan %llu was not acknowledged by DWA.",
+                static_cast<unsigned long long>(message.plan_id));
+            clearFrozenTopologyPlan();
+            return false;
+        }
+        RCLCPP_WARN(get_logger(),
+            "Published frozen Hybrid-A* guide plan %llu with %zu guide/topology waypoints.",
+            static_cast<unsigned long long>(message.plan_id),
+            message.waypoints.poses.size());
+        return true;
     }
 
     void publishTopologyMarkers()
@@ -3300,6 +3755,22 @@ private:
                                             << target_pose.x << ", " << target_pose.y << ")");
         const rclcpp::Time goal_start_time = now();
         global_ac->sendGoal(mb_goal);
+
+        if (active_frozen_plan_id_ != 0)
+        {
+            uint64_t ready_id = 0;
+            {
+                std::lock_guard<std::mutex> lock(frozen_plan_ready_mutex_);
+                ready_id = frozen_plan_ready_id_;
+            }
+            if (ready_id != active_frozen_plan_id_ &&
+                !waitForFrozenPlanReady(active_frozen_plan_id_))
+            {
+                global_ac->cancelGoal();
+                stopRobot();
+                return cancel_requested_.load() ? GOAL_CANCELED : GOAL_FAILED;
+            }
+        }
 
         geometry_msgs::msg::PoseStamped last_progress_pose;
         bool have_progress_pose = getCurrentRobotPose(last_progress_pose);
@@ -3806,7 +4277,9 @@ private:
                 selectTopologySafetyPhase(start_segment_active, final_goal);
                 const GoalMonitorResult goal_result =
                     sendGoalAndMonitor(next_index, previous_index, final_goal,
-                                       static_cast<int>(i), false);
+                                       referenceStatusIndex(
+                                           next_index, static_cast<int>(i)),
+                                       false);
                 if (goal_result == GOAL_REACHED)
                 {
                     if (next_index == active_reentry_node)
@@ -3825,6 +4298,7 @@ private:
                     if (next_index == target_index)
                     {
                         current_status = 3;
+                        clearFrozenTopologyPlan();
                         active_next_index_ = -1;
                         publishTopologyMarkers();
                         return true;
@@ -3898,6 +4372,48 @@ private:
                             "Temporarily blocked failed local topology connector to P%d for %.1f seconds (failure count=%d).",
                             next_index, cooldown, failure_count);
                         active_reentry_node = -1;
+                    }
+
+                    clearFrozenTopologyPlan();
+
+                    if (enable_hybrid_astar_reentry_)
+                    {
+                        if (!waitForRobotStopped())
+                        {
+                            active_next_index_ = -1;
+                            publishTopologyMarkers();
+                            return false;
+                        }
+                        const HybridReentryPlan hybrid_plan =
+                            hybridAwareReroute(target_index);
+                        if (!hybrid_plan.success)
+                        {
+                            RCLCPP_ERROR(get_logger(),
+                                "Hybrid-A* topology re-entry to P%d refused: %s.",
+                                target_index, hybrid_plan.reason.c_str());
+                            stopRobot();
+                            active_next_index_ = -1;
+                            publishTopologyMarkers();
+                            return false;
+                        }
+                        const int context_index = validIndex(previous_index)
+                            ? previous_index : current_pose_index;
+                        if (!publishFrozenTopologyPath(hybrid_plan, context_index))
+                        {
+                            RCLCPP_ERROR(get_logger(),
+                                "Hybrid-A* guide path could not be published as a frozen reference.");
+                            stopRobot();
+                            return false;
+                        }
+                        path_indices = hybrid_plan.topology_path;
+                        start_index = path_indices.front();
+                        active_reentry_node = path_indices.front();
+                        execution_start = 0;
+                        ++replan_count;
+                        RCLCPP_WARN_STREAM(get_logger(), formatPathMessage(
+                            "Hybrid-A* frozen re-entry after blocked edge:",
+                            path_indices));
+                        break;
                     }
 
                     std::vector<int> local_path;
