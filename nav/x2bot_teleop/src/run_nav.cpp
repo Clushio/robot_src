@@ -10,6 +10,7 @@
 #include <geometry_msgs/msg/twist.hpp>
 #include <geometry_msgs/msg/vector3_stamped.hpp>
 #include <nav2_msgs/action/navigate_to_pose.hpp>
+#include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
@@ -82,6 +83,11 @@ struct NavConfigValues {
     bool block_bidirectional;
     double waypoint_reached_distance;
     double fixed_route_final_xy_tolerance;
+};
+
+struct LocalSegmentCost {
+    bool blocked = false;
+    double penalty = 0.0;
 };
 
 class MVGoalState
@@ -255,7 +261,10 @@ public:
           static_map_free_thresh_(0.196),
           static_map_negate_(false),
           static_map_unknown_is_obstacle_(true),
-          static_map_inflation_radius_(std::hypot(0.36, 0.25) + 0.15)
+          static_map_inflation_radius_(std::hypot(0.36, 0.25) + 0.15),
+          local_replan_map_timeout_(0.30),
+          local_replan_block_threshold_(98),
+          local_replan_cost_weight_(2.0)
     {
         maps_dir_ = defaultMapsDir();
         maps_dir_ = declare_parameter<std::string>("maps_dir", maps_dir_);
@@ -295,6 +304,18 @@ public:
         block_bidirectional_ = declare_parameter<bool>("block_bidirectional", block_bidirectional_);
         static_map_inflation_radius_ =
             declare_parameter<double>("static_map_inflation_radius", static_map_inflation_radius_);
+        local_replan_map_topic_ = declare_parameter<std::string>(
+            "local_replan_map_topic", "/local_costmap/costmap_raw");
+        local_replan_map_timeout_ = declare_parameter<double>(
+            "local_replan_map_timeout", local_replan_map_timeout_);
+        local_replan_block_threshold_ = declare_parameter<int>(
+            "local_replan_block_threshold", local_replan_block_threshold_);
+        local_replan_cost_weight_ = declare_parameter<double>(
+            "local_replan_cost_weight", local_replan_cost_weight_);
+        local_replan_map_timeout_ = std::max(0.05, local_replan_map_timeout_);
+        local_replan_block_threshold_ =
+            std::max(1, std::min(100, local_replan_block_threshold_));
+        local_replan_cost_weight_ = std::max(0.0, local_replan_cost_weight_);
         fixed_route_behavior_tree_ = declare_parameter<std::string>(
             "fixed_route_behavior_tree", defaultFixedRouteBehaviorTree());
         if (!fileExists(fixed_route_behavior_tree_))
@@ -375,6 +396,10 @@ public:
         path_control_mode_sub_ = create_subscription<std_msgs::msg::UInt8>(
             "/anav/path_control_mode", rclcpp::QoS(1).transient_local(),
             std::bind(&mynav::pathControlModeCallback, this, std::placeholders::_1),
+            status_options);
+        local_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
+            local_replan_map_topic_, rclcpp::QoS(1).best_effort(),
+            std::bind(&mynav::localMapCallback, this, std::placeholders::_1),
             status_options);
 
         plan_path_service = create_service<x2bot_teleop::srv::SetInt>(
@@ -798,6 +823,11 @@ private:
     rclcpp::Subscription<geometry_msgs::msg::Vector3Stamped>::SharedPtr reference_status_sub_;
     rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr terminal_motion_state_sub_;
     rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr path_control_mode_sub_;
+    rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr local_map_sub_;
+    std::mutex local_map_mutex_;
+    nav_msgs::msg::OccupancyGrid local_replan_map_;
+    std::chrono::steady_clock::time_point local_replan_map_received_at_;
+    bool have_local_replan_map_ = false;
     rclcpp::TimerBase::SharedPtr safety_phase_timer_;
     rclcpp::TimerBase::SharedPtr marker_timer_;
     rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr topology_safety_phase_pub_;
@@ -870,6 +900,10 @@ private:
     std::string static_map_image_path_;
     std::string loaded_positions_fingerprint_;
     std::string loaded_static_map_fingerprint_;
+    std::string local_replan_map_topic_;
+    double local_replan_map_timeout_;
+    int local_replan_block_threshold_;
+    double local_replan_cost_weight_;
 
     bool notifyMotionFinished(uint8_t reason)
     {
@@ -1755,6 +1789,108 @@ private:
                           pose.pose.position.y - target_poses[index].y);
     }
 
+    void localMapCallback(const nav_msgs::msg::OccupancyGrid::ConstSharedPtr message)
+    {
+        std::lock_guard<std::mutex> lock(local_map_mutex_);
+        local_replan_map_ = *message;
+        local_replan_map_received_at_ = std::chrono::steady_clock::now();
+        have_local_replan_map_ = true;
+    }
+
+    bool localMapSnapshot(nav_msgs::msg::OccupancyGrid &map, std::string &reason)
+    {
+        std::lock_guard<std::mutex> lock(local_map_mutex_);
+        if (!have_local_replan_map_)
+        {
+            reason = "local costmap has not been received";
+            return false;
+        }
+        const double age = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - local_replan_map_received_at_).count();
+        if (!std::isfinite(age) || age > local_replan_map_timeout_)
+        {
+            std::ostringstream stream;
+            stream << "local costmap is stale (age=" << std::fixed
+                   << std::setprecision(3) << age << "s)";
+            reason = stream.str();
+            return false;
+        }
+        if (local_replan_map_.header.frame_id != "map" &&
+            local_replan_map_.header.frame_id != "/map")
+        {
+            reason = "local costmap frame is not map";
+            return false;
+        }
+        const std::size_t expected =
+            static_cast<std::size_t>(local_replan_map_.info.width) *
+            local_replan_map_.info.height;
+        if (local_replan_map_.info.width == 0 || local_replan_map_.info.height == 0 ||
+            !std::isfinite(local_replan_map_.info.resolution) ||
+            local_replan_map_.info.resolution <= 0.0 ||
+            local_replan_map_.data.size() != expected)
+        {
+            reason = "local costmap dimensions are invalid";
+            return false;
+        }
+        map = local_replan_map_;
+        return true;
+    }
+
+    bool worldToLocalMap(const nav_msgs::msg::OccupancyGrid &map,
+                         double wx, double wy, int &mx, int &my) const
+    {
+        const geometry_msgs::msg::Quaternion &q = map.info.origin.orientation;
+        const double yaw = std::atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+        const double dx = wx - map.info.origin.position.x;
+        const double dy = wy - map.info.origin.position.y;
+        const double local_x = std::cos(yaw) * dx + std::sin(yaw) * dy;
+        const double local_y = -std::sin(yaw) * dx + std::cos(yaw) * dy;
+        mx = static_cast<int>(std::floor(local_x / map.info.resolution));
+        my = static_cast<int>(std::floor(local_y / map.info.resolution));
+        return mx >= 0 && my >= 0 && mx < static_cast<int>(map.info.width) &&
+               my < static_cast<int>(map.info.height);
+    }
+
+    LocalSegmentCost localSegmentCost(const nav_msgs::msg::OccupancyGrid &map,
+                                      double x0, double y0,
+                                      double x1, double y1) const
+    {
+        LocalSegmentCost result;
+        const double length = std::hypot(x1 - x0, y1 - y0);
+        const double sample_step =
+            std::max(0.01, static_cast<double>(map.info.resolution) * 0.5);
+        const int samples = std::max(1, static_cast<int>(std::ceil(length / sample_step)));
+        const double integrated_step = length / samples;
+        for (int sample = 0; sample <= samples; ++sample)
+        {
+            const double ratio = static_cast<double>(sample) / samples;
+            const double wx = x0 + (x1 - x0) * ratio;
+            const double wy = y0 + (y1 - y0) * ratio;
+            int mx = 0;
+            int my = 0;
+            if (!worldToLocalMap(map, wx, wy, mx, my))
+            {
+                continue;
+            }
+            const int value = map.data[my * map.info.width + mx];
+            if (value < 0)
+            {
+                continue;
+            }
+            if (value >= local_replan_block_threshold_)
+            {
+                result.blocked = true;
+                return result;
+            }
+            const double normalized = static_cast<double>(value) / 100.0;
+            result.penalty += local_replan_cost_weight_ * normalized * normalized *
+                              integrated_step;
+        }
+        return result;
+    }
+
     bool getCurrentRobotPose(geometry_msgs::msg::PoseStamped &pose)
     {
         try
@@ -2328,15 +2464,28 @@ private:
         return false;
     }
 
-    std::vector<int> dijkstraShortestPath(int start, int goal,
-                                          bool fixed_route = false)
+    std::vector<int> dijkstraShortestPath(
+        int start, int goal, bool fixed_route = false,
+        const nav_msgs::msg::OccupancyGrid *local_map = nullptr,
+        double *path_cost = nullptr, int *path_failure_score = nullptr,
+        bool log_failed_edges = true)
     {
+        if (path_cost != nullptr)
+        {
+            *path_cost = std::numeric_limits<double>::infinity();
+        }
+        if (path_failure_score != nullptr)
+        {
+            *path_failure_score = std::numeric_limits<int>::max();
+        }
         if (!validIndex(start) || !validIndex(goal))
         {
             return {};
         }
         if (start == goal)
         {
+            if (path_cost != nullptr) *path_cost = 0.0;
+            if (path_failure_score != nullptr) *path_failure_score = 0;
             return {start};
         }
 
@@ -2387,11 +2536,22 @@ private:
                 {
                     continue;
                 }
+                LocalSegmentCost local_cost;
+                if (local_map != nullptr)
+                {
+                    local_cost = localSegmentCost(
+                        *local_map, target_poses[node].x, target_poses[node].y,
+                        target_poses[edge.to].x, target_poses[edge.to].y);
+                    if (local_cost.blocked)
+                    {
+                        continue;
+                    }
+                }
                 const int edge_failure_score =
                     fixed_route ? 0 : std::max(0, edge.failure_count);
                 const int next_failure_score =
                     failure_score + edge_failure_score;
-                const double next_cost = cost + edge.cost;
+                const double next_cost = cost + edge.cost + local_cost.penalty;
                 if (next_failure_score < failed_edge_score[edge.to] ||
                     (next_failure_score == failed_edge_score[edge.to] &&
                      next_cost < dist[edge.to]))
@@ -2424,13 +2584,115 @@ private:
             return {};
         }
         std::reverse(path.begin(), path.end());
-        if (!fixed_route && failed_edge_score[goal] > 0)
+        if (path_cost != nullptr) *path_cost = dist[goal];
+        if (path_failure_score != nullptr) *path_failure_score = failed_edge_score[goal];
+        if (log_failed_edges && !fixed_route && failed_edge_score[goal] > 0)
         {
             RCLCPP_WARN(get_logger(), "Topology path to P%d must retry previously failed edges "
                      "(failure score=%d); no clean alternative is available.",
                      goal, failed_edge_score[goal]);
         }
         return path;
+    }
+
+    bool localAwareReroute(int goal, std::vector<int> &path,
+                           bool &map_ready, std::string &reason)
+    {
+        path.clear();
+        map_ready = false;
+        if (!validIndex(goal))
+        {
+            reason = "invalid target topology node";
+            return false;
+        }
+
+        nav_msgs::msg::OccupancyGrid local_map;
+        if (!localMapSnapshot(local_map, reason))
+        {
+            return false;
+        }
+        map_ready = true;
+
+        geometry_msgs::msg::PoseStamped robot_pose;
+        if (!getCurrentRobotPose(robot_pose))
+        {
+            reason = "current robot pose is unavailable";
+            return false;
+        }
+
+        const double robot_x = robot_pose.pose.position.x;
+        const double robot_y = robot_pose.pose.position.y;
+        const int node_count = static_cast<int>(target_poses.size());
+        double connector_radius = 0.0;
+        for (const auto &edges : graph)
+        {
+            for (const TopoEdge &edge : edges.second)
+            {
+                connector_radius = std::max(connector_radius, edge.length);
+            }
+        }
+        connector_radius = std::max(0.1, connector_radius);
+        int selected_node = -1;
+        int selected_failure_score = std::numeric_limits<int>::max();
+        double selected_cost = std::numeric_limits<double>::infinity();
+        int locally_blocked_connectors = 0;
+        for (int node = 0; node < node_count; ++node)
+        {
+            const double connector_length = std::hypot(
+                target_poses[node].x - robot_x, target_poses[node].y - robot_y);
+            if (connector_length > connector_radius + 1e-9 ||
+                !staticMapSegmentFree(robot_x, robot_y,
+                                      target_poses[node].x, target_poses[node].y))
+            {
+                continue;
+            }
+
+            const LocalSegmentCost local_cost = localSegmentCost(
+                local_map, robot_x, robot_y,
+                target_poses[node].x, target_poses[node].y);
+            if (local_cost.blocked)
+            {
+                ++locally_blocked_connectors;
+                continue;
+            }
+
+            double topology_cost = 0.0;
+            int topology_failure_score = 0;
+            const std::vector<int> candidate_path = dijkstraShortestPath(
+                node, goal, false, &local_map, &topology_cost,
+                &topology_failure_score, false);
+            if (candidate_path.empty())
+            {
+                continue;
+            }
+            const double total_cost = connector_length + local_cost.penalty + topology_cost;
+            if (topology_failure_score < selected_failure_score ||
+                (topology_failure_score == selected_failure_score &&
+                 total_cost + 1e-12 < selected_cost))
+            {
+                selected_node = node;
+                selected_failure_score = topology_failure_score;
+                selected_cost = total_cost;
+                path = candidate_path;
+            }
+        }
+
+        if (selected_node < 0 || path.empty())
+        {
+            std::ostringstream stream;
+            stream << "no safe route through a topology connector within "
+                   << std::fixed << std::setprecision(2) << connector_radius
+                   << "m; local map rejected " << locally_blocked_connectors
+                   << " connector(s)";
+            reason = stream.str();
+            return false;
+        }
+
+        RCLCPP_INFO(get_logger(),
+            "Local-aware topology replan selected P%d -> P%d: score=%.2f, failure_score=%d, local rejected %d connector(s).",
+            selected_node, goal, selected_cost, selected_failure_score,
+            locally_blocked_connectors);
+        return true;
     }
 
     void blockEdge(int from, int to)
@@ -3359,18 +3621,54 @@ private:
                     RCLCPP_WARN(get_logger(), "Forward topology re-entry failed; fall back to nearest reachable node.");
                 }
 
-                if (!needs_forward_reentry && validIndex(previous_index))
+                if (!needs_forward_reentry)
                 {
-                    blockEdge(previous_index, next_index);
+                    if (validIndex(previous_index))
+                    {
+                        blockEdge(previous_index, next_index);
+                    }
+
+                    std::vector<int> local_path;
+                    bool map_ready = false;
+                    std::string local_reason;
+                    bool local_plan_ok = localAwareReroute(
+                        target_index, local_path, map_ready, local_reason);
+
+                    if (!local_plan_ok && map_ready && validIndex(previous_index))
+                    {
+                        std::vector<int> topology_path;
+                        if (dijkstraShortestPath(previous_index, target_index).empty() &&
+                            waitForTemporaryPath(previous_index, target_index, topology_path))
+                        {
+                            local_plan_ok = localAwareReroute(
+                                target_index, local_path, map_ready, local_reason);
+                        }
+                    }
+
+                    if (!local_plan_ok)
+                    {
+                        RCLCPP_ERROR(get_logger(),
+                            "Local-aware topology replan to P%d refused: %s.",
+                            target_index, local_reason.c_str());
+                        stopRobot();
+                        active_next_index_ = -1;
+                        publishTopologyMarkers();
+                        return false;
+                    }
+
+                    path_indices.swap(local_path);
+                    start_index = path_indices.front();
+                    execution_start = 0;
+                    ++replan_count;
+                    publishTopologyPath(path_indices);
+                    RCLCPP_WARN_STREAM(get_logger(), formatPathMessage(
+                        "local-map-aware replan after blocked edge:", path_indices));
+                    break;
                 }
 
-                // Replan from the last confirmed topology node.  Selecting an
-                // arbitrary nearest node here can choose the failed edge's
-                // destination while the robot is between nodes, effectively
-                // bypassing the temporary edge block and making it turn back
-                // and forth between routes.  A controlled return to the last
-                // confirmed node is conservative and gives Dijkstra a stable
-                // branch point for the detour.
+                // Pause and B-spline-deviation re-entry retain their existing
+                // nearest-node fallback. Local-map scoring applies after a
+                // failed edge has completed its normal blocked timeout.
                 if (validIndex(previous_index))
                 {
                     start_index = previous_index;
