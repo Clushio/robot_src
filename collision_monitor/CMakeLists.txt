@@ -49,10 +49,12 @@ target_include_directories(collision_monitor_node PRIVATE include)
 target_link_libraries(collision_monitor_node collision_checker)
 ament_target_dependencies(collision_monitor_node ${PACKAGE_DEPENDENCIES})
 
-install(TARGETS collision_checker collision_monitor_node
+install(TARGETS collision_checker
   EXPORT collision_checkerTargets
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
+)
+install(TARGETS collision_monitor_node
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 

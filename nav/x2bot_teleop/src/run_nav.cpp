@@ -1,5 +1,6 @@
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <cmd_vel_arbiter/srv/finish_motion.hpp>
+#include <collision_monitor/collision_checker.h>
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <diagnostic_msgs/msg/diagnostic_status.hpp>
 #include <diagnostic_msgs/msg/key_value.hpp>
@@ -263,7 +264,7 @@ public:
           static_map_unknown_is_obstacle_(true),
           static_map_inflation_radius_(std::hypot(0.36, 0.25) + 0.15),
           local_replan_map_timeout_(0.30),
-          local_replan_block_threshold_(98),
+          local_replan_block_threshold_(100),
           local_replan_cost_weight_(2.0)
     {
         maps_dir_ = defaultMapsDir();
@@ -316,6 +317,7 @@ public:
         local_replan_block_threshold_ =
             std::max(1, std::min(100, local_replan_block_threshold_));
         local_replan_cost_weight_ = std::max(0.0, local_replan_cost_weight_);
+        configureLocalReplanFootprint();
         fixed_route_behavior_tree_ = declare_parameter<std::string>(
             "fixed_route_behavior_tree", defaultFixedRouteBehaviorTree());
         if (!fileExists(fixed_route_behavior_tree_))
@@ -904,6 +906,10 @@ private:
     double local_replan_map_timeout_;
     int local_replan_block_threshold_;
     double local_replan_cost_weight_;
+    collision_monitor::CollisionChecker local_replan_collision_checker_;
+    collision_monitor::GridPolicy local_replan_grid_policy_;
+    bool local_replan_footprint_ready_ = false;
+    double local_replan_max_corner_step_ = 0.025;
 
     bool notifyMotionFinished(uint8_t reason)
     {
@@ -1789,6 +1795,66 @@ private:
                           pose.pose.position.y - target_poses[index].y);
     }
 
+    void configureLocalReplanFootprint()
+    {
+        const std::vector<double> default_footprint = {
+            0.36, 0.25, 0.36, -0.25, -0.36, -0.25, -0.36, 0.25};
+        const std::vector<double> coordinates = declare_parameter<std::vector<double>>(
+            "local_replan_footprint", default_footprint);
+        if (coordinates.size() < 6 || coordinates.size() % 2 != 0)
+        {
+            RCLCPP_ERROR(get_logger(),
+                "Local topology replanning disabled: local_replan_footprint must contain at least three x/y pairs.");
+            return;
+        }
+
+        std::vector<geometry_msgs::msg::Point> footprint;
+        footprint.reserve(coordinates.size() / 2);
+        for (std::size_t i = 0; i < coordinates.size(); i += 2)
+        {
+            if (!std::isfinite(coordinates[i]) || !std::isfinite(coordinates[i + 1]))
+            {
+                RCLCPP_ERROR(get_logger(),
+                    "Local topology replanning disabled: footprint coordinates must be finite.");
+                return;
+            }
+            geometry_msgs::msg::Point point;
+            point.x = coordinates[i];
+            point.y = coordinates[i + 1];
+            footprint.push_back(point);
+        }
+
+        double footprint_padding = declare_parameter<double>(
+            "local_replan_footprint_padding", 0.10);
+        footprint_padding = std::max(0.0, footprint_padding);
+        local_replan_grid_policy_.occupied_threshold = declare_parameter<int>(
+            "local_replan_occupied_threshold", local_replan_block_threshold_);
+        local_replan_grid_policy_.unknown_is_obstacle = declare_parameter<bool>(
+            "local_replan_unknown_is_obstacle", false);
+        local_replan_grid_policy_.outside_is_obstacle = declare_parameter<bool>(
+            "local_replan_outside_is_obstacle", false);
+        local_replan_max_corner_step_ = declare_parameter<double>(
+            "local_replan_max_corner_step", local_replan_max_corner_step_);
+        local_replan_grid_policy_.occupied_threshold = std::max(
+            0, std::min(100, local_replan_grid_policy_.occupied_threshold));
+        local_replan_max_corner_step_ = std::max(0.005, local_replan_max_corner_step_);
+
+        std::string error;
+        if (!local_replan_collision_checker_.setFootprint(
+                footprint, footprint_padding, &error))
+        {
+            RCLCPP_ERROR(get_logger(),
+                "Local topology replanning disabled: footprint setup failed: %s.",
+                error.c_str());
+            return;
+        }
+        local_replan_footprint_ready_ = true;
+        RCLCPP_INFO(get_logger(),
+            "Local topology replanning uses %zu footprint vertices with %.3f m navigation padding and collision threshold %d.",
+            footprint.size(), footprint_padding,
+            local_replan_grid_policy_.occupied_threshold);
+    }
+
     void localMapCallback(const nav_msgs::msg::OccupancyGrid::ConstSharedPtr message)
     {
         std::lock_guard<std::mutex> lock(local_map_mutex_);
@@ -1858,16 +1924,34 @@ private:
                                       double x1, double y1) const
     {
         LocalSegmentCost result;
+        if (!local_replan_footprint_ready_)
+        {
+            result.blocked = true;
+            return result;
+        }
         const double length = std::hypot(x1 - x0, y1 - y0);
-        const double sample_step =
-            std::max(0.01, static_cast<double>(map.info.resolution) * 0.5);
+        const double sample_step = std::max(
+            0.005, std::min(static_cast<double>(map.info.resolution) * 0.5,
+                            local_replan_max_corner_step_));
         const int samples = std::max(1, static_cast<int>(std::ceil(length / sample_step)));
         const double integrated_step = length / samples;
+        const double segment_yaw =
+            length > 1e-9 ? std::atan2(y1 - y0, x1 - x0) : 0.0;
         for (int sample = 0; sample <= samples; ++sample)
         {
             const double ratio = static_cast<double>(sample) / samples;
             const double wx = x0 + (x1 - x0) * ratio;
             const double wy = y0 + (y1 - y0) * ratio;
+            collision_monitor::Pose2D footprint_pose;
+            footprint_pose.x = wx;
+            footprint_pose.y = wy;
+            footprint_pose.yaw = segment_yaw;
+            if (local_replan_collision_checker_.poseCollides(
+                    footprint_pose, map, local_replan_grid_policy_))
+            {
+                result.blocked = true;
+                return result;
+            }
             int mx = 0;
             int my = 0;
             if (!worldToLocalMap(map, wx, wy, mx, my))
@@ -1878,11 +1962,6 @@ private:
             if (value < 0)
             {
                 continue;
-            }
-            if (value >= local_replan_block_threshold_)
-            {
-                result.blocked = true;
-                return result;
             }
             const double normalized = static_cast<double>(value) / 100.0;
             result.penalty += local_replan_cost_weight_ * normalized * normalized *
@@ -2595,14 +2674,22 @@ private:
         return path;
     }
 
-    bool localAwareReroute(int goal, std::vector<int> &path,
-                           bool &map_ready, std::string &reason)
+    bool localAwareReroute(
+        int goal, std::vector<int> &path, bool &map_ready,
+        std::string &reason,
+        const std::map<int, std::chrono::steady_clock::time_point> *
+            blocked_reentry_nodes = nullptr)
     {
         path.clear();
         map_ready = false;
         if (!validIndex(goal))
         {
             reason = "invalid target topology node";
+            return false;
+        }
+        if (!local_replan_footprint_ready_)
+        {
+            reason = "collision-monitor footprint is unavailable";
             return false;
         }
 
@@ -2636,8 +2723,20 @@ private:
         int selected_failure_score = std::numeric_limits<int>::max();
         double selected_cost = std::numeric_limits<double>::infinity();
         int locally_blocked_connectors = 0;
+        int cooldown_blocked_connectors = 0;
+        const auto current_time = std::chrono::steady_clock::now();
         for (int node = 0; node < node_count; ++node)
         {
+            if (blocked_reentry_nodes != nullptr)
+            {
+                const auto blocked_it = blocked_reentry_nodes->find(node);
+                if (blocked_it != blocked_reentry_nodes->end() &&
+                    current_time < blocked_it->second)
+                {
+                    ++cooldown_blocked_connectors;
+                    continue;
+                }
+            }
             const double connector_length = std::hypot(
                 target_poses[node].x - robot_x, target_poses[node].y - robot_y);
             if (connector_length > connector_radius + 1e-9 ||
@@ -2683,15 +2782,16 @@ private:
             stream << "no safe route through a topology connector within "
                    << std::fixed << std::setprecision(2) << connector_radius
                    << "m; local map rejected " << locally_blocked_connectors
-                   << " connector(s)";
+                   << " connector(s), cooldown rejected "
+                   << cooldown_blocked_connectors << " connector(s)";
             reason = stream.str();
             return false;
         }
 
         RCLCPP_INFO(get_logger(),
-            "Local-aware topology replan selected P%d -> P%d: score=%.2f, failure_score=%d, local rejected %d connector(s).",
+            "Local-aware topology replan selected P%d -> P%d: score=%.2f, failure_score=%d, local rejected %d connector(s), cooldown rejected %d connector(s).",
             selected_node, goal, selected_cost, selected_failure_score,
-            locally_blocked_connectors);
+            locally_blocked_connectors, cooldown_blocked_connectors);
         return true;
     }
 
@@ -3523,6 +3623,9 @@ private:
         std::size_t execution_start =
             initialTopologyExecutionStart(path_indices);
         int replan_count = 0;
+        int active_reentry_node = -1;
+        std::map<int, std::chrono::steady_clock::time_point> blocked_reentry_until;
+        std::map<int, int> reentry_failure_count;
         const int max_replans = std::max(3, static_cast<int>(target_poses.size()) * 2);
 
         while (rclcpp::ok() && replan_count <= max_replans)
@@ -3558,6 +3661,10 @@ private:
                                        static_cast<int>(i), false);
                 if (goal_result == GOAL_REACHED)
                 {
+                    if (next_index == active_reentry_node)
+                    {
+                        active_reentry_node = -1;
+                    }
                     if (start_segment_active &&
                         previous_index == mission_start_index)
                     {
@@ -3610,6 +3717,7 @@ private:
                         path_indices.swap(reentry_path);
                         execution_start = reentry_execution_start;
                         start_index = path_indices[execution_start];
+                        active_reentry_node = -1;
                         ++replan_count;
                         publishTopologyPath(path_indices);
                         RCLCPP_WARN_STREAM(get_logger(), formatPathMessage(
@@ -3627,12 +3735,29 @@ private:
                     {
                         blockEdge(previous_index, next_index);
                     }
+                    else if (next_index == active_reentry_node)
+                    {
+                        const int failure_count = ++reentry_failure_count[next_index];
+                        const double cooldown = std::min(
+                            blocked_cooldown_initial_ * std::pow(
+                                blocked_backoff_factor_, failure_count - 1),
+                            blocked_cooldown_max_);
+                        blocked_reentry_until[next_index] =
+                            std::chrono::steady_clock::now() +
+                            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                std::chrono::duration<double>(cooldown));
+                        RCLCPP_WARN(get_logger(),
+                            "Temporarily blocked failed local topology connector to P%d for %.1f seconds (failure count=%d).",
+                            next_index, cooldown, failure_count);
+                        active_reentry_node = -1;
+                    }
 
                     std::vector<int> local_path;
                     bool map_ready = false;
                     std::string local_reason;
                     bool local_plan_ok = localAwareReroute(
-                        target_index, local_path, map_ready, local_reason);
+                        target_index, local_path, map_ready, local_reason,
+                        &blocked_reentry_until);
 
                     if (!local_plan_ok && map_ready && validIndex(previous_index))
                     {
@@ -3641,7 +3766,8 @@ private:
                             waitForTemporaryPath(previous_index, target_index, topology_path))
                         {
                             local_plan_ok = localAwareReroute(
-                                target_index, local_path, map_ready, local_reason);
+                                target_index, local_path, map_ready, local_reason,
+                                &blocked_reentry_until);
                         }
                     }
 
@@ -3658,6 +3784,7 @@ private:
 
                     path_indices.swap(local_path);
                     start_index = path_indices.front();
+                    active_reentry_node = path_indices.front();
                     execution_start = 0;
                     ++replan_count;
                     publishTopologyPath(path_indices);
@@ -3685,6 +3812,7 @@ private:
                     }
                 }
                 path_indices = dijkstraShortestPath(start_index, target_index);
+                active_reentry_node = -1;
                 execution_start = 0;
                 ++replan_count;
                 if (path_indices.empty())
