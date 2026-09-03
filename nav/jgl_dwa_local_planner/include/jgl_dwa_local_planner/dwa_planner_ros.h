@@ -150,6 +150,10 @@ private:
       geometry_msgs::msg::Twist &cmd_vel, bool &hard_failure);
   bool referencePathObstacleDistance(
       const nav_msgs::msg::Path &path, double &obstacle_distance);
+  bool legacyPathObstacleDistance(double &obstacle_distance);
+  bool pathObstacleDistance(
+      const std::vector<geometry_msgs::msg::PoseStamped> &path,
+      unsigned int start_index, double &obstacle_distance);
   bool fixedRouteBlocked();
   void fixedRouteModeCallback(const std_msgs::msg::Bool::SharedPtr mode);
   bool costmapPointBlocked(

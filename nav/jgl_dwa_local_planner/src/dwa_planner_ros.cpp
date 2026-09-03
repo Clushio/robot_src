@@ -808,7 +808,21 @@ namespace jgl_dwa_local_planner
       const nav_msgs::msg::Path &path, double &obstacle_distance)
   {
     obstacle_distance = std::numeric_limits<double>::infinity();
-    if (path.poses.empty() || costmap_ros_ == NULL || costmap_ros_->getCostmap() == NULL)
+    if (path.poses.empty())
+    {
+      return false;
+    }
+    unsigned int index = reference_path_manager_.currentPathIndex();
+    index = std::min(index, static_cast<unsigned int>(path.poses.size() - 1));
+    return pathObstacleDistance(path.poses, index, obstacle_distance);
+  }
+
+  bool DWAPlannerROS::pathObstacleDistance(
+      const std::vector<geometry_msgs::msg::PoseStamped> &path,
+      unsigned int start_index, double &obstacle_distance)
+  {
+    obstacle_distance = std::numeric_limits<double>::infinity();
+    if (path.empty() || costmap_ros_ == NULL || costmap_ros_->getCostmap() == NULL)
     {
       return false;
     }
@@ -817,26 +831,23 @@ namespace jgl_dwa_local_planner
     const double resolution = std::max(0.01, costmap->getResolution());
     const int radius_cells =
         static_cast<int>(std::ceil(reference_safe_distance_ / resolution));
-    const double check_distance = reference_obstacle_slowdown_distance_;
-
-    unsigned int index = reference_path_manager_.currentPathIndex();
-    index = std::min(index, static_cast<unsigned int>(path.poses.size() - 1));
+    start_index = std::min(start_index, static_cast<unsigned int>(path.size() - 1));
 
     double walked = 0.0;
     geometry_msgs::msg::PoseStamped previous = current_pose_;
-    for (unsigned int i = index; i < path.poses.size(); ++i)
+    for (unsigned int i = start_index; i < path.size(); ++i)
     {
-      walked += comDistance(previous, path.poses[i]);
-      if (walked > check_distance)
+      walked += comDistance(previous, path[i]);
+      if (walked > reference_obstacle_slowdown_distance_)
       {
         break;
       }
-      previous = path.poses[i];
+      previous = path[i];
 
       unsigned int mx = 0;
       unsigned int my = 0;
-      if (!costmap->worldToMap(path.poses[i].pose.position.x,
-                               path.poses[i].pose.position.y,
+      if (!costmap->worldToMap(path[i].pose.position.x,
+                               path[i].pose.position.y,
                                mx, my))
       {
         continue;
@@ -848,6 +859,28 @@ namespace jgl_dwa_local_planner
       }
     }
     return false;
+  }
+
+  bool DWAPlannerROS::legacyPathObstacleDistance(double &obstacle_distance)
+  {
+    obstacle_distance = std::numeric_limits<double>::infinity();
+    if (linePath.empty() || costmap_ros_ == NULL || costmap_ros_->getCostmap() == NULL)
+    {
+      return false;
+    }
+
+    unsigned int nearest_index = 0;
+    double nearest_distance = std::numeric_limits<double>::infinity();
+    for (unsigned int i = 0; i < linePath.size(); ++i)
+    {
+      const double distance = comDistance(current_pose_, linePath[i]);
+      if (distance < nearest_distance)
+      {
+        nearest_distance = distance;
+        nearest_index = i;
+      }
+    }
+    return pathObstacleDistance(linePath, nearest_index, obstacle_distance);
   }
 
   bool DWAPlannerROS::fixedRouteBlocked()
@@ -2022,9 +2055,54 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::msg::
             "Fixed route: obstacle detected on the locked legacy path; wait in place until it clears.");
         return command;
       }
+
+      double legacy_obstacle_distance = std::numeric_limits<double>::infinity();
+      const bool legacy_obstacle_ahead =
+          legacyPathObstacleDistance(legacy_obstacle_distance);
+      if (legacy_obstacle_ahead)
+      {
+        if (reference_obstacle_start_.nanoseconds() == 0)
+        {
+          reference_obstacle_start_ = clock_->now();
+          RCLCPP_WARN(logger_,
+              "JGL legacy path: obstacle %.3f m ahead on path, enter staged slowdown.",
+              legacy_obstacle_distance);
+        }
+        if ((clock_->now() - reference_obstacle_start_).seconds() >= obstacle_wait_time_)
+        {
+          stopCmd(cmd_vel);
+          RCLCPP_WARN_THROTTLE(
+              logger_, *clock_, 1000,
+              "JGL legacy path: obstacle wait timeout, keep stopped and let topology replan.");
+          throw std::runtime_error("legacy path obstacle wait timeout");
+        }
+      }
+      else
+      {
+        reference_obstacle_start_ = rclcpp::Time(0, 0, clock_->get_clock_type());
+      }
+
       if (!lineComputeVelocityCommands(linePath, cmd_vel))
       {
         throw std::runtime_error("legacy line controller failed");
+      }
+      if (legacy_obstacle_ahead)
+      {
+        const double obstacle_scale = referenceObstacleSpeedScale(
+            legacy_obstacle_distance,
+            reference_obstacle_slowdown_distance_,
+            reference_obstacle_stop_distance_);
+        cmd_vel.linear.x *= obstacle_scale;
+        cmd_vel.linear.y *= obstacle_scale;
+        cmd_vel.angular.z *= obstacle_scale;
+        if (obstacle_scale <= 0.0)
+        {
+          stopCmd(cmd_vel);
+        }
+        RCLCPP_WARN_THROTTLE(
+            logger_, *clock_, 500,
+            "JGL legacy path: obstacle distance=%.3f m, candidate speed scale=%.2f.",
+            legacy_obstacle_distance, obstacle_scale);
       }
       return command;
     }
