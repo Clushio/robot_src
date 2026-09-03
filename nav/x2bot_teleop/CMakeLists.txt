@@ -26,6 +26,7 @@ find_package(tf2_ros REQUIRED)
 find_package(visualization_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
+  "srv/EdgeBlockState.srv"
   "srv/NavConfig.srv"
   "srv/SetInt.srv"
   "srv/SetTagY.srv"

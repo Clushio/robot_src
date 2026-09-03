@@ -29,6 +29,7 @@
 #include <visualization_msgs/msg/marker.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <x2bot_teleop/srv/nav_config.hpp>
+#include <x2bot_teleop/srv/edge_block_state.hpp>
 #include <x2bot_teleop/srv/set_int.hpp>
 #include <x2bot_teleop/terminal_goal_policy.h>
 
@@ -70,6 +71,7 @@ struct TopoEdge {
     bool bidirectional;
     bool configured_blocked;
     std::chrono::steady_clock::time_point blocked_until;
+    std::chrono::steady_clock::time_point failure_decay_at;
     int failure_count;
     std::string source;
 };
@@ -408,6 +410,11 @@ public:
             "plan_path_and_go",
             std::bind(&mynav::planPathCallback, this, std::placeholders::_1, std::placeholders::_2),
             rmw_qos_profile_services_default, plan_callback_group_);
+        edge_block_state_service_ = create_service<x2bot_teleop::srv::EdgeBlockState>(
+            "/anav/edge_block_state",
+            std::bind(&mynav::edgeBlockStateCallback, this,
+                      std::placeholders::_1, std::placeholders::_2),
+            rmw_qos_profile_services_default, control_callback_group_);
         RCLCPP_INFO(get_logger(), "Topology navigation service /plan_path_and_go started.");
         initializeGlobalAC();
     }
@@ -851,6 +858,7 @@ private:
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr cancel_navigation_service_;
     rclcpp::Service<x2bot_teleop::srv::NavConfig>::SharedPtr nav_config_service_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reload_topology_service_;
+    rclcpp::Service<x2bot_teleop::srv::EdgeBlockState>::SharedPtr edge_block_state_service_;
     rclcpp::Client<cmd_vel_arbiter::srv::FinishMotion>::SharedPtr finish_motion_client_;
 
     int current_pose_index;
@@ -881,6 +889,7 @@ private:
     bool block_bidirectional_;
     std::atomic<bool> navigation_active_{false};
     std::mutex nav_config_mutex_;
+    mutable std::mutex edge_block_mutex_;
     std::vector<int> active_path_;
     int active_next_index_ = -1;
     std::string maps_dir_;
@@ -1317,11 +1326,14 @@ private:
             response.message = "导航任务正在执行，拒绝热加载拓扑";
             return true;
         }
-        if (!loadTopology())
         {
-            response.success = false;
-            response.message = "拓扑校验失败，继续使用上一版本";
-            return true;
+            std::lock_guard<std::mutex> edge_lock(edge_block_mutex_);
+            if (!loadTopology())
+            {
+                response.success = false;
+                response.message = "拓扑校验失败，继续使用上一版本";
+                return true;
+            }
         }
         active_path_.clear();
         active_next_index_ = -1;
@@ -1329,6 +1341,116 @@ private:
         response.success = true;
         response.message = "拓扑已校验并热加载";
         return true;
+    }
+
+    int effectiveFailureCount(
+        const TopoEdge &edge,
+        const std::chrono::steady_clock::time_point &steady_now) const
+    {
+        if (edge.failure_count <= 0)
+        {
+            return 0;
+        }
+        if (edge.failure_decay_at == std::chrono::steady_clock::time_point{} ||
+            steady_now < edge.failure_decay_at)
+        {
+            return edge.failure_count;
+        }
+        const double decay_period = std::max(0.1, blocked_cooldown_initial_);
+        const int decay_steps = 1 + static_cast<int>(std::floor(
+            std::chrono::duration<double>(steady_now - edge.failure_decay_at).count() /
+            decay_period));
+        return std::max(0, edge.failure_count - decay_steps);
+    }
+
+    void edgeBlockStateCallback(
+        const std::shared_ptr<x2bot_teleop::srv::EdgeBlockState::Request> request,
+        std::shared_ptr<x2bot_teleop::srv::EdgeBlockState::Response> response)
+    {
+        if (request->clear && navigation_active_.load())
+        {
+            response->success = false;
+            response->message = "导航任务正在执行，不能清除边封锁记录";
+            return;
+        }
+
+        std::lock_guard<std::mutex> edge_lock(edge_block_mutex_);
+        if (request->clear)
+        {
+            bool found = false;
+            bool clear_reverse = false;
+            auto clear_direction = [&](int from, int to) {
+                auto graph_it = graph.find(from);
+                if (graph_it == graph.end()) return;
+                for (TopoEdge &edge : graph_it->second)
+                {
+                    if (edge.to != to) continue;
+                    found = true;
+                    clear_reverse = clear_reverse || edge.bidirectional;
+                    edge.blocked_until = std::chrono::steady_clock::time_point{};
+                    edge.failure_decay_at = std::chrono::steady_clock::time_point{};
+                    edge.failure_count = 0;
+                }
+            };
+            clear_direction(request->from_id, request->to_id);
+            if (clear_reverse) clear_direction(request->to_id, request->from_id);
+            if (!found)
+            {
+                response->success = false;
+                response->message = "指定的拓扑边不存在";
+                return;
+            }
+            RCLCPP_INFO(get_logger(),
+                "Cleared runtime block history for topology edge P%d %s P%d.",
+                request->from_id, clear_reverse ? "<->" : "->", request->to_id);
+            response->message = "已清除指定边的运行时封锁次数";
+        }
+
+        const auto steady_now = std::chrono::steady_clock::now();
+        for (const auto &item : graph)
+        {
+            const int from = item.first;
+            for (const TopoEdge &edge : item.second)
+            {
+                if (edge.bidirectional && from > edge.to) continue;
+                int failure_count = effectiveFailureCount(edge, steady_now);
+                bool configured_blocked = edge.configured_blocked;
+                double remaining_seconds = edgeIsBlocked(edge)
+                    ? std::max(0.0, std::chrono::duration<double>(
+                        edge.blocked_until - steady_now).count()) : 0.0;
+                if (edge.bidirectional)
+                {
+                    const auto reverse_it = graph.find(edge.to);
+                    if (reverse_it != graph.end())
+                    {
+                        for (const TopoEdge &reverse : reverse_it->second)
+                        {
+                            if (reverse.to != from) continue;
+                            failure_count = std::max(
+                                failure_count, effectiveFailureCount(reverse, steady_now));
+                            configured_blocked = configured_blocked || reverse.configured_blocked;
+                            if (edgeIsBlocked(reverse))
+                            {
+                                remaining_seconds = std::max(
+                                    remaining_seconds,
+                                    std::max(0.0, std::chrono::duration<double>(
+                                        reverse.blocked_until - steady_now).count()));
+                            }
+                            break;
+                        }
+                    }
+                }
+                response->from_ids.push_back(from);
+                response->to_ids.push_back(edge.to);
+                response->bidirectional.push_back(edge.bidirectional);
+                response->configured_blocked.push_back(configured_blocked);
+                response->failure_counts.push_back(failure_count);
+                response->remaining_seconds.push_back(remaining_seconds);
+                response->sources.push_back(edge.source);
+            }
+        }
+        response->success = true;
+        if (!request->clear) response->message = "已读取拓扑边封锁状态";
     }
 
     void loadSavedNavConfig(const std::string &filename)
@@ -2149,6 +2271,7 @@ private:
         edge.bidirectional = bidirectional;
         edge.configured_blocked = blocked;
         edge.blocked_until = std::chrono::steady_clock::time_point{};
+        edge.failure_decay_at = std::chrono::steady_clock::time_point{};
         edge.failure_count = 0;
         edge.source = source;
         graph[from].push_back(edge);
@@ -2478,6 +2601,7 @@ private:
 
     double nextTemporaryUnblockDelay() const
     {
+        std::lock_guard<std::mutex> lock(edge_block_mutex_);
         const auto steady_now = std::chrono::steady_clock::now();
         double delay = std::numeric_limits<double>::infinity();
         for (const auto &item : graph)
@@ -2549,6 +2673,7 @@ private:
         double *path_cost = nullptr, int *path_failure_score = nullptr,
         bool log_failed_edges = true)
     {
+        std::lock_guard<std::mutex> lock(edge_block_mutex_);
         if (path_cost != nullptr)
         {
             *path_cost = std::numeric_limits<double>::infinity();
@@ -2569,30 +2694,27 @@ private:
         }
 
         const int n = target_poses.size();
-        // A temporary block is a hard exclusion until blocked_until.  After
-        // it expires, keep the failure history as a route-level hysteresis:
-        // prefer a path containing fewer previously failed edges before
-        // comparing geometric cost.  This prevents a just-expired short edge
-        // from immediately pulling the robot off a healthy detour, while
-        // still allowing the failed edge when it is the only available path.
+        // A temporary block is a hard exclusion until blocked_until. After it
+        // expires, failure history is a finite route penalty that decays one
+        // level per initial-cooldown period.
         std::vector<int> failed_edge_score(n, std::numeric_limits<int>::max());
         std::vector<double> dist(n, std::numeric_limits<double>::infinity());
         std::vector<int> parent(n, -1);
-        typedef std::pair<std::pair<int, double>, int> QueueItem;
+        typedef std::pair<std::pair<double, int>, int> QueueItem;
         std::priority_queue<QueueItem, std::vector<QueueItem>, std::greater<QueueItem>> q;
 
         failed_edge_score[start] = 0;
         dist[start] = 0.0;
-        q.push(QueueItem(std::make_pair(0, 0.0), start));
+        q.push(QueueItem(std::make_pair(0.0, 0), start));
 
         while (!q.empty())
         {
-            const int failure_score = q.top().first.first;
-            const double cost = q.top().first.second;
+            const double cost = q.top().first.first;
+            const int failure_score = q.top().first.second;
             const int node = q.top().second;
             q.pop();
-            if (failure_score > failed_edge_score[node] ||
-                (failure_score == failed_edge_score[node] && cost > dist[node]))
+            if (cost > dist[node] ||
+                (cost == dist[node] && failure_score > failed_edge_score[node]))
             {
                 continue;
             }
@@ -2626,20 +2748,21 @@ private:
                         continue;
                     }
                 }
-                const int edge_failure_score =
-                    fixed_route ? 0 : std::max(0, edge.failure_count);
+                const int edge_failure_score = fixed_route
+                    ? 0 : effectiveFailureCount(edge, std::chrono::steady_clock::now());
                 const int next_failure_score =
                     failure_score + edge_failure_score;
-                const double next_cost = cost + edge.cost + local_cost.penalty;
-                if (next_failure_score < failed_edge_score[edge.to] ||
-                    (next_failure_score == failed_edge_score[edge.to] &&
-                     next_cost < dist[edge.to]))
+                const double next_cost = cost + edge.cost +
+                    edge.cost * edge_failure_score + local_cost.penalty;
+                if (next_cost < dist[edge.to] ||
+                    (next_cost == dist[edge.to] &&
+                     next_failure_score < failed_edge_score[edge.to]))
                 {
                     failed_edge_score[edge.to] = next_failure_score;
                     dist[edge.to] = next_cost;
                     parent[edge.to] = node;
                     q.push(QueueItem(
-                        std::make_pair(next_failure_score, next_cost), edge.to));
+                        std::make_pair(next_cost, next_failure_score), edge.to));
                 }
             }
         }
@@ -2667,8 +2790,8 @@ private:
         if (path_failure_score != nullptr) *path_failure_score = failed_edge_score[goal];
         if (log_failed_edges && !fixed_route && failed_edge_score[goal] > 0)
         {
-            RCLCPP_WARN(get_logger(), "Topology path to P%d must retry previously failed edges "
-                     "(failure score=%d); no clean alternative is available.",
+            RCLCPP_WARN(get_logger(), "Topology path to P%d includes recovering edges "
+                     "(failure score=%d).",
                      goal, failed_edge_score[goal]);
         }
         return path;
@@ -2797,6 +2920,7 @@ private:
 
     void blockEdge(int from, int to)
     {
+        std::lock_guard<std::mutex> lock(edge_block_mutex_);
         if (!validIndex(from) || !validIndex(to))
         {
             return;
@@ -2804,6 +2928,7 @@ private:
 
         int blocked_count = 0;
         double longest_cooldown = 0.0;
+        const auto steady_now = std::chrono::steady_clock::now();
         auto block_one_direction = [&](int a, int b) {
             auto it = graph.find(a);
             if (it == graph.end())
@@ -2818,14 +2943,17 @@ private:
                     {
                         continue;
                     }
-                    edge.failure_count++;
+                    edge.failure_count = effectiveFailureCount(edge, steady_now) + 1;
                     const double cooldown = std::min(
                         blocked_cooldown_initial_ *
                             std::pow(blocked_backoff_factor_, edge.failure_count - 1),
                         blocked_cooldown_max_);
-                    edge.blocked_until = std::chrono::steady_clock::now() +
+                    edge.blocked_until = steady_now +
                         std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                             std::chrono::duration<double>(cooldown));
+                    edge.failure_decay_at = edge.blocked_until +
+                        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                            std::chrono::duration<double>(blocked_cooldown_initial_));
                     longest_cooldown = std::max(longest_cooldown, cooldown);
                     blocked_count++;
                 }
@@ -2845,6 +2973,7 @@ private:
 
     void markEdgeSuccess(int from, int to)
     {
+        std::lock_guard<std::mutex> lock(edge_block_mutex_);
         auto clear_one_direction = [&](int a, int b) {
             auto it = graph.find(a);
             if (it == graph.end())
@@ -2856,6 +2985,7 @@ private:
                 if (edge.to == b)
                 {
                     edge.blocked_until = std::chrono::steady_clock::time_point{};
+                    edge.failure_decay_at = std::chrono::steady_clock::time_point{};
                     edge.failure_count = 0;
                 }
             }
@@ -2901,6 +3031,7 @@ private:
 
     void publishTopologyMarkers()
     {
+        std::lock_guard<std::mutex> lock(edge_block_mutex_);
         visualization_msgs::msg::MarkerArray markers;
 
         visualization_msgs::msg::Marker default_edges =
@@ -3568,6 +3699,10 @@ private:
                 if (result == GOAL_REACHED ||
                     result == GOAL_PAUSED_AFTER_PASS)
                 {
+                    if (validIndex(previous_index))
+                    {
+                        markEdgeSuccess(previous_index, next_index);
+                    }
                     break;
                 }
                 if (result == GOAL_PAUSED)

@@ -90,7 +90,7 @@ for python_path in os.environ.get('PYTHONPATH', '').split(os.pathsep):
 
 from cmd_vel_arbiter.srv import FinishMotion
 from ranger_msgs.msg import MotionState as RangerMotionState
-from x2bot_teleop.srv import NavConfig
+from x2bot_teleop.srv import EdgeBlockState, NavConfig
 from ros2_runtime import (
     Ros2Runtime,
     parse_service_message,
@@ -252,6 +252,8 @@ class MyWindow(QWidget):
     topology_finished_requested = pyqtSignal(bool, str)
     loop_update_requested = pyqtSignal(int, str, str, int, str)
     nav_config_received = pyqtSignal(object, str, bool)
+    edge_block_state_received = pyqtSignal(object, str, bool)
+    edge_block_refresh_requested = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -272,6 +274,7 @@ class MyWindow(QWidget):
         self.safety_pub = None
         self.finish_motion_client = None
         self.nav_config_client = None
+        self.edge_block_state_client = None
         self.tf_buffer = None
         self.tf_listener = None
         self.task_status_sub = None
@@ -312,6 +315,7 @@ class MyWindow(QWidget):
         self.estop_active = False
         self.shutdown_in_progress = False
         self.topology_build_running = False
+        self.edge_block_request_running = False
         self.loop_running = False
         self.loop_waiting_for_nav = False
         self.loop_generation = 0
@@ -340,6 +344,9 @@ class MyWindow(QWidget):
                 )
                 self.nav_config_client = self.ros_node.create_client(
                     NavConfig, '/anav/nav_config'
+                )
+                self.edge_block_state_client = self.ros_node.create_client(
+                    EdgeBlockState, '/anav/edge_block_state'
                 )
                 marker_qos = QoSProfile(
                     depth=1,
@@ -372,6 +379,12 @@ class MyWindow(QWidget):
         self.topology_finished_requested.connect(self.on_topology_finished)
         self.loop_update_requested.connect(self.on_loop_update)
         self.nav_config_received.connect(self.on_nav_config_received)
+        self.edge_block_state_received.connect(
+            self.on_edge_block_state_received
+        )
+        self.edge_block_refresh_requested.connect(
+            self.refresh_edge_block_states
+        )
         if self.ros_available:
             try:
                 self.task_status_sub = self.ros_node.create_subscription(
@@ -849,6 +862,7 @@ class MyWindow(QWidget):
         self.tabs.addTab(self.build_navigation_page(), '导航作业')
         self.tabs.addTab(self.build_loop_page(), '循环任务')
         self.tabs.addTab(self.build_autonav_parameters_page(), '导航参数')
+        self.tabs.addTab(self.build_edge_block_page(), '边封锁')
         self.tabs.addTab(self.build_points_page(), '点位管理')
         self.tabs.addTab(self.build_mapping_page(), '地图构建')
         self.tabs.addTab(self.build_tools_page(), '设备与工具')
@@ -1033,6 +1047,152 @@ class MyWindow(QWidget):
         )
         self.nav_config_state_label.setText(message + active_text)
         self.set_status(message, 'success' if success else 'error')
+
+    def request_edge_block_states(self, clear=False, from_id=-1, to_id=-1):
+        if self.edge_block_request_running:
+            return
+        if not self.ros_available:
+            self.edge_block_state_label.setText(
+                'ROS 未连接，无法读取拓扑边封锁状态。'
+            )
+            return
+        self.edge_block_request_running = True
+        self.edge_block_refresh_button.setEnabled(False)
+        self.edge_block_clear_button.setEnabled(False)
+        self.edge_block_state_label.setText(
+            '正在清除选中边封锁记录…' if clear
+            else '正在读取拓扑边封锁状态…'
+        )
+
+        def call_service():
+            try:
+                if self.edge_block_state_client is None or not (
+                        self.edge_block_state_client.wait_for_service(
+                            timeout_sec=2.0
+                        )):
+                    raise RuntimeError('/anav/edge_block_state is unavailable')
+                request = EdgeBlockState.Request()
+                request.clear = bool(clear)
+                request.from_id = int(from_id)
+                request.to_id = int(to_id)
+                response = wait_future(
+                    self.edge_block_state_client.call_async(request), 3.0
+                )
+                if response is None:
+                    raise RuntimeError('/anav/edge_block_state response timeout')
+                self.edge_block_state_received.emit(
+                    response, response.message, clear
+                )
+            except Exception as error:
+                self.edge_block_state_received.emit(
+                    None, f'拓扑边状态服务不可用：{error}', clear
+                )
+
+        threading.Thread(target=call_service, daemon=True).start()
+
+    def refresh_edge_block_states(self):
+        self.request_edge_block_states()
+
+    def clear_selected_edge_block(self):
+        selected_rows = self.edge_block_table.selectionModel().selectedRows()
+        if not selected_rows:
+            self.set_status('请先选择需要清除记录的拓扑边。', 'warning')
+            return
+        edge_item = self.edge_block_table.item(selected_rows[0].row(), 0)
+        edge = edge_item.data(Qt.UserRole) if edge_item else None
+        if not edge:
+            self.set_status('选中的拓扑边数据无效。', 'error')
+            return
+        if edge.get('configured_blocked'):
+            self.set_status(
+                '该边由 topology.yaml 永久禁用，不能在这里解除。',
+                'warning'
+            )
+            return
+        if edge.get('failure_count', 0) <= 0 and \
+                edge.get('remaining_seconds', 0.0) <= 0.0:
+            self.set_status('选中的拓扑边没有运行时封锁记录。', 'info')
+            return
+        answer = QMessageBox.question(
+            self, '确认清除边封锁记录',
+            f'确定清除 {edge["name"]} 的运行时封锁次数吗？\n'
+            '这会让自动选路重新按正常边使用它。',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if answer == QMessageBox.Yes:
+            self.request_edge_block_states(
+                True, edge['from_id'], edge['to_id']
+            )
+
+    def on_edge_block_state_received(self, response, message, was_clear):
+        self.edge_block_request_running = False
+        self.edge_block_refresh_button.setEnabled(True)
+        self.edge_block_clear_button.setEnabled(True)
+        if response is None or not response.success:
+            self.edge_block_state_label.setText(message)
+            if was_clear or response is not None:
+                self.set_status(message, 'error')
+            return
+
+        selected_edge = None
+        selected_rows = self.edge_block_table.selectionModel().selectedRows()
+        if selected_rows:
+            selected_item = self.edge_block_table.item(selected_rows[0].row(), 0)
+            selected_edge = selected_item.data(Qt.UserRole) if selected_item else None
+
+        self.edge_block_table.setRowCount(0)
+        selected_row = -1
+        row_count = min(
+            len(response.from_ids), len(response.to_ids),
+            len(response.bidirectional), len(response.configured_blocked),
+            len(response.failure_counts), len(response.remaining_seconds),
+            len(response.sources),
+        )
+        for index in range(row_count):
+            from_id = response.from_ids[index]
+            to_id = response.to_ids[index]
+            bidirectional = bool(response.bidirectional[index])
+            configured = bool(response.configured_blocked[index])
+            failure_count = int(response.failure_counts[index])
+            remaining = float(response.remaining_seconds[index])
+            edge_name = (
+                f'P{from_id} ↔ P{to_id}' if bidirectional
+                else f'P{from_id} → P{to_id}'
+            )
+            state = (
+                '拓扑永久禁用' if configured else
+                '冷却封锁中' if remaining > 0.0 else
+                '观察期' if failure_count > 0 else '正常'
+            )
+            values = (
+                edge_name, str(failure_count), state,
+                f'{remaining:.1f} s' if remaining > 0.0 else '—',
+                response.sources[index],
+            )
+            row = self.edge_block_table.rowCount()
+            self.edge_block_table.insertRow(row)
+            edge_data = {
+                'from_id': from_id, 'to_id': to_id, 'name': edge_name,
+                'configured_blocked': configured,
+                'failure_count': failure_count,
+                'remaining_seconds': remaining,
+            }
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if column == 0:
+                    item.setData(Qt.UserRole, edge_data)
+                self.edge_block_table.setItem(row, column, item)
+            if (selected_edge and
+                    selected_edge.get('from_id') == from_id and
+                    selected_edge.get('to_id') == to_id):
+                selected_row = row
+        if selected_row >= 0:
+            self.edge_block_table.selectRow(selected_row)
+        self.edge_block_state_label.setText(
+            f'{message}；共 {self.edge_block_table.rowCount()} 条拓扑边。'
+        )
+        if was_clear:
+            self.set_status(message, 'success')
 
     def save_nav_config(self):
         try:
@@ -1382,6 +1542,61 @@ class MyWindow(QWidget):
         layout.addStretch()
         return page
 
+    def build_edge_block_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 10, 0, 0)
+        layout.setSpacing(14)
+
+        edge_health = QGroupBox('拓扑边封锁状态')
+        edge_health_layout = QVBoxLayout(edge_health)
+        edge_health_layout.setSpacing(12)
+        description = QLabel(
+            '查看运行期间记录的边封锁次数和冷却状态。选择一条边后可清除其运行时记录；'
+            'topology.yaml 中配置的永久禁用边不会被解除。'
+        )
+        description.setObjectName('subTitle')
+        description.setWordWrap(True)
+        edge_health_layout.addWidget(description)
+
+        self.edge_block_table = QTableWidget(0, 5)
+        self.edge_block_table.setHorizontalHeaderLabels(
+            ('拓扑边', '封锁次数', '当前状态', '剩余禁用', '来源')
+        )
+        self.edge_block_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.edge_block_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.edge_block_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.edge_block_table.setAlternatingRowColors(True)
+        self.edge_block_table.verticalHeader().setVisible(False)
+        self.edge_block_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+        edge_health_layout.addWidget(self.edge_block_table, 1)
+
+        edge_button_row = QHBoxLayout()
+        self.edge_block_refresh_button = QPushButton('刷新边状态')
+        self.edge_block_clear_button = QPushButton('清除选中边封锁次数')
+        self.edge_block_clear_button.setProperty('danger', True)
+        self.edge_block_refresh_button.clicked.connect(
+            self.refresh_edge_block_states
+        )
+        self.edge_block_clear_button.clicked.connect(
+            self.clear_selected_edge_block
+        )
+        edge_button_row.addWidget(self.edge_block_refresh_button)
+        edge_button_row.addWidget(self.edge_block_clear_button)
+        edge_button_row.addStretch()
+        edge_health_layout.addLayout(edge_button_row)
+        self.edge_block_state_label = QLabel(
+            '封锁次数是运行时道路健康记录；活动任务中不能人工清除。'
+        )
+        self.edge_block_state_label.setObjectName('subTitle')
+        self.edge_block_state_label.setWordWrap(True)
+        edge_health_layout.addWidget(self.edge_block_state_label)
+        layout.addWidget(edge_health, 1)
+        QTimer.singleShot(0, self.refresh_edge_block_states)
+        return page
+
     def build_points_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -1669,6 +1884,7 @@ class MyWindow(QWidget):
             except ValueError:
                 pass
             self.status_requested.emit(f'已到达：{target_name}', 'success')
+            self.edge_block_refresh_requested.emit()
         elif state == 'planned':
             self.status_requested.emit(f'路径规划完成：{target_name}', 'success')
         elif state == 'failed':
@@ -1676,8 +1892,10 @@ class MyWindow(QWidget):
             self.status_requested.emit(
                 f'导航失败（{target_name}）：{failure_detail}', 'error'
             )
+            self.edge_block_refresh_requested.emit()
         elif state == 'canceled':
             self.status_requested.emit(f'已取消：{target_name}', 'warning')
+            self.edge_block_refresh_requested.emit()
 
     def on_record_mode_changed(self, _checked=False):
         if self.rviz_record_mode.isChecked():

@@ -1,0 +1,13 @@
+bool clear
+int32 from_id
+int32 to_id
+---
+bool success
+string message
+int32[] from_ids
+int32[] to_ids
+bool[] bidirectional
+bool[] configured_blocked
+int32[] failure_counts
+float64[] remaining_seconds
+string[] sources
