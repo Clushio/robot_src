@@ -125,6 +125,21 @@ namespace jgl_dwa_local_planner
     RCLCPP_INFO(logger_, "Terminal motion state changed to %d.", value);
   }
 
+  void DWAPlannerROS::publishPathControlMode(PathControlMode mode, bool force)
+  {
+    const int value = static_cast<int>(mode);
+    if ((!force && published_path_control_mode_ == value) || !path_control_mode_pub_ ||
+        !path_control_mode_pub_->is_activated())
+    {
+      return;
+    }
+    published_path_control_mode_ = value;
+    std_msgs::msg::UInt8 message;
+    message.data = static_cast<uint8_t>(value);
+    path_control_mode_pub_->publish(message);
+    RCLCPP_INFO(logger_, "Path control mode changed to %d.", value);
+  }
+
   void DWAPlannerROS::updateLineGoalRelativeState()
   {
     if (linePath.empty())
@@ -1056,6 +1071,7 @@ namespace jgl_dwa_local_planner
     {
       return false;
     }
+    publishPathControlMode(REFERENCE_TRACKING);
     reference_path_manager_.advanceCurrentPathIndex(new_index);
     cmd_vel.linear.y = 0.0;
 
@@ -1316,6 +1332,9 @@ namespace jgl_dwa_local_planner
     terminal_motion_state_pub_ =
         node_->create_publisher<std_msgs::msg::UInt8>(
             "/anav/terminal_motion_state", latched_qos);
+    path_control_mode_pub_ =
+        node_->create_publisher<std_msgs::msg::UInt8>(
+            "/anav/path_control_mode", latched_qos);
     fixed_route_mode_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
         "/anav/fixed_route_mode", rclcpp::QoS(1),
         std::bind(&DWAPlannerROS::fixedRouteModeCallback, this,
@@ -1363,8 +1382,11 @@ namespace jgl_dwa_local_planner
     reference_path_marker_pub_->on_activate();
     reference_status_pub_->on_activate();
     terminal_motion_state_pub_->on_activate();
+    path_control_mode_pub_->on_activate();
     published_terminal_motion_state_ = -1;
+    published_path_control_mode_ = -1;
     publishTerminalMotionState(TERMINAL_TRACKING);
+    publishPathControlMode(PATH_CONTROL_UNKNOWN, true);
     dwb_planner_->activate();
   }
 
@@ -1377,6 +1399,7 @@ namespace jgl_dwa_local_planner
     reference_path_marker_pub_->on_deactivate();
     reference_status_pub_->on_deactivate();
     terminal_motion_state_pub_->on_deactivate();
+    path_control_mode_pub_->on_deactivate();
   }
 
   void DWAPlannerROS::cleanup()
@@ -1395,6 +1418,7 @@ namespace jgl_dwa_local_planner
     reference_path_marker_pub_.reset();
     reference_status_pub_.reset();
     terminal_motion_state_pub_.reset();
+    path_control_mode_pub_.reset();
     sp.reset();
     ps.reset();
     initialized_ = false;
@@ -1409,6 +1433,7 @@ namespace jgl_dwa_local_planner
         throw std::invalid_argument("DWAPlannerROS received an empty plan");
     }
     global_plan_ = path;
+    publishPathControlMode(PATH_CONTROL_UNKNOWN, true);
     const auto &orig_global_plan = global_plan_.poses;
     //add by mxb
     if((lastz>0&&orig_global_plan[0].pose.position.z==0)||(lastz==-1&&orig_global_plan[0].pose.position.z<=0))//modify to back up
@@ -1980,12 +2005,14 @@ bool DWAPlannerROS::lineComputeVelocityCommands(std::vector<geometry_msgs::msg::
       }
       if (reference_hard_failure)
       {
+        publishPathControlMode(PATH_CONTROL_UNKNOWN);
         stopCmd(cmd_vel);
         throw std::runtime_error("reference-path generation failed");
       }
       // Only the legacy straight-line fallback keeps the original hard-stop
       // check. Active reference paths were already handled above with staged
       // slowdown, so the two policies cannot mask each other.
+      publishPathControlMode(LEGACY_FALLBACK);
       if (fixedRouteBlocked())
       {
         path_follower_.reset();

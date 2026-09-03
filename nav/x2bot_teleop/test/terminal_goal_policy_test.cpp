@@ -36,4 +36,16 @@ TEST(TerminalGoalPolicy, RearmsTimeoutAfterRecoveryAndHandlesYawWrap)
   EXPECT_TRUE(policy.update(x2bot_teleop::TERMINAL_ROTATING, true, -3.00, 61.0).error_activated);
 }
 
+TEST(LegacyIntermediateWaypointPolicy, AppliesOnlyToLegacyMiddleGoals)
+{
+  EXPECT_TRUE(x2bot_teleop::legacyIntermediateWaypointReached(
+      x2bot_teleop::LEGACY_FALLBACK, false, 0.05, 0.05));
+  EXPECT_FALSE(x2bot_teleop::legacyIntermediateWaypointReached(
+      x2bot_teleop::LEGACY_FALLBACK, false, 0.051, 0.05));
+  EXPECT_FALSE(x2bot_teleop::legacyIntermediateWaypointReached(
+      x2bot_teleop::REFERENCE_TRACKING, false, 0.01, 0.05));
+  EXPECT_FALSE(x2bot_teleop::legacyIntermediateWaypointReached(
+      x2bot_teleop::LEGACY_FALLBACK, true, 0.01, 0.05));
+}
+
 }  // namespace

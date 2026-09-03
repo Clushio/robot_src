@@ -117,12 +117,19 @@ private:
     TERMINAL_ROTATING = 2,
     TERMINAL_COMPLETE = 3
   };
+  enum PathControlMode
+  {
+    PATH_CONTROL_UNKNOWN = 0,
+    REFERENCE_TRACKING = 1,
+    LEGACY_FALLBACK = 2
+  };
 
   void publishLocalPlan(std::vector<geometry_msgs::msg::PoseStamped> &path);
   void publishGlobalPlan(std::vector<geometry_msgs::msg::PoseStamped> &path);
   void stopCmd(geometry_msgs::msg::Twist &cmd_vel) const;
   void publishReferenceStatus(ReferenceStatus status);
   void publishTerminalMotionState(TerminalMotionState state);
+  void publishPathControlMode(PathControlMode mode, bool force = false);
   bool shouldUseReferencePath();
   bool prepareReferencePath(bool &generation_pending, bool &generation_failed);
   void maybeStartReferencePathJob();
@@ -185,6 +192,8 @@ private:
       reference_status_pub_;
   rclcpp_lifecycle::LifecyclePublisher<std_msgs::msg::UInt8>::SharedPtr
       terminal_motion_state_pub_;
+  rclcpp_lifecycle::LifecyclePublisher<std_msgs::msg::UInt8>::SharedPtr
+      path_control_mode_pub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr fixed_route_mode_sub_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr
       parameter_callback_handle_;
@@ -236,6 +245,7 @@ private:
   double xy_goal_tolerance{0.1};
   int status{0};
   int published_terminal_motion_state_{-1};
+  int published_path_control_mode_{-1};
   double max_vel_x{0.4};
   double brake_distance{1.0};
   double lfc{0.3};
