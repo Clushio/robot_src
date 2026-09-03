@@ -176,6 +176,9 @@ GUI 也使用 `/joy` 发送“记录点位、开始、暂停、继续”等兼�
 - TF 查询改用 TF2 buffer/listener；frame 仍为 `map` 和 `base_link`。
 - 固定路线状态不再写另一个节点的私有参数，而由 transient-local
   `/anav/fixed_route_mode` 发布；消费端应订阅该主题。
+- 局部换边车体轮廓改为 `auto_nav` 自身的 `local_replan_footprint` 参数，并带有部署
+  尺寸默认值，因此不依赖 `collision_monitor` 或 Nav2 的启动先后；并发代价检查通过
+  同一把锁读取已安装轮廓。
 - 默认点位目录从 `$HOME/maps` 解析，launch 参数仍可覆盖。
 
 ## 编译和测试

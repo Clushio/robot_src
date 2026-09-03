@@ -917,6 +917,7 @@ private:
     double local_replan_cost_weight_;
     collision_monitor::CollisionChecker local_replan_collision_checker_;
     collision_monitor::GridPolicy local_replan_grid_policy_;
+    mutable std::mutex local_replan_footprint_mutex_;
     bool local_replan_footprint_ready_ = false;
     double local_replan_max_corner_step_ = 0.025;
 
@@ -1970,11 +1971,22 @@ private:
                 error.c_str());
             return;
         }
-        local_replan_footprint_ready_ = true;
+        {
+            std::lock_guard<std::mutex> lock(local_replan_footprint_mutex_);
+            local_replan_footprint_ready_ = true;
+        }
         RCLCPP_INFO(get_logger(),
-            "Local topology replanning uses %zu footprint vertices with %.3f m navigation padding and collision threshold %d.",
+            "Local topology replanning uses node-owned parameter local_replan_footprint "
+            "(%zu vertices, %.3f m navigation padding, collision threshold %d); "
+            "availability is independent of collision-monitor startup order.",
             footprint.size(), footprint_padding,
             local_replan_grid_policy_.occupied_threshold);
+    }
+
+    bool localReplanFootprintReady() const
+    {
+        std::lock_guard<std::mutex> lock(local_replan_footprint_mutex_);
+        return local_replan_footprint_ready_;
     }
 
     void localMapCallback(const nav_msgs::msg::OccupancyGrid::ConstSharedPtr message)
@@ -2046,6 +2058,7 @@ private:
                                       double x1, double y1) const
     {
         LocalSegmentCost result;
+        std::lock_guard<std::mutex> footprint_lock(local_replan_footprint_mutex_);
         if (!local_replan_footprint_ready_)
         {
             result.blocked = true;
@@ -2810,7 +2823,7 @@ private:
             reason = "invalid target topology node";
             return false;
         }
-        if (!local_replan_footprint_ready_)
+        if (!localReplanFootprintReady())
         {
             reason = "collision-monitor footprint is unavailable";
             return false;
