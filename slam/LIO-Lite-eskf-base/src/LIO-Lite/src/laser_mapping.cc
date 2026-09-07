@@ -92,6 +92,20 @@ bool LaserMapping::LoadParams() {
     LoadParam("publish.dense_publish_en", dense_pub_en_, false);
     LoadParam("publish.scan_bodyframe_pub_en", scan_body_pub_en_, true);
     LoadParam("publish.scan_effect_pub_en", scan_effect_pub_en_, false);
+    LoadParam("publish.accumulated_map_publish_en", accumulated_map_pub_en_, true);
+    LoadParam("publish.accumulated_map_publish_interval",
+              accumulated_map_publish_interval_, 2.0);
+    LoadParam("publish.accumulated_map_voxel_size", accumulated_map_voxel_size_, 0.2F);
+    LoadParam("publish.accumulated_map_topic", accumulated_map_topic_,
+              std::string("/mapping_map"));
+    if (accumulated_map_publish_interval_ <= 0.0) {
+        LOG(WARNING) << "publish.accumulated_map_publish_interval must be positive; using 2.0s";
+        accumulated_map_publish_interval_ = 2.0;
+    }
+    if (accumulated_map_voxel_size_ <= 0.0F) {
+        LOG(WARNING) << "publish.accumulated_map_voxel_size must be positive; using 0.2m";
+        accumulated_map_voxel_size_ = 0.2F;
+    }
 
     LoadParam("max_iteration", options::NUM_MAX_ITERATIONS, 4);
     LoadParam("esti_plane_threshold", options::ESTI_PLANE_THRESHOLD, 0.1F);
@@ -431,6 +445,11 @@ void LaserMapping::SubAndPubToROS() {
         node_->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_body", 1000);
     pub_laser_cloud_effect_world_ =
         node_->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_effect_world", 10);
+    if (!flg_islocation_mode_ && accumulated_map_pub_en_) {
+        pub_mapping_map_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>(
+            accumulated_map_topic_,
+            rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local());
+    }
     if (dynamic_filter_options_.enabled && dynamic_filter_options_.publish_debug) {
         pub_static_cloud_ =
             node_->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_static", 10);
@@ -1463,7 +1482,8 @@ void LaserMapping::PublishOdometry(
 }
 
 void LaserMapping::PublishFrameWorld() {
-    if (!(run_in_offline_ == false && scan_pub_en_) && !pcd_save_en_) {
+    if (!(run_in_offline_ == false && (scan_pub_en_ || pub_mapping_map_)) &&
+        !pcd_save_en_) {
         return;
     }
 
@@ -1501,6 +1521,8 @@ void LaserMapping::PublishFrameWorld() {
         pub_laser_cloud_world_->publish(laserCloudmsg);
         publish_count_ -= options::PUBFRAME_PERIOD;
     }
+
+    PublishAccumulatedMap(laserCloudWorld);
 
     /**************** save map ****************/
     // 1. make sure you have enough memories
@@ -1568,6 +1590,34 @@ void LaserMapping::PublishFrameWorld() {
             scan_wait_num = 0;
         }
     }
+}
+
+void LaserMapping::PublishAccumulatedMap(const PointCloudType::Ptr &laser_cloud_world) {
+    if (!pub_mapping_map_ || !laser_cloud_world || laser_cloud_world->empty()) {
+        return;
+    }
+
+    *mapping_map_cloud_ += *laser_cloud_world;
+    if (last_accumulated_map_publish_time_ > 0.0 &&
+        lidar_end_time_ - last_accumulated_map_publish_time_ <
+            accumulated_map_publish_interval_) {
+        return;
+    }
+
+    PointCloudType downsampled_map;
+    pcl::VoxelGrid<PointType> voxel_filter;
+    voxel_filter.setLeafSize(accumulated_map_voxel_size_, accumulated_map_voxel_size_,
+                             accumulated_map_voxel_size_);
+    voxel_filter.setInputCloud(mapping_map_cloud_);
+    voxel_filter.filter(downsampled_map);
+    mapping_map_cloud_->swap(downsampled_map);
+
+    sensor_msgs::msg::PointCloud2 map_msg;
+    pcl::toROSMsg(*mapping_map_cloud_, map_msg);
+    map_msg.header.stamp = common::StampFromSec(lidar_end_time_);
+    map_msg.header.frame_id = "map";
+    pub_mapping_map_->publish(map_msg);
+    last_accumulated_map_publish_time_ = lidar_end_time_;
 }
 
 void LaserMapping::PublishFrameBody(

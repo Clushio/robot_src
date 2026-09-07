@@ -79,6 +79,7 @@ class LaserMapping {
     void PublishPath(const rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr &pub_path);
     void PublishOdometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr &pub_odom_aft_mapped);
     void PublishFrameWorld();
+    void PublishAccumulatedMap(const PointCloudType::Ptr &laser_cloud_world);
     void PublishFrameBody(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pub_laser_cloud_body);
     void PublishFrameEffectWorld(
         const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pub_laser_cloud_effect_world);
@@ -191,6 +192,7 @@ class LaserMapping {
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_laser_cloud_effect_world_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_static_cloud_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_dynamic_candidate_cloud_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_mapping_map_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom_aft_mapped_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_path_;
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
@@ -236,12 +238,18 @@ class LaserMapping {
     bool dense_pub_en_ = false;
     bool scan_body_pub_en_ = false;
     bool scan_effect_pub_en_ = false;
+    bool accumulated_map_pub_en_ = true;
+    double accumulated_map_publish_interval_ = 2.0;
+    float accumulated_map_voxel_size_ = 0.2F;
+    double last_accumulated_map_publish_time_ = 0.0;
+    std::string accumulated_map_topic_ = "/mapping_map";
     bool pcd_save_en_ = false;
     bool runtime_pos_log_ = true;
     int pcd_save_interval_ = -1;
     bool path_save_en_ = false;    
 
     PointCloudType::Ptr pcl_wait_save_{new PointCloudType()};  // debug save
+    PointCloudType::Ptr mapping_map_cloud_{new PointCloudType()};
     CloudPtr pcl_feature_point_{new PointCloudType()};
     StaticMapFilter::Options dynamic_filter_options_;
     std::unique_ptr<StaticMapFilter> static_map_filter_;
