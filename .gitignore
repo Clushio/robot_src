@@ -17,6 +17,7 @@ __pycache__/
 *.zip
 *.tar.gz
 *.rar
+*.rviz
 
 # ROS bags and maps / point clouds
 *.bag
