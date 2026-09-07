@@ -2,6 +2,7 @@
 #include <tf2/LinearMath/Quaternion.h>
 #include <yaml-cpp/yaml.h>
 #include <chrono>
+#include <cfenv>
 #include <cmath>
 #include <execution>
 #include <fstream>
@@ -14,6 +15,28 @@
 
 namespace lio_lite {
   //  #define  "body" "odom"
+
+namespace {
+
+class ScopedNonStopFloatingPoint {
+   public:
+    ScopedNonStopFloatingPoint() : active_(std::feholdexcept(&saved_env_) == 0) {}
+
+    ~ScopedNonStopFloatingPoint() {
+        if (active_) {
+            std::fesetenv(&saved_env_);
+        }
+    }
+
+    ScopedNonStopFloatingPoint(const ScopedNonStopFloatingPoint&) = delete;
+    ScopedNonStopFloatingPoint& operator=(const ScopedNonStopFloatingPoint&) = delete;
+
+   private:
+    std::fenv_t saved_env_{};
+    bool active_ = false;
+};
+
+}  // namespace
 
 bool LaserMapping::InitROS(const rclcpp::Node::SharedPtr &node) {
     node_ = node;
@@ -785,14 +808,24 @@ void LaserMapping::initialpose(){
     RCLCPP_INFO(
         node_->get_logger(), "Starting NDT initial alignment: scan=%zu, map=%zu",
         scan_undistort_->size(), global_map_->size());
-    ndt.align(*unused_result, init_guess.matrix().cast<float>());
-    if (!ndt.hasConverged() || !ndt.getFinalTransformation().allFinite()) {
-        RCLCPP_ERROR(node_->get_logger(), "NDT initial alignment failed to converge");
-        flg_get_init_guess_ = false;
-        return;
+    {
+        ScopedNonStopFloatingPoint floating_point_guard;
+        ndt.align(*unused_result, init_guess.matrix().cast<float>());
     }
-    RCLCPP_INFO(node_->get_logger(), "NDT initial alignment completed; starting ICP");
-    icp.align(*unused_result, ndt.getFinalTransformation());
+    Eigen::Matrix4f icp_initial_guess = init_guess.matrix().cast<float>();
+    if (ndt.hasConverged() && ndt.getFinalTransformation().allFinite()) {
+        icp_initial_guess = ndt.getFinalTransformation();
+        RCLCPP_INFO(node_->get_logger(), "NDT initial alignment completed; starting ICP");
+    } else {
+        RCLCPP_WARN(
+            node_->get_logger(),
+            "NDT initial alignment produced a non-finite or unconverged result; "
+            "falling back to the operator-provided initial pose for ICP");
+    }
+    {
+        ScopedNonStopFloatingPoint floating_point_guard;
+        icp.align(*unused_result, icp_initial_guess);
+    }
     if (!icp.getFinalTransformation().allFinite()) {
         RCLCPP_ERROR(node_->get_logger(), "ICP initial alignment returned a non-finite transform");
         flg_get_init_guess_ = false;
