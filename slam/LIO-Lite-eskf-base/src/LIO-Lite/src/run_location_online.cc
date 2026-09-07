@@ -13,6 +13,7 @@ void SigHandle(int sig) {
 
 int main(int argc, char **argv) {
     google::InitGoogleLogging(argv[0]);
+    google::InstallFailureSignalHandler();
     init_log();
     if(FLAGS_need_logs){
         save_log("local");

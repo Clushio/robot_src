@@ -87,6 +87,7 @@ foreach(executable run_mapping_online run_location_online)
   target_link_libraries(${executable} ${PROJECT_NAME}_core gflags)
   ament_target_dependencies(${executable} rclcpp)
 endforeach()
+target_link_options(run_location_online PRIVATE -rdynamic)
 
 foreach(executable test_split test_load)
   add_executable(${executable} src/test/${executable}.cc)
