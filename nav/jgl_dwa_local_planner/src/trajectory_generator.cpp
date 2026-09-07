@@ -102,7 +102,7 @@ void TrajectoryGenerator::initialize(
       std::bind(&TrajectoryGenerator::globalCostmapCallback, this,
                 std::placeholders::_1));
   local_costmap_sub_ = node->create_subscription<nav_msgs::msg::OccupancyGrid>(
-      "/local_costmap/costmap_raw", rclcpp::QoS(1).best_effort(),
+      "/local_costmap/costmap", rclcpp::QoS(1).best_effort(),
       std::bind(&TrajectoryGenerator::localCostmapCallback, this,
                 std::placeholders::_1));
 }
