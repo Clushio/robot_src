@@ -35,6 +35,7 @@ install(FILES README.md
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(test_build_topology test_build_topology.py TIMEOUT 30)
+  ament_add_pytest_test(test_fault_center test_fault_center.py TIMEOUT 30)
   ament_add_pytest_test(test_loop_start_policy test_loop_start_policy.py TIMEOUT 30)
   ament_add_pytest_test(test_ros2_runtime test_ros2_runtime.py TIMEOUT 30)
   ament_add_pytest_test(

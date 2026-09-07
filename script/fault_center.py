@@ -37,6 +37,15 @@ LEVEL_COLORS = {
 }
 
 
+def _json_default(value):
+    """Convert ROS/Python byte fields without killing the log writer thread."""
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).decode('utf-8', errors='replace')
+    raise TypeError(
+        f'Object of type {value.__class__.__name__} is not JSON serializable'
+    )
+
+
 def _truthy(value, default=False):
     if value is None:
         return default
@@ -185,9 +194,10 @@ class DiagnosticLogWriter:
                 )
                 with open(path, 'a', encoding='utf-8') as handle:
                     handle.write(json.dumps(
-                        event, ensure_ascii=False, sort_keys=True
+                        event, ensure_ascii=False, sort_keys=True,
+                        default=_json_default,
                     ) + '\n')
-            except OSError as error:
+            except (OSError, TypeError, ValueError) as error:
                 self._warn_throttled(
                     f'Unable to persist diagnostic event: {error}'
                 )
