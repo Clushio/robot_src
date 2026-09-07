@@ -707,6 +707,36 @@ void LaserMapping::DynamicLoadMap(Vec3d pose){
 
 
 void LaserMapping::initialpose(){
+    constexpr std::size_t kMinInitialAlignmentPoints = 5;
+    if (!scan_undistort_ || scan_undistort_->size() < kMinInitialAlignmentPoints) {
+        RCLCPP_WARN_THROTTLE(
+            node_->get_logger(), *node_->get_clock(), 2000,
+            "Waiting for enough points before initial alignment: got %zu, need at least %zu",
+            scan_undistort_ ? scan_undistort_->size() : 0,
+            kMinInitialAlignmentPoints);
+        return;
+    }
+    if (!global_map_ || global_map_->empty()) {
+        RCLCPP_ERROR_THROTTLE(
+            node_->get_logger(), *node_->get_clock(), 2000,
+            "Cannot run initial alignment: global map is empty");
+        return;
+    }
+
+    std::size_t finite_scan_points = 0;
+    for (const auto &point : scan_undistort_->points) {
+        if (std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z)) {
+            ++finite_scan_points;
+        }
+    }
+    if (finite_scan_points < kMinInitialAlignmentPoints) {
+        RCLCPP_WARN_THROTTLE(
+            node_->get_logger(), *node_->get_clock(), 2000,
+            "Waiting for a valid scan before initial alignment: %zu/%zu points are finite",
+            finite_scan_points, scan_undistort_->size());
+        return;
+    }
+
     Eigen::Affine3d init_guess;
     if(flg_get_init_guess_){
         init_lock_.lock();
@@ -723,6 +753,11 @@ void LaserMapping::initialpose(){
         std::cout<<"test1 no guess"<<std::endl;
         flg_location_inited_ = false;
         std::cout<<"wait for human put initial"<<std::endl;
+        return;
+    }
+    if (!init_guess.matrix().allFinite()) {
+        RCLCPP_ERROR(node_->get_logger(), "Rejected non-finite initial pose");
+        flg_get_init_guess_ = false;
         return;
     }
     Eigen::Affine3d raw_init_guess = init_guess;
@@ -747,8 +782,22 @@ void LaserMapping::initialpose(){
     icp.setInputTarget(global_map_);
 
     pcl::PointCloud<PointType>::Ptr unused_result(new pcl::PointCloud<PointType>());
+    RCLCPP_INFO(
+        node_->get_logger(), "Starting NDT initial alignment: scan=%zu, map=%zu",
+        scan_undistort_->size(), global_map_->size());
     ndt.align(*unused_result, init_guess.matrix().cast<float>());
+    if (!ndt.hasConverged() || !ndt.getFinalTransformation().allFinite()) {
+        RCLCPP_ERROR(node_->get_logger(), "NDT initial alignment failed to converge");
+        flg_get_init_guess_ = false;
+        return;
+    }
+    RCLCPP_INFO(node_->get_logger(), "NDT initial alignment completed; starting ICP");
     icp.align(*unused_result, ndt.getFinalTransformation());
+    if (!icp.getFinalTransformation().allFinite()) {
+        RCLCPP_ERROR(node_->get_logger(), "ICP initial alignment returned a non-finite transform");
+        flg_get_init_guess_ = false;
+        return;
+    }
 
     init_guess = icp.getFinalTransformation().cast<double>();
     Eigen::Vector3d final_position = init_guess.translation();
