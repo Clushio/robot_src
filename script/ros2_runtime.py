@@ -39,6 +39,16 @@ def node_names(node):
     }
 
 
+def navigation_is_ready(node, action_client):
+    """Return whether both the compatibility node and Nav2 action exist."""
+    return bool(
+        node is not None
+        and action_client is not None
+        and '/mxb_move_base' in node_names(node)
+        and action_client.server_is_ready()
+    )
+
+
 def parse_service_success(output):
     match = re.search(
         r'\bsuccess\s*[:=]\s*(true|false|True|False|1|0)\b',

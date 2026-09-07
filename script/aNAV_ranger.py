@@ -24,6 +24,8 @@ import signal
 import rclpy
 import tf2_ros
 from ament_index_python.packages import get_package_share_directory
+from nav2_msgs.action import NavigateToPose
+from rclpy.action import ActionClient
 from rclpy.duration import Duration
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
@@ -92,6 +94,7 @@ from cmd_vel_arbiter.srv import FinishMotion
 from ranger_msgs.msg import MotionState as RangerMotionState
 from x2bot_teleop.srv import EdgeBlockState, NavConfig
 from ros2_runtime import (
+    navigation_is_ready,
     Ros2Runtime,
     parse_service_message,
     parse_service_success,
@@ -276,6 +279,7 @@ class MyWindow(QWidget):
         self.finish_motion_client = None
         self.nav_config_client = None
         self.edge_block_state_client = None
+        self.navigate_to_pose_client = None
         self.tf_buffer = None
         self.tf_listener = None
         self.task_status_sub = None
@@ -348,6 +352,9 @@ class MyWindow(QWidget):
                 )
                 self.edge_block_state_client = self.ros_node.create_client(
                     EdgeBlockState, '/anav/edge_block_state'
+                )
+                self.navigate_to_pose_client = ActionClient(
+                    self.ros_node, NavigateToPose, '/navigate_to_pose'
                 )
                 marker_qos = QoSProfile(
                     depth=1,
@@ -3542,13 +3549,8 @@ class MyWindow(QWidget):
 
     def is_move_base_ready(self):
         try:
-            return bool(
-                self.ros_node is not None
-                and '/mxb_move_base' in {
-                    f'{namespace.rstrip("/")}/{name}'.replace('//', '/')
-                    for name, namespace
-                    in self.ros_node.get_node_names_and_namespaces()
-                }
+            return navigation_is_ready(
+                self.ros_node, self.navigate_to_pose_client
             )
         except Exception:
             return False
@@ -4458,7 +4460,10 @@ class MyWindow(QWidget):
             self.fault_center.report_condition(
                 '/anav/process_monitor/move_base', 'ANAV-NAV-004',
                 DiagnosticStatus.ERROR, 'MoveBase 启动就绪超时', True,
-                detail='等待 /mxb_move_base 超过 30 秒。',
+                detail=(
+                    '等待 /mxb_move_base 和 /navigate_to_pose '
+                    'action server 超过 30 秒。'
+                ),
                 action='检查地图、TF、参数加载与 MoveBase 启动日志。',
             )
             return
