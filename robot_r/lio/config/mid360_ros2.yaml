@@ -70,6 +70,8 @@
     load_g_map: GlobalMap.pcd
     load_f_map: FeatureMap.pcd
     load_eaf_size: 0.5
+    # Keep the ROS2 localization path off PCL 1.12 NDT, which can raise SIGFPE.
+    init_ndt_enable: false
     init_trans: [0.0, 0.0, 0.0]
     init_rpy: [0.0, 0.0, 0.0]
     init_icp_max_corr_dist: 3.0
