@@ -41,12 +41,17 @@ if(BUILD_TESTING)
   find_package(ament_cmake_pep257 REQUIRED)
   find_package(ament_cmake_uncrustify REQUIRED)
   find_package(ament_cmake_xmllint REQUIRED)
+  find_package(launch_testing_ament_cmake REQUIRED)
 
-  ament_copyright(src/move_base_compat.cpp launch/navigation.launch.py)
+  ament_copyright(
+    src/move_base_compat.cpp
+    launch/navigation.launch.py
+    test/navigation_bringup_test.py
+  )
   ament_cpplint(src/move_base_compat.cpp)
-  ament_flake8(launch/navigation.launch.py)
+  ament_flake8(launch/navigation.launch.py test/navigation_bringup_test.py)
   ament_lint_cmake(CMakeLists.txt)
-  ament_pep257(launch/navigation.launch.py)
+  ament_pep257(launch/navigation.launch.py test/navigation_bringup_test.py)
   ament_uncrustify(src/move_base_compat.cpp)
   ament_xmllint(
     package.xml
@@ -54,6 +59,7 @@ if(BUILD_TESTING)
     behavior_trees/navigate_to_pose_fixed_route.xml
     behavior_trees/navigate_to_pose_replanning.xml
   )
+  add_launch_test(test/navigation_bringup_test.py TIMEOUT 60)
 endif()
 
 ament_package()
