@@ -85,7 +85,7 @@ int main(int argc, char ** argv)
   savemap_f = node->declare_parameter<bool>("savemap", true);
 
   const auto map_topic_pub = node->create_publisher<nav_msgs::msg::OccupancyGrid>(
-    map_topic_name, rclcpp::QoS(1));
+    map_topic_name, rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local());
   const auto pcl_pub = node->create_publisher<sensor_msgs::msg::PointCloud2>(
     "pcl_output", rclcpp::QoS(1));
   outputpclmsg.header.frame_id = "map";
