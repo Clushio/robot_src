@@ -329,7 +329,7 @@ public:
         static_map_inflation_radius_ =
             declare_parameter<double>("static_map_inflation_radius", static_map_inflation_radius_);
         local_replan_map_topic_ = declare_parameter<std::string>(
-            "local_replan_map_topic", "/local_costmap/costmap_raw");
+            "local_replan_map_topic", "/local_costmap/costmap");
         local_replan_map_timeout_ = declare_parameter<double>(
             "local_replan_map_timeout", local_replan_map_timeout_);
         local_replan_block_threshold_ = declare_parameter<int>(
