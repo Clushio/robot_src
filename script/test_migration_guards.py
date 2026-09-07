@@ -29,3 +29,10 @@ def test_main_gui_uses_ros2_service_fields_and_launch_files():
     assert 'currentID:' not in text
     assert '3startlocation.launch.py' in text
     assert "['rviz2', '-d', config]" in text
+
+
+def test_main_gui_monitors_localization_child_node():
+    text = (Path(__file__).parent / 'aNAV_ranger.py').read_text()
+    assert "(self.localizationProcess, '/laserMapping'" in text
+    assert "self.expected_node_missing_counts.get('/laserMapping', 0) >= 3" in text
+    assert '定位核心节点 /laserMapping 已退出' in text

@@ -3259,6 +3259,9 @@ class MyWindow(QWidget):
             )
 
         expected_nodes = (
+            (self.localizationProcess, '/laserMapping',
+             '/anav/system_monitor/localization_node',
+             'ANAV-LOC-004', '定位核心节点意外退出'),
             (self.baseProcess, '/ranger_base_node',
              '/anav/system_monitor/ranger_base_node',
              'ANAV-BASE-003', '底盘节点意外退出'),
@@ -3327,11 +3330,24 @@ class MyWindow(QWidget):
         else:
             had_odometry = self.last_odom_monotonic > 0.0
             self.localization_ready = False
-            localization_running = (
+            localization_launch_running = (
                 self.localizationProcess is not None
                 and self.localizationProcess.poll() is None
             )
-            if localization_running and had_odometry:
+            localization_node_missing = (
+                self.expected_node_missing_counts.get('/laserMapping', 0) >= 3
+            )
+            if localization_launch_running and localization_node_missing:
+                self.set_health_chip('localization', '节点已退出', 'error')
+                self.set_chip(self.localization_chip, '定位 节点异常', False)
+                self.odometry_label.setText(
+                    '机器人位姿：定位核心节点已退出，请查看定位终端日志'
+                )
+                self.set_status(
+                    '定位核心节点 /laserMapping 已退出，无法产生位姿数据。',
+                    'error',
+                )
+            elif localization_launch_running and had_odometry:
                 self.set_health_chip('localization', '数据中断', 'error')
                 self.set_chip(self.localization_chip, '定位 数据中断', False)
                 self.odometry_label.setText(
@@ -3343,7 +3359,7 @@ class MyWindow(QWidget):
                     detail=f'/Odometry 已有 {odom_age:.1f} 秒未更新。',
                     action='检查定位节点、激光雷达数据及 TF。',
                 )
-            elif localization_running:
+            elif localization_launch_running:
                 self.set_health_chip('localization', '等待数据', 'warning')
                 self.set_chip(self.localization_chip, '定位 等待数据', False)
                 self.fault_center.report_condition(
