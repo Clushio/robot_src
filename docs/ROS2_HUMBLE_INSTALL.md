@@ -457,6 +457,25 @@ source ~/anav_ros2_ws/install/setup.bash
 不要同时自动 source Noetic 或另一个覆盖工作区。修改后新开终端验证
 `echo "$AMENT_PREFIX_PATH"`。
 
+文件中留了一个sh脚本来快捷运行但需要一些小小的操作
+```bash
+chmod +x ~/anav_ros2_ws/start_anav.sh
+```
+之后就可以来启动
+```bash
+~/anav_ros2_ws/start_anav.sh
+```
+
+如果你想方便一点，也可以在 ~/.bashrc 里加：
+```bash
+alias anav='~/anav_ros2_ws/start_anav.sh'
+```
+之后source ~/.bashrc，然后以后在终端直接输入
+```bash
+anav
+```
+就可以启动
+
 ## 9. 常见问题
 
 ### `ros2: command not found` 或 package 找不到
