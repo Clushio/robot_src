@@ -174,6 +174,19 @@ yaml-cpp 由各 package manifest/rosdep 管理。详细新机命令见
 
 ## 8. 仍需真机验证的风险
 
+### 已知非 P0 工程债：footprint 配置来源
+
+当前 Nav2 全局/局部 costmap、`collision_monitor` 和 `runnav` 的 footprint
+数值一致，均为 `0.72 m × 0.50 m`；`runnav` 局部换边检查与正常导航安全配置的
+padding 也均为 `0.10 m`。因此它不阻塞当前启动和实车测试，不按 P0 问题修改。
+
+这些值目前仍分布在 `nav/mxb_move_base/config/nav2_params.yaml`、
+`collision_monitor/config/robot_footprint.yaml`、
+`collision_monitor/config/collision_monitor.yaml` 和
+`nav/x2bot_teleop/src/run_nav.cpp`。以后变更车体外形或导航 padding 时，必须同步
+核对以上位置，并重新验证局部 topology 换边、Nav2 costmap 膨胀和最终碰撞停车；
+后续可在不影响实车验收的独立迭代中改为单一配置源。
+
 以下项目无法由容器编译和无硬件冒烟消除：
 
 1. Ranger CAN 时序、车型切换、停车回正和物理急停联动。
