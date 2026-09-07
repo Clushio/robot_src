@@ -112,6 +112,7 @@ class LaserMapping {
     std::mutex init_lock_;
     std::string str_g_map_, str_f_map_;
     double load_eaf_size_;
+    bool init_ndt_enable_ = false;
     double init_icp_max_corr_dist_ = 3.0;
     double init_icp_fitness_score_th_ = 0.35;
     double init_max_translation_delta_ = 3.0;

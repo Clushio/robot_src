@@ -6,6 +6,9 @@
 #include <cmath>
 #include <execution>
 #include <fstream>
+#if defined(__SSE__)
+#include <xmmintrin.h>
+#endif
 
 #include "laser_mapping.h"
 #include "utils.h"
@@ -20,12 +23,25 @@ namespace {
 
 class ScopedNonStopFloatingPoint {
    public:
-    ScopedNonStopFloatingPoint() : active_(std::feholdexcept(&saved_env_) == 0) {}
+    ScopedNonStopFloatingPoint() {
+#if defined(__SSE__)
+        saved_mxcsr_ = _mm_getcsr();
+#endif
+        active_ = std::feholdexcept(&saved_env_) == 0;
+#if defined(__SSE__)
+        constexpr unsigned int kExceptionFlags = 0x003fu;
+        constexpr unsigned int kExceptionMasks = 0x1f80u;
+        _mm_setcsr((_mm_getcsr() & ~kExceptionFlags) | kExceptionMasks);
+#endif
+    }
 
     ~ScopedNonStopFloatingPoint() {
         if (active_) {
             std::fesetenv(&saved_env_);
         }
+#if defined(__SSE__)
+        _mm_setcsr(saved_mxcsr_);
+#endif
     }
 
     ScopedNonStopFloatingPoint(const ScopedNonStopFloatingPoint&) = delete;
@@ -34,6 +50,9 @@ class ScopedNonStopFloatingPoint {
    private:
     std::fenv_t saved_env_{};
     bool active_ = false;
+#if defined(__SSE__)
+    unsigned int saved_mxcsr_ = 0;
+#endif
 };
 
 }  // namespace
@@ -209,6 +228,7 @@ bool LaserMapping::LoadParams() {
     LoadParam("load_g_map", str_g_map_, std::string("empty"));
     LoadParam("load_f_map", str_f_map_, std::string("empty"));
     LoadParam("load_eaf_size", load_eaf_size_, 0.5);
+    LoadParam("init_ndt_enable", init_ndt_enable_, false);
     LoadParam("init_icp_max_corr_dist", init_icp_max_corr_dist_, 3.0);
     LoadParam("init_icp_fitness_score_th", init_icp_fitness_score_th_, 0.35);
     LoadParam("init_max_translation_delta", init_max_translation_delta_, 3.0);
@@ -787,14 +807,6 @@ void LaserMapping::initialpose(){
     Eigen::Vector3d raw_init_position = raw_init_guess.translation();
     Eigen::Matrix3d raw_init_rotation = raw_init_guess.linear();
 
-    pcl::NormalDistributionsTransform<PointType, PointType> ndt;
-    ndt.setTransformationEpsilon(1e-4);
-    ndt.setEuclideanFitnessEpsilon(1e-4);
-    ndt.setMaximumIterations(40);
-    ndt.setResolution(0.8);
-    ndt.setInputSource(scan_undistort_);
-    ndt.setInputTarget(global_map_);
-
     pcl::IterativeClosestPoint<PointType, PointType> icp;
     icp.setMaxCorrespondenceDistance(init_icp_max_corr_dist_);
     icp.setMaximumIterations(100);
@@ -805,22 +817,37 @@ void LaserMapping::initialpose(){
     icp.setInputTarget(global_map_);
 
     pcl::PointCloud<PointType>::Ptr unused_result(new pcl::PointCloud<PointType>());
-    RCLCPP_INFO(
-        node_->get_logger(), "Starting NDT initial alignment: scan=%zu, map=%zu",
-        scan_undistort_->size(), global_map_->size());
-    {
-        ScopedNonStopFloatingPoint floating_point_guard;
-        ndt.align(*unused_result, init_guess.matrix().cast<float>());
-    }
     Eigen::Matrix4f icp_initial_guess = init_guess.matrix().cast<float>();
-    if (ndt.hasConverged() && ndt.getFinalTransformation().allFinite()) {
-        icp_initial_guess = ndt.getFinalTransformation();
-        RCLCPP_INFO(node_->get_logger(), "NDT initial alignment completed; starting ICP");
+    bool ndt_converged = false;
+    if (init_ndt_enable_) {
+        pcl::NormalDistributionsTransform<PointType, PointType> ndt;
+        ndt.setTransformationEpsilon(1e-4);
+        ndt.setEuclideanFitnessEpsilon(1e-4);
+        ndt.setMaximumIterations(40);
+        ndt.setResolution(0.8);
+        ndt.setInputSource(scan_undistort_);
+        ndt.setInputTarget(global_map_);
+        RCLCPP_INFO(
+            node_->get_logger(), "Starting NDT initial alignment: scan=%zu, map=%zu",
+            scan_undistort_->size(), global_map_->size());
+        {
+            ScopedNonStopFloatingPoint floating_point_guard;
+            ndt.align(*unused_result, icp_initial_guess);
+        }
+        ndt_converged = ndt.hasConverged() && ndt.getFinalTransformation().allFinite();
+        if (ndt_converged) {
+            icp_initial_guess = ndt.getFinalTransformation();
+            RCLCPP_INFO(node_->get_logger(), "NDT initial alignment completed; starting ICP");
+        } else {
+            RCLCPP_WARN(
+                node_->get_logger(),
+                "NDT initial alignment produced a non-finite or unconverged result; "
+                "falling back to the operator-provided initial pose for ICP");
+        }
     } else {
-        RCLCPP_WARN(
+        RCLCPP_INFO(
             node_->get_logger(),
-            "NDT initial alignment produced a non-finite or unconverged result; "
-            "falling back to the operator-provided initial pose for ICP");
+            "PCL NDT initial alignment is disabled; starting ICP from the operator-provided pose");
     }
     {
         ScopedNonStopFloatingPoint floating_point_guard;
@@ -857,7 +884,8 @@ void LaserMapping::initialpose(){
     const double icp_score = icp.getFitnessScore();
 
     std::cout<<"init fit rst="<<icp.hasConverged()
-             <<" ndt rst="<<ndt.hasConverged()
+             <<" ndt enabled="<<init_ndt_enable_
+             <<" ndt rst="<<ndt_converged
              <<" icp score="<<icp_score
              <<" init xy delta="<<init_xy_delta
              <<" init yaw delta deg="<<init_yaw_delta / M_PI * 180.0
