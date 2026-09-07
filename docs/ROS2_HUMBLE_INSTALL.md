@@ -459,16 +459,16 @@ source ~/anav_ros2_ws/install/setup.bash
 
 文件中留了一个sh脚本来快捷运行但需要一些小小的操作
 ```bash
-chmod +x ~/anav_ros2_ws/start_anav.sh
+chmod +x ~/anav_ros2_ws/src/start_anav.sh
 ```
 之后就可以来启动
 ```bash
-~/anav_ros2_ws/start_anav.sh
+~/anav_ros2_ws/src/start_anav.sh
 ```
 
 如果你想方便一点，也可以在 ~/.bashrc 里加：
 ```bash
-alias anav='~/anav_ros2_ws/start_anav.sh'
+alias anav='~/anav_ros2_ws/src/start_anav.sh'
 ```
 之后source ~/.bashrc，然后以后在终端直接输入
 ```bash
