@@ -70,5 +70,8 @@
     load_g_map: GlobalMap.pcd
     load_f_map: FeatureMap.pcd
     load_eaf_size: 0.5
+    # PCL 1.12 NDT can raise SIGFPE during initial alignment; ICP remains guarded by
+    # convergence, fitness, translation and yaw acceptance thresholds below.
+    init_ndt_enable: false
     init_trans: [0.0, 0.0, 0.0]
     init_rpy: [0.0, 0.0, 0.0]
