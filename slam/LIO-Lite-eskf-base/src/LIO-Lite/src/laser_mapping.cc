@@ -11,6 +11,7 @@
 #endif
 
 #include "laser_mapping.h"
+#include "alignment_fitness.h"
 #include "utils.h"
 
 // #define DEBUG
@@ -766,18 +767,29 @@ void LaserMapping::initialpose(){
         return;
     }
 
-    std::size_t finite_scan_points = 0;
-    for (const auto &point : scan_undistort_->points) {
-        if (std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z)) {
-            ++finite_scan_points;
-        }
-    }
-    if (finite_scan_points < kMinInitialAlignmentPoints) {
+    const auto alignment_scan = MakeFinitePointCloud(*scan_undistort_);
+    if (alignment_scan->size() < kMinInitialAlignmentPoints) {
         RCLCPP_WARN_THROTTLE(
             node_->get_logger(), *node_->get_clock(), 2000,
             "Waiting for a valid scan before initial alignment: %zu/%zu points are finite",
-            finite_scan_points, scan_undistort_->size());
+            alignment_scan->size(), scan_undistort_->size());
         return;
+    }
+    const auto alignment_map = MakeFinitePointCloud(*global_map_);
+    if (alignment_map->size() < kMinInitialAlignmentPoints) {
+        RCLCPP_ERROR(
+            node_->get_logger(),
+            "Cannot run initial alignment: only %zu/%zu global-map points are finite",
+            alignment_map->size(), global_map_->size());
+        return;
+    }
+    if (alignment_scan->size() != scan_undistort_->size() ||
+        alignment_map->size() != global_map_->size()) {
+        RCLCPP_WARN(
+            node_->get_logger(),
+            "Removed non-finite points before initial alignment: scan=%zu, map=%zu",
+            scan_undistort_->size() - alignment_scan->size(),
+            global_map_->size() - alignment_map->size());
     }
 
     Eigen::Affine3d init_guess;
@@ -813,10 +825,10 @@ void LaserMapping::initialpose(){
     icp.setTransformationEpsilon(1e-6);
     icp.setEuclideanFitnessEpsilon(1e-6);
     icp.setRANSACIterations(0);
-    icp.setInputSource(scan_undistort_);
-    icp.setInputTarget(global_map_);
+    icp.setInputSource(alignment_scan);
+    icp.setInputTarget(alignment_map);
 
-    pcl::PointCloud<PointType>::Ptr unused_result(new pcl::PointCloud<PointType>());
+    pcl::PointCloud<PointType>::Ptr aligned_result(new pcl::PointCloud<PointType>());
     Eigen::Matrix4f icp_initial_guess = init_guess.matrix().cast<float>();
     bool ndt_converged = false;
     if (init_ndt_enable_) {
@@ -825,14 +837,14 @@ void LaserMapping::initialpose(){
         ndt.setEuclideanFitnessEpsilon(1e-4);
         ndt.setMaximumIterations(40);
         ndt.setResolution(0.8);
-        ndt.setInputSource(scan_undistort_);
-        ndt.setInputTarget(global_map_);
+        ndt.setInputSource(alignment_scan);
+        ndt.setInputTarget(alignment_map);
         RCLCPP_INFO(
             node_->get_logger(), "Starting NDT initial alignment: scan=%zu, map=%zu",
             scan_undistort_->size(), global_map_->size());
         {
             ScopedNonStopFloatingPoint floating_point_guard;
-            ndt.align(*unused_result, icp_initial_guess);
+            ndt.align(*aligned_result, icp_initial_guess);
         }
         ndt_converged = ndt.hasConverged() && ndt.getFinalTransformation().allFinite();
         if (ndt_converged) {
@@ -851,7 +863,7 @@ void LaserMapping::initialpose(){
     }
     {
         ScopedNonStopFloatingPoint floating_point_guard;
-        icp.align(*unused_result, icp_initial_guess);
+        icp.align(*aligned_result, icp_initial_guess);
     }
     if (!icp.getFinalTransformation().allFinite()) {
         RCLCPP_ERROR(node_->get_logger(), "ICP initial alignment returned a non-finite transform");
@@ -881,28 +893,29 @@ void LaserMapping::initialpose(){
         init_max_translation_delta_ <= 0.0 || init_xy_delta <= init_max_translation_delta_;
     const bool yaw_delta_ok = init_max_yaw_delta_deg_ <= 0.0 || init_yaw_delta <= init_max_yaw_delta;
     const bool init_delta_ok = translation_delta_ok && yaw_delta_ok;
-    double icp_score = 0.0;
-    {
-        ScopedNonStopFloatingPoint floating_point_guard;
-        icp_score = icp.getFitnessScore();
-    }
+    const AlignmentFitnessResult fitness =
+        ComputeAlignmentFitness(*aligned_result, alignment_map);
+    const double icp_score = fitness.mean_squared_distance;
+    const bool fitness_valid = fitness.matched_points >= kMinInitialAlignmentPoints;
 
     std::cout<<"init fit rst="<<icp.hasConverged()
              <<" ndt enabled="<<init_ndt_enable_
              <<" ndt rst="<<ndt_converged
              <<" icp score="<<icp_score
+             <<" score matches="<<fitness.matched_points
              <<" init xy delta="<<init_xy_delta
              <<" init yaw delta deg="<<init_yaw_delta / M_PI * 180.0
              <<std::endl;
 
-    if (icp.hasConverged() == false || icp_score > init_icp_fitness_score_th_ || !init_delta_ok)
+    if (!icp.hasConverged() || !fitness_valid ||
+        icp_score > init_icp_fitness_score_th_ || !init_delta_ok)
     {
         RCLCPP_ERROR(
             node_->get_logger(),
-            "Global Initializing Fail! icp_score=%.3f, max_score=%.3f, "
+            "Global Initializing Fail! icp_score=%.3f, max_score=%.3f, matches=%zu, "
             "xy_delta=%.3f, max_xy_delta=%.3f, yaw_delta_deg=%.3f, "
             "max_yaw_delta_deg=%.3f",
-            icp_score, init_icp_fitness_score_th_, init_xy_delta,
+            icp_score, init_icp_fitness_score_th_, fitness.matched_points, init_xy_delta,
             init_max_translation_delta_, init_yaw_delta / M_PI * 180.0,
             init_max_yaw_delta_deg_);
         flg_location_inited_ = false;

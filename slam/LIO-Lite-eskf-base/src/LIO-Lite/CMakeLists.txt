@@ -46,6 +46,7 @@ if(WITH_IVOX_NODE_TYPE_PHC)
 endif()
 
 add_library(${PROJECT_NAME}_core
+  src/alignment_fitness.cc
   src/laser_mapping.cc
   src/static_map_filter.cc
   src/pointcloud_preprocess.cc
@@ -97,9 +98,13 @@ endforeach()
 add_executable(test_static_map_filter src/test/test_static_map_filter.cc)
 target_link_libraries(test_static_map_filter ${PROJECT_NAME}_core)
 
+add_executable(test_alignment_fitness src/test/test_alignment_fitness.cc)
+target_link_libraries(test_alignment_fitness ${PROJECT_NAME}_core)
+
 if(BUILD_TESTING)
   enable_testing()
   add_test(NAME static_map_filter_synthetic COMMAND test_static_map_filter)
+  add_test(NAME alignment_fitness_synthetic COMMAND test_alignment_fitness)
 endif()
 
 install(TARGETS
@@ -109,6 +114,7 @@ install(TARGETS
   test_split
   test_load
   test_static_map_filter
+  test_alignment_fitness
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}
