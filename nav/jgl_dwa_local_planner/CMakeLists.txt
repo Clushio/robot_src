@@ -60,6 +60,7 @@ ament_target_dependencies(${PROJECT_NAME}
   tf2_ros
   visualization_msgs anav_interfaces)
 target_link_libraries(${PROJECT_NAME} Boost::thread)
+target_link_options(${PROJECT_NAME} PRIVATE -Wl,--no-undefined)
 
 pluginlib_export_plugin_description_file(nav2_core blp_plugin.xml)
 pluginlib_export_plugin_description_file(nav2_costmap_2d costmap_plugin.xml)
@@ -94,6 +95,13 @@ if(BUILD_TESTING)
     test/terminal_yaw_controller_test.cpp)
   if(TARGET terminal_yaw_controller_test)
     target_include_directories(terminal_yaw_controller_test PRIVATE include)
+  endif()
+
+  ament_add_gtest(path_follower_test test/path_follower_test.cpp)
+  if(TARGET path_follower_test)
+    target_link_libraries(path_follower_test ${PROJECT_NAME})
+    ament_target_dependencies(path_follower_test
+      geometry_msgs nav_msgs tf2 tf2_geometry_msgs)
   endif()
 
   ament_add_gtest(reference_obstacle_policy_test

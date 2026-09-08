@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2/utils.h>
 #include <jgl_dwa_local_planner/parameter_utils.h>
 
