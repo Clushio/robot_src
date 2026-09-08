@@ -881,7 +881,11 @@ void LaserMapping::initialpose(){
         init_max_translation_delta_ <= 0.0 || init_xy_delta <= init_max_translation_delta_;
     const bool yaw_delta_ok = init_max_yaw_delta_deg_ <= 0.0 || init_yaw_delta <= init_max_yaw_delta;
     const bool init_delta_ok = translation_delta_ok && yaw_delta_ok;
-    const double icp_score = icp.getFitnessScore();
+    double icp_score = 0.0;
+    {
+        ScopedNonStopFloatingPoint floating_point_guard;
+        icp_score = icp.getFitnessScore();
+    }
 
     std::cout<<"init fit rst="<<icp.hasConverged()
              <<" ndt enabled="<<init_ndt_enable_
