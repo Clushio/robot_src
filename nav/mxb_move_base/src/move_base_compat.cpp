@@ -11,6 +11,7 @@
 #include <memory>
 #include <string>
 
+#include "cmd_vel_arbiter/srv/finish_motion.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "nav2_msgs/action/navigate_to_pose.hpp"
 #include "nav2_msgs/srv/clear_entire_costmap.hpp"
@@ -31,6 +32,7 @@ public:
   using NavigateToPose = nav2_msgs::action::NavigateToPose;
   using NavigateGoalHandle = rclcpp_action::ClientGoalHandle<NavigateToPose>;
   using ClearCostmap = nav2_msgs::srv::ClearEntireCostmap;
+  using FinishMotion = cmd_vel_arbiter::srv::FinishMotion;
   using GetPlan = nav_msgs::srv::GetPlan;
 
   MoveBaseCompatibilityNode()
@@ -44,6 +46,8 @@ public:
       "local_clear_service", "/local_costmap/clear_entirely_local_costmap");
     global_clear_service_name_ = declare_parameter<std::string>(
       "global_clear_service", "/global_costmap/clear_entirely_global_costmap");
+    finish_motion_service_name_ = declare_parameter<std::string>(
+      "finish_motion_service", "/cmd_vel_arbiter/finish_motion");
     fixed_route_behavior_tree_ = declare_parameter<std::string>(
       "fixed_route_behavior_tree", "");
     service_timeout_ = std::chrono::duration<double>(
@@ -58,6 +62,8 @@ public:
       local_clear_service_name_, rmw_qos_profile_services_default, callback_group_);
     global_clear_client_ = create_client<ClearCostmap>(
       global_clear_service_name_, rmw_qos_profile_services_default, callback_group_);
+    finish_motion_client_ = create_client<FinishMotion>(
+      finish_motion_service_name_, rmw_qos_profile_services_default, callback_group_);
 
     current_goal_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(
       "~/current_goal", rclcpp::QoS(1));
@@ -129,33 +135,78 @@ private:
 
     current_goal_pub_->publish(goal.pose);
 
+    const uint64_t goal_generation = ++simple_goal_generation_;
     rclcpp_action::Client<NavigateToPose>::SendGoalOptions options;
     options.goal_response_callback =
-      [this](const NavigateGoalHandle::SharedPtr & handle) {
+      [this, goal_generation](const NavigateGoalHandle::SharedPtr & handle) {
         if (handle) {
+          active_simple_goal_generation_.store(goal_generation);
           RCLCPP_INFO(get_logger(), "Simple goal accepted by NavigateToPose.");
         } else {
           RCLCPP_ERROR(get_logger(), "Simple goal rejected by NavigateToPose.");
         }
       };
     options.result_callback =
-      [this](const NavigateGoalHandle::WrappedResult & result) {
+      [this, goal_generation](const NavigateGoalHandle::WrappedResult & result) {
+        uint8_t finish_reason = FinishMotion::Request::TASK_FAILED;
         switch (result.code) {
           case rclcpp_action::ResultCode::SUCCEEDED:
             RCLCPP_INFO(get_logger(), "Simple navigation goal succeeded.");
+            finish_reason = FinishMotion::Request::TASK_FINISHED;
             break;
           case rclcpp_action::ResultCode::ABORTED:
             RCLCPP_WARN(get_logger(), "Simple navigation goal aborted.");
+            finish_reason = FinishMotion::Request::TASK_FAILED;
             break;
           case rclcpp_action::ResultCode::CANCELED:
             RCLCPP_INFO(get_logger(), "Simple navigation goal canceled.");
+            finish_reason = FinishMotion::Request::TASK_CANCELED;
             break;
           default:
             RCLCPP_WARN(get_logger(), "Simple navigation goal ended with an unknown result.");
             break;
         }
+        uint64_t active_generation = goal_generation;
+        if (active_simple_goal_generation_.compare_exchange_strong(
+            active_generation, 0))
+        {
+          requestMotionFinish(finish_reason);
+        } else {
+          RCLCPP_INFO_STREAM(
+            get_logger(),
+            "Skip centering for superseded simple goal generation " << goal_generation << ".");
+        }
       };
     navigate_client_->async_send_goal(goal, options);
+  }
+
+  void requestMotionFinish(uint8_t reason)
+  {
+    if (!finish_motion_client_->service_is_ready() &&
+      !finish_motion_client_->wait_for_service(50ms))
+    {
+      RCLCPP_ERROR(
+        get_logger(), "Finish-motion service %s is unavailable; "
+        "cmd_vel timeout remains the centering fallback.",
+        finish_motion_service_name_.c_str());
+      return;
+    }
+
+    auto request = std::make_shared<FinishMotion::Request>();
+    request->source = "nav";
+    request->reason = reason;
+    finish_motion_client_->async_send_request(
+      request,
+      [this](rclcpp::Client<FinishMotion>::SharedFuture future) {
+        const auto response = future.get();
+        if (response->centered) {
+          RCLCPP_INFO(get_logger(), "Simple navigation finished; steering centered.");
+        } else {
+          RCLCPP_ERROR(
+            get_logger(), "Simple navigation finished, but steering centering failed: %s",
+            response->message.c_str());
+        }
+      });
   }
 
   void makePlanCallback(
@@ -206,6 +257,7 @@ private:
   rclcpp::Client<GetPlan>::SharedPtr planner_client_;
   rclcpp::Client<ClearCostmap>::SharedPtr local_clear_client_;
   rclcpp::Client<ClearCostmap>::SharedPtr global_clear_client_;
+  rclcpp::Client<FinishMotion>::SharedPtr finish_motion_client_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr current_goal_pub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr simple_goal_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr fixed_route_sub_;
@@ -215,9 +267,12 @@ private:
   std::string planner_service_name_;
   std::string local_clear_service_name_;
   std::string global_clear_service_name_;
+  std::string finish_motion_service_name_;
   std::string fixed_route_behavior_tree_;
   std::chrono::duration<double> service_timeout_{3.0};
   std::atomic<bool> fixed_route_mode_{false};
+  std::atomic<uint64_t> simple_goal_generation_{0};
+  std::atomic<uint64_t> active_simple_goal_generation_{0};
 };
 
 }  // namespace mxb_move_base

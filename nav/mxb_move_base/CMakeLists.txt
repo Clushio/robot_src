@@ -6,6 +6,7 @@ if(NOT CMAKE_CXX_STANDARD)
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(cmd_vel_arbiter REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav2_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
@@ -16,6 +17,7 @@ find_package(std_srvs REQUIRED)
 
 add_executable(mxb_move_base src/move_base_compat.cpp)
 ament_target_dependencies(mxb_move_base
+  cmd_vel_arbiter
   geometry_msgs
   nav2_msgs
   nav_msgs
