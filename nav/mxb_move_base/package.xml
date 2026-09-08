@@ -21,6 +21,7 @@
   <depend>std_msgs</depend>
   <depend>std_srvs</depend>
 
+  <exec_depend>dwb_critics</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>dwb_plugins</exec_depend>
   <exec_depend>jgl_dwa_local_planner</exec_depend>
