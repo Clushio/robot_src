@@ -445,6 +445,7 @@ class MyWindow(QWidget):
         self.map_save_generation = 0
         self.auto_nav_start_pending = False
         self.move_base_wait_attempts = 0
+        self.move_base_status_wait_attempts = 0
         self.add_pnt.hide()
         self.add_workstation.hide()
         self.location_pnt.hide()
@@ -4398,6 +4399,7 @@ class MyWindow(QWidget):
         if self.moveBaseProcess and self.moveBaseProcess.poll() is None:
             self.start_bspline_log()
             self.set_status('MoveBase 正在启动…', 'info')
+            self.start_move_base_status_wait()
             return True
         try:
             self.moveBaseProcess = self.start_terminal_tab_process(
@@ -4416,7 +4418,30 @@ class MyWindow(QWidget):
         self.quitnav_button.setEnabled(True)
         self.set_chip(self.nav_chip, '导航 启动中', False)
         self.set_status('MoveBase 正在启动…', 'info')
+        self.start_move_base_status_wait()
         return True
+
+    def start_move_base_status_wait(self):
+        if self.auto_nav_start_pending:
+            return
+        self.move_base_status_wait_attempts = 0
+        QTimer.singleShot(500, self.wait_for_move_base_ready_status)
+
+    def wait_for_move_base_ready_status(self):
+        if self.auto_nav_start_pending:
+            return
+        if self.is_move_base_ready():
+            self.set_chip(self.nav_chip, 'MoveBase 待命', False)
+            self.set_status('MoveBase 已启动并就绪。', 'success')
+            return
+        if self.moveBaseProcess and self.moveBaseProcess.poll() is not None:
+            return
+        self.move_base_status_wait_attempts += 1
+        if self.move_base_status_wait_attempts >= 60:
+            self.set_chip(self.nav_chip, '导航 启动超时', False)
+            self.set_status('MoveBase 在 30 秒内未就绪。', 'error')
+            return
+        QTimer.singleShot(500, self.wait_for_move_base_ready_status)
 
     # load points and auto run
     def startNAV(self):

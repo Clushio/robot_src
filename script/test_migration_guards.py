@@ -36,3 +36,10 @@ def test_main_gui_monitors_localization_child_node():
     assert "(self.localizationProcess, '/laserMapping'" in text
     assert "self.expected_node_missing_counts.get('/laserMapping', 0) >= 3" in text
     assert '定位核心节点 /laserMapping 已退出' in text
+
+
+def test_manual_move_base_start_updates_ready_status():
+    text = (Path(__file__).parent / 'aNAV_ranger.py').read_text()
+    assert 'def wait_for_move_base_ready_status(self):' in text
+    assert "self.set_status('MoveBase 已启动并就绪。', 'success')" in text
+    assert 'self.start_move_base_status_wait()' in text
