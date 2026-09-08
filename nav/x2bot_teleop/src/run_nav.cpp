@@ -113,6 +113,7 @@ public:
     explicit MVGoalState(rclcpp_action::ResultCode code) : code_(code) {}
 
     bool succeeded() const { return code_ == rclcpp_action::ResultCode::SUCCEEDED; }
+    bool aborted() const { return code_ == rclcpp_action::ResultCode::ABORTED; }
 
     std::string toString() const
     {
@@ -3776,6 +3777,7 @@ private:
         bool have_progress_pose = getCurrentRobotPose(last_progress_pose);
         rclcpp::Time last_progress_time = now();
         const rclcpp::Time start_time = last_progress_time;
+        bool immediate_abort_retried = false;
         x2bot_teleop::TerminalGoalPolicy terminal_policy(
             terminal_yaw_wait_timeout_, progress_yaw_);
 
@@ -4013,6 +4015,24 @@ private:
                         << "; stop and retry the same terminal goal without topology replanning.");
                     stopRobot();
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    global_ac->sendGoal(mb_goal);
+                    continue;
+                }
+                // A very fast ABORTED result can be produced by the Nav2 BT
+                // when a child action server does not acknowledge its goal
+                // before default_server_timeout.  This is a transport / load
+                // transient, not evidence that the topology edge is blocked.
+                // Retry it once; a repeated abort or a later controller /
+                // progress failure still follows the normal blocked handling.
+                const double action_elapsed = (now() - start_time).seconds();
+                if (state.aborted() && !immediate_abort_retried &&
+                    action_elapsed < 2.0)
+                {
+                    immediate_abort_retried = true;
+                    RCLCPP_WARN(
+                        get_logger(),
+                        "Goal P%d aborted after %.3f seconds; retry once without blocking the topology edge.",
+                        target_index, action_elapsed);
                     global_ac->sendGoal(mb_goal);
                     continue;
                 }
