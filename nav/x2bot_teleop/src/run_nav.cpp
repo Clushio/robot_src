@@ -4069,7 +4069,10 @@ private:
                     RCLCPP_INFO(get_logger(),
                         "Legacy waypoint P%d reached by XY distance %.3f m (limit %.3f m).",
                         target_index, target_distance, legacy_waypoint_reached_distance_);
-                    global_ac->cancelGoal();
+                    // Keep the current NavigateToPose action alive until the next
+                    // topology goal is sent. Nav2 then performs an ordinary goal
+                    // preemption. Cancelling asynchronously here raced with the
+                    // immediately following goal and could abort that new goal.
                     current_pose_index = target_index;
                     active_next_index_ = -1;
                     publishTopologyMarkers();
