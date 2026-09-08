@@ -3998,9 +3998,9 @@ class MyWindow(QWidget):
     def start_can(self):
         try:
             self.can_start_requested_at = time.monotonic()
-            # 在可见终端中由操作者输入 sudo 凭据，源码不保存密码。
+            # 开发阶段使用约定密码自动完成 sudo 认证，避免操作员重复输入。
             can_command = (
-                'sudo ip link set can0 up type can bitrate 500000'
+                "printf '%s\\n' '1' | sudo -S ip link set can0 up type can bitrate 500000"
             )
 
             # 构建完整的终端命令
