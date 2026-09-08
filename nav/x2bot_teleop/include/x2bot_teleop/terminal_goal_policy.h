@@ -33,6 +33,7 @@ inline bool legacyIntermediateWaypointReached(uint8_t mode, bool final_goal,
 struct TerminalGoalUpdate
 {
   bool locked = false;
+  bool completed = false;
   bool error_activated = false;
   bool error_recovered = false;
 };
@@ -71,6 +72,7 @@ public:
 
     if (state == TERMINAL_COMPLETE)
     {
+      result.completed = true;
       if (error_active_)
       {
         error_active_ = false;

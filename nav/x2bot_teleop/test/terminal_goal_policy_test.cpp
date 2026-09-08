@@ -26,6 +26,15 @@ TEST(TerminalGoalPolicy, ReportsOnceThenRecoversOnMeasuredYawProgress)
   EXPECT_FALSE(policy.errorActive());
 }
 
+TEST(TerminalGoalPolicy, ReportsControllerCompletion)
+{
+  x2bot_teleop::TerminalGoalPolicy policy(60.0, 0.10);
+  const auto update = policy.update(
+      x2bot_teleop::TERMINAL_COMPLETE, true, 0.0, 100.0);
+  EXPECT_TRUE(update.locked);
+  EXPECT_TRUE(update.completed);
+}
+
 TEST(TerminalGoalPolicy, RearmsTimeoutAfterRecoveryAndHandlesYawWrap)
 {
   x2bot_teleop::TerminalGoalPolicy policy(30.0, 0.10);

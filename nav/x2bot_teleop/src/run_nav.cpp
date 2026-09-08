@@ -3823,6 +3823,23 @@ private:
                     terminal_motion_state, have_current_pose,
                     have_current_pose ? tf2::getYaw(current_pose.pose.orientation) : 0.0,
                     now().seconds());
+                if (terminal_update.completed)
+                {
+                    RCLCPP_INFO(
+                        get_logger(),
+                        "Terminal controller completed P%d; accept the final goal and finish steering centering.",
+                        target_index);
+                    global_ac->cancelGoal();
+                    stopRobot();
+                    current_pose_index = target_index;
+                    active_next_index_ = -1;
+                    publishTopologyMarkers();
+                    if (terminal_update.error_recovered)
+                    {
+                        clear_terminal_error("最终朝向已经完成，终点旋转等待故障解除。");
+                    }
+                    return GOAL_REACHED;
+                }
                 if (terminal_update.error_activated)
                 {
                     std::ostringstream detail;
