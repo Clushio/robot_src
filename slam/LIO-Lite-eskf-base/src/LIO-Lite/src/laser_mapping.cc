@@ -938,7 +938,23 @@ void LaserMapping::initialpose(){
 }
 
 void LaserMapping::initialpose2(){
-    Eigen::Affine3d init_guess;
+    constexpr std::size_t kMinInitialAlignmentPoints = 5;
+    if (!scan_undistort_ || !global_map_) {
+        RCLCPP_ERROR(node_->get_logger(), "Cannot run alternate initial alignment: cloud is unavailable");
+        return;
+    }
+    const auto alignment_scan = MakeFinitePointCloud(*scan_undistort_);
+    const auto alignment_map = MakeFinitePointCloud(*global_map_);
+    if (alignment_scan->size() < kMinInitialAlignmentPoints ||
+        alignment_map->size() < kMinInitialAlignmentPoints) {
+        RCLCPP_ERROR(
+            node_->get_logger(),
+            "Cannot run alternate initial alignment: finite scan=%zu, finite map=%zu",
+            alignment_scan->size(), alignment_map->size());
+        return;
+    }
+
+    Eigen::Affine3d init_guess = Eigen::Affine3d::Identity();
     if(flg_get_init_guess_){
         init_lock_.lock();
         init_guess.translation() = init_translation_;
@@ -949,8 +965,8 @@ void LaserMapping::initialpose2(){
     }
 
     P2P::Ndt3d ndt;
-    ndt.SetTarget(global_map_);
-    ndt.SetSource(scan_undistort_);
+    ndt.SetTarget(alignment_map);
+    ndt.SetSource(alignment_scan);
     ndt.AlignNdt(init_guess);
 
     pcl::IterativeClosestPoint<PointType, PointType> icp;
@@ -959,16 +975,22 @@ void LaserMapping::initialpose2(){
     icp.setTransformationEpsilon(1e-6);
     icp.setEuclideanFitnessEpsilon(1e-6);
     icp.setRANSACIterations(0);
-    icp.setInputSource(scan_undistort_);
-    icp.setInputTarget(global_map_);
+    icp.setInputSource(alignment_scan);
+    icp.setInputTarget(alignment_map);
 
-    pcl::PointCloud<PointType>::Ptr unused_result(new pcl::PointCloud<PointType>());
+    pcl::PointCloud<PointType>::Ptr aligned_result(new pcl::PointCloud<PointType>());
 
-    icp.align(*unused_result, init_guess.matrix().cast<float>());
+    icp.align(*aligned_result, init_guess.matrix().cast<float>());
+    const AlignmentFitnessResult fitness =
+        ComputeAlignmentFitness(*aligned_result, alignment_map);
 
-    if (icp.hasConverged() == false || icp.getFitnessScore() > 0.25)
+    if (!icp.hasConverged() || fitness.matched_points < kMinInitialAlignmentPoints ||
+        fitness.mean_squared_distance > 0.25)
     {
-        RCLCPP_ERROR(node_->get_logger(), "Global Initializing Fail!");
+        RCLCPP_ERROR(
+            node_->get_logger(),
+            "Alternate global initialization failed: score=%.3f, matches=%zu",
+            fitness.mean_squared_distance, fitness.matched_points);
         flg_location_inited_ = false;
         if(flg_get_init_guess_){
             flg_get_init_guess_ = false;
