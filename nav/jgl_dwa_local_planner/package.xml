@@ -32,8 +32,6 @@
   <depend>tf2_ros</depend>
   <depend>visualization_msgs</depend>
 
-  <depend>dwb_core</depend>
-  <depend>dwb_plugins</depend>
   <exec_depend>dwb_critics</exec_depend>
 
   <test_depend>ament_cmake_gtest</test_depend>
