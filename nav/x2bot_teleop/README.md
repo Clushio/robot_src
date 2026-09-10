@@ -45,22 +45,23 @@ x y z roll pitch yaw [label]
 
 | 接口 | 类型 | 说明 |
 |---|---|---|
-| `/plan_path_and_go` | `x2bot_teleop/SetInt` | 规划或执行到目标点/工位的拓扑路径 |
-| `/anav/cancel_navigation` | `std_srvs/Trigger` | 取消当前任务 |
-| `/anav/reload_topology` | `std_srvs/Trigger` | 重新加载并验证拓扑 |
-| `/anav/nav_config` | `x2bot_teleop/NavConfig` | 读取或应用运行参数 |
-| `/anav/edge_block_state` | `x2bot_teleop/EdgeBlockState` | 查询边封锁状态或清除指定边的运行时记录 |
-| `/anav/task_status` | `std_msgs/String` | GUI 使用的任务状态 |
-| `/anav/fixed_route_mode` | `std_msgs/Bool` | 通知局部规划器当前是否固定路线 |
-| `/anav/topology_safety_phase` | `std_msgs/UInt8` | 10 Hz 发布拓扑首段、中间段、末段安全阶段 |
-| `/anav/terminal_motion_state` | `std_msgs/UInt8` | 局部控制器发布直线跟踪、终点位置捕获、最终旋转和完成状态 |
-| `/anav/path_control_mode` | `std_msgs/UInt8` | 当前路径控制模式：0 未确定、1 B 样条参考跟踪、2 老控制器/回退模式 |
+| `/plan_path_and_go` | `x2bot_teleop/srv/SetInt` | 规划或执行到目标点/工位的拓扑路径 |
+| `/anav/cancel_navigation` | `std_srvs/srv/Trigger` | 取消当前任务 |
+| `/anav/reload_topology` | `std_srvs/srv/Trigger` | 重新加载并验证拓扑 |
+| `/anav/nav_config` | `x2bot_teleop/srv/NavConfig` | 读取或应用运行参数 |
+| `/anav/edge_block_state` | `x2bot_teleop/srv/EdgeBlockState` | 查询边封锁状态或清除指定边的运行时记录 |
+| `/anav/task_status` | `std_msgs/msg/String` | GUI 使用的任务状态 |
+| `/anav/fixed_route_mode` | `std_msgs/msg/Bool` | 通知局部规划器当前是否固定路线 |
+| `/anav/topology_safety_phase` | `std_msgs/msg/UInt8` | 10 Hz 发布拓扑首段、中间段、末段安全阶段 |
+| `/anav/terminal_motion_state` | `std_msgs/msg/UInt8` | 局部控制器发布直线跟踪、终点位置捕获、最终旋转和完成状态 |
+| `/anav/path_control_mode` | `std_msgs/msg/UInt8` | 当前路径控制模式：0 未确定、1 B 样条参考跟踪、2 老控制器/回退模式 |
 | `/anav/frozen_topology_plan` | `anav_interfaces/msg/FrozenTopologyPlan` | Hybrid A* 引导点、真实 topo 索引映射及冻结计划 ID |
 | `/anav/frozen_plan_received` | `std_msgs/msg/UInt64` | 局部控制器确认安装/清除冻结计划 |
+| `/anav/frozen_plan_ready` | `std_msgs/msg/UInt64` | 局部控制器确认冻结计划已通过最终曲线与碰撞检查 |
 | `/anav/hybrid_astar/raw_path` | `nav_msgs/msg/Path` | RViz 调试用 Hybrid A* 引导路径 |
-| `/topology_plan` | `nav_msgs/Path` | 当前拓扑路径 |
-| `/topology_markers` | `visualization_msgs/MarkerArray` | RViz 拓扑显示 |
-| `/cmd_vel/nav` | `geometry_msgs/Twist` | AutoNAV 直接控制阶段的导航速度输入 |
+| `/topology_plan` | `nav_msgs/msg/Path` | 当前拓扑路径 |
+| `/topology_markers` | `visualization_msgs/msg/MarkerArray` | RViz 拓扑显示 |
+| `/cmd_vel/nav` | `geometry_msgs/msg/Twist` | AutoNAV 直接控制阶段的导航速度输入 |
 
 ### `/plan_path_and_go`
 
@@ -84,7 +85,9 @@ ros2 service call /plan_path_and_go x2bot_teleop/srv/SetInt '{data: -1, current_
 ```
 
 `runnav` 会优先通过定位选择最近的有效起点。服务返回成功不应只理解为“MoveBase
-action 返回 SUCCEEDED”；代码还会检查真实到点距离，并在任务结束请求底盘停车回正。
+action 返回 SUCCEEDED”；代码还会检查真实到点距离。最终点的局部控制器一旦报告
+终点姿态完成，`runnav` 即可结束对应 action 并请求底盘停车回正。Nav2 在目标下发后
+2 秒内快速返回 ABORTED 时会原目标重试一次，不会立即把拓扑边记为堵塞。
 
 安全阶段取值为 `0=NORMAL`、`1=START_SEGMENT`、`2=FINAL_SEGMENT`。
 当前位置到首点以及首点到第二点保持 `START_SEGMENT`；中间拓扑边使用

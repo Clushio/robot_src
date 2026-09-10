@@ -257,6 +257,7 @@ kind=STATE
 | `ANAV-LOC-001` | WARN | GUI | 定位已启动，但尚未收到 `/Odometry` | 收到定位里程计 |
 | `ANAV-LOC-002` | STALE | GUI | 曾收到 `/Odometry`，之后超过 2 秒没有更新 | `/Odometry` 恢复更新 |
 | `ANAV-LOC-003` | ERROR | GUI | GUI 启动的定位进程意外退出或启动失败 | 定位重新正常运行 |
+| `ANAV-LOC-004` | ERROR | GUI | 定位 launch 仍在运行，但 `/laserMapping` 连续 3 次检查缺失 | 检查定位核心节点日志并重新启动定位 |
 
 ### 6.2 地图和导航
 

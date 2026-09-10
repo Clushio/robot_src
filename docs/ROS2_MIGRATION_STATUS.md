@@ -1,11 +1,11 @@
 # ROS 1 Noetic → ROS 2 Humble 迁移状态
 
-验收日期：2026-08-31。ROS 1 源目录在迁移期间保持只读；所有修改均位于
+初次验收日期：2026-08-31；文档同步日期：2026-09-10。ROS 1 源目录在迁移期间保持只读；所有修改均位于
 `src-ros2`。
 
 ## 1. 迁移结论
 
-- 已完成并可构建的 ROS 2 package：18 个。
+- 已完成并可构建的 ROS 2 package：19 个。
 - 尚未完成的 ROS 1 package：无。
 - ROS 1 `livox_ros_driver` 没有自行移植；按要求由官方最新
   `livox_ros_driver2` + 固定版本 SDK2 替代。
@@ -13,8 +13,8 @@
 - 源码树中保留少量未编译的 ROS 1 源文件、XML launch 和旧式 YAML 作为算法对照；
   它们不进入 ROS 2 安装空间，也不是运行入口。
 
-完整干净构建通过，`rosdep check` 通过，18/18 package 可被 `ros2 pkg` 发现。
-完整测试结果为 `116 tests, 0 errors, 0 failures, 5 skipped`。工作区 42 个
+完整干净构建通过，`rosdep check` 通过，19/19 package 可被 `ros2 pkg` 发现。
+当前完整测试基线为 `127 tests, 0 errors, 0 failures, 5 skipped`。工作区 42 个
 `*.launch.py` 与官方 Livox 的 9 个 Python launch 均能解析。
 
 ## 2. 已迁移 package
@@ -35,6 +35,7 @@
 | `myglobal_planner` | `nav2_core::GlobalPlanner` plugin | Nav2 实际加载、规划 service/topic |
 | `jgl_dwa_local_planner` | `nav2_core::Controller` 和两个 costmap layer plugin | B-spline/DWA 测试、Nav2 实际加载 |
 | `mxb_move_base` | Nav2 servers + ROS 1 行为兼容节点/BT | action、规划/清图兼容服务、关闭竞态 |
+| `anav_interfaces` | AutoNAV 与局部控制器共享的 rosidl 消息包 | Hybrid A* 冻结计划接口及依赖解析 |
 | `x2bot_teleop` | rclcpp、rclcpp_action、msg/srv、TF2、launch | 固定路线、Tag、手柄、任务取消 |
 | `robot_r` | ROS 2 launch、RViz2 panel/tool plugin、串口/TCP 节点 | plugin 注册、TF、启动编排 |
 | `anav_ranger` | rclpy、PyQt5 GUI、拓扑/点位工具 package 化 | GUI 无头启动、服务和 TF 接入 |
@@ -78,6 +79,7 @@ ROS 1 driver1 也没有作为本工程维护的 Humble 等价版本；使用官�
   `MotionState`、`MotorState`、`RangerLightCmd`、`RsStatus`、`SystemState`；
   `TriggerParkMode`；`StopAndCenter` action。
 - `cmd_vel_arbiter`：`ArbitratedCommand`；`FinishMotion` service。
+- `anav_interfaces`：`FrozenTopologyPlan`。
 - `x2bot_teleop`：`NavConfig`、`SetInt`、`SetTagY` services。
 - `lio_lite`：`Pose6D`。
 - `livox_ros_driver2`：`CustomMsg`、`CustomPoint`。

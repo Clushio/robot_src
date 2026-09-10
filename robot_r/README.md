@@ -86,10 +86,15 @@ ROS2 主配置位于 `lio/config/mid360_ros2.yaml`：
 - `common`：雷达和 IMU Topic；
 - `preprocess`：盲区、距离、角度 FOV；
 - `mapping`：噪声、外参、探测范围；
+- `publish`：配准点云以及 `/mapping_map` 累计地图的开关、发布周期和体素大小；
 - `dynamic_filter`：在线动态点过滤；
 - `pcd_save`：地图保存；
 - `load_g_map`、`load_f_map`：定位地图；
-- `init_trans`、`init_rpy` 和 ICP 阈值：重定位初值与约束。
+- `init_trans`、`init_rpy`、`init_ndt_enable` 和 ICP 阈值：重定位初值与约束。
+
+当前 ROS2 真机配置默认 `init_ndt_enable: false`，直接从操作员给定的初始位姿进入
+ICP，并对输入点云、收敛状态、匹配点数、fitness、位移和航向变化做有效性检查。
+这是为了避开 PCL 1.12 NDT 初始化可能出现的浮点异常；重新启用 NDT 前必须单独验证。
 
 LIO 的地图目录应统一为 `~/maps`。当前实现仍可能包含固定绝对 `ROOTDIR`；部署前应
 通过 ROS 参数或用户目录展开完成参数化，不要通过创建额外用户目录来兼容固定路径。

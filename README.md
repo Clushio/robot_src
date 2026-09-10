@@ -32,7 +32,7 @@ colcon test --executor sequential
 colcon test-result --verbose
 ```
 
-当前工作区应发现 18 个 package。验证方式：
+当前工作区应发现 19 个 package。验证方式：
 
 ```bash
 colcon list
@@ -44,7 +44,7 @@ done
 ## 系统数据流
 
 ```text
-MID360s -> livox_ros_driver2 -> LIO-Lite -> /Odometry、点云、map->body
+MID360s -> livox_ros_driver2 -> LIO-Lite -> /Odometry、/mapping_map、map->body
                                               |
 点位 + topology.yaml -> AutoNAV -> Nav2/B-spline -> /cmd_vel/nav
 MM3V Tag -------------------------------------> /cmd_vel/tag
@@ -117,6 +117,7 @@ ros2 run anav_ranger aNAV_ranger.py
 
 ```text
 GlobalMap.pcd
+GlobalMap_raw.pcd（启用动态过滤时可选）
 FeatureMap.pcd
 split_map/
 map.pgm

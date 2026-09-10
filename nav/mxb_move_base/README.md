@@ -29,6 +29,10 @@ ROS2 没有 `move_base_msgs` 的 Humble 等价包，因此旧 action 的 wire ty
 - 固定路线行为树只计算一次路径；兼容节点在收到 transient-local
   `/anav/fixed_route_mode=true` 后，为 simple goal 选择该行为树。
 - ROS1 配置禁用了 recovery behavior，ROS2 行为树也不主动清图、旋转或改道。
+- 兼容节点转发的普通 simple goal 在成功、失败或取消后调用
+  `/cmd_vel_arbiter/finish_motion`；旧 goal 被新 goal 取代时不会抢先触发停车回正。
+- BT Navigator 的 action server 应答等待为 1000 ms，用于避免系统负载较高时把短暂
+  应答延迟误判为导航失败。
 - 局部 costmap 仍为 `map` frame、3 m 滚动窗口，frame 名保持 `map`、`base_link`、
   `livox_frame`。
 - 机器人 footprint 与 `collision_monitor` 使用相同四边形。

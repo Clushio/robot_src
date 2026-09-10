@@ -27,7 +27,8 @@
 仓库仍包含需要按部署环境确认的固定配置：
 
 - 源码或 launch 中的固定绝对地图路径，应统一参数化为 `~/maps`；
-- GUI 的 CAN 操作会在终端中请求 sudo 密码，不应把密码写入源码；
+- 当前开发版 GUI 的 CAN 命令会自动向 `sudo` 提交约定密码 `1`；仅适用于受控开发机，
+  正式部署前必须改为主机侧免密的受限 CAN 配置或恢复人工认证；
 - Tag TCP 默认绑定 `192.168.3.216:12345`；
 - MM3V UDP 默认发送到 `192.168.3.17:22222`；
 - MM3V 默认串口 `/dev/ttyUSB0`。
@@ -72,7 +73,8 @@ GUI 共包含六个页面：
 
 推荐按以下顺序使用：
 
-1. 点击“启动 CAN”，在弹出的终端中输入目标机器的 sudo 密码并等待 CAN 状态正常。
+1. 点击“启动 CAN”，等待弹出的终端完成配置并确认 CAN 状态正常。当前开发版会自动
+   使用约定密码 `1` 完成认证，不会等待人工输入；若目标机器凭据不同，命令会失败。
    部署方法见 [ROS 2 Humble 新机安装与构建](ROS2_HUMBLE_INSTALL.md)。
 2. 点击“启动底盘”。它会启动 Ranger 驱动，同时带起速度仲裁器和碰撞监控。
 3. 如需 Tag 工位精调，点击“启动标签读取”；GUI 会同时启动 MM3V ROS 节点和 TCP
@@ -241,7 +243,7 @@ ros2 launch robot_r s2lam.launch.py
 
 1. 缓慢覆盖作业区域，尽量形成闭环。
 2. 避免大量人员或车辆长期遮挡固定结构。
-3. 观察 `/cloud_registered` 以及静态/动态调试点云。
+3. 观察 `/cloud_registered`、累计地图 `/mapping_map` 以及静态/动态调试点云。
 4. 结束时通过 GUI 正常停止 ros2 launch，让 LIO 执行保存逻辑。
 5. 检查 `~/maps/GlobalMap.pcd`、`FeatureMap.pcd`、可选的
    `GlobalMap_raw.pcd` 和 `split_map/`。
@@ -448,6 +450,7 @@ ros2 topic hz /livox/lidar
 ros2 topic hz /livox/imu
 ros2 topic hz /Odometry
 ros2 topic hz /odom
+ros2 topic hz /mapping_map
 
 # 速度链路
 ros2 topic echo /cmd_vel/nav
@@ -477,6 +480,14 @@ candump can0
 
 `/Odometry` 是 LIO 全局定位，`/odom` 是底盘实测运动。检查 GUI 使用的是哪个字段，
 并确认 `/motion_state` 对应当前双阿克曼、蟹行、原地旋转或驻车模式。
+
+### 初始定位失败或定位节点退出
+
+先检查输入扫描和全局地图是否存在有效有限点，以及日志中的 ICP 收敛、匹配点数、
+fitness、位移和航向拒绝原因。当前 `mid360_ros2.yaml` 默认关闭 PCL NDT 初始化并从
+操作员给定的初始位姿直接进入 ICP；不要仅为绕过失败而打开 `init_ndt_enable`，PCL
+1.12 的 NDT 路径可能触发浮点异常。GUI 若发现定位 launch 仍在但 `/laserMapping`
+连续缺失，会报告 `ANAV-LOC-004`。
 
 ### 地图能加载但 AutoNAV 拒绝拓扑
 
