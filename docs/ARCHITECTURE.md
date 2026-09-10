@@ -59,6 +59,7 @@ map.yaml + map.pgm + robot_positions.txt
  /plan_path_and_go ─> runnav ─> Dijkstra 拓扑路径 ─> move_base action
                                          │
                                          ├── /topology_plan
+                                         ├── /anav/frozen_topology_plan（可选 Hybrid A* 重入）
                                          ├── /topology_markers
                                          └── /anav/task_status
 ```
@@ -66,6 +67,11 @@ map.yaml + map.pgm + robot_positions.txt
 点位文件中的行号只是稳定节点 ID，不代表默认路线顺序。拓扑构建器会根据二维地图、
 机器人尺寸、padding、最小净空和节点度数生成安全边，并将输入指纹写入
 `topology.yaml`。`runnav` 会验证指纹、节点和边；验证失败时拒绝任务。
+
+自动绕路启用 Hybrid A* 重入时，`runnav` 在确认停车后用静态地图和局部代价地图快照
+生成到候选 topo 点的引导路径。局部规划器必须依次确认冻结计划已接收、最终曲线已通过
+碰撞检查，任务才继续；执行期间不在线改写冻结曲线，环境变化只触发减速、停车或整条
+重算。该功能默认关闭，固定路线不使用。
 
 `/plan_path_and_go` 的 `run` 字段：
 

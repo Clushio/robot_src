@@ -64,14 +64,25 @@ B 样条中间拓扑点和末端使用独立到达语义：中间点按
 `/anav/fixed_route_mode` 为 true 时，局部层遵守固定路线语义，堵塞后停车等待，不由
 全局规划器自行生成偏离拓扑的 DWA 绕行。
 
-运行时在 B 样条上发现障碍后，控制器按照到首个阻塞采样点的路径弧长分级限制候选
-速度：`obstacle_slowdown_distance` 外保持全速，进入该距离后依次限制为 75%、50%、
+运行时在 B 样条或旧直线回退路径上发现障碍后，控制器按照到首个阻塞采样点的路径
+弧长分级限制候选速度：`obstacle_slowdown_distance` 外保持全速，进入该距离后依次限制为 75%、50%、
 25%，到 `obstacle_stop_distance` 时请求停车。线速度和角速度同比例缩放以保持曲率。
 该逻辑用于提前减速、等待和超时重规划；最终速度仍由 `collision_monitor` 按完整
 footprint 和制动轨迹裁决。
 
 全局规划配置中的 `enable_dwa_obstacle_avoidance: false` 与这一所有权划分有关：
 AutoNAV 负责拓扑重规划，局部层不应静默改变业务路线。
+
+### Hybrid A* 冻结计划
+
+启用 AutoNAV 的 Hybrid A* 重入后，`ReferencePathManager` 从
+`/anav/frozen_topology_plan` 接收引导点、真实 topo 索引、局部地图快照和计划 ID，并
+通过 `/anav/frozen_plan_received` 确认安装。曲线生成器同时对静态地图和该局部快照
+检查碰撞；全部轨迹检查通过后，局部规划器再通过 `/anav/frozen_plan_ready` 确认可执行。
+
+冻结计划执行期间忽略普通拓扑路径更新，也不允许退回会直接切向 topo 目标的旧控制器；
+入口航向或参考曲线不安全时停车并拒绝计划。实时地图变化仍由分级减速和最终
+`collision_monitor` 处理，必要时由 AutoNAV 停车后重新生成整条冻结计划。
 
 ## 代价地图插件
 
@@ -115,6 +126,7 @@ catkin_test_results build
 - 静态障碍和窄通道检查；
 - S 弯、急弯和终点角度；
 - 路径生成失败后的回退段；
+- Hybrid A* 冻结计划的接收、曲线验收、清除和重算；
 - 堵塞、恢复和固定路线模式；
 - 双阿克曼轮组转角/转角速度；
 - 与 `collision_monitor` 最终停车行为的联调。

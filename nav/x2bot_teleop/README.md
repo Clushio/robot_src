@@ -57,6 +57,7 @@ x y z roll pitch yaw [label]
 | `/anav/path_control_mode` | `std_msgs/UInt8` | 当前路径控制模式：0 未确定、1 B 样条参考跟踪、2 老控制器/回退模式 |
 | `/anav/frozen_topology_plan` | `x2bot_teleop/FrozenTopologyPlan` | Hybrid A* 引导点、真实 topo 索引映射及冻结计划 ID |
 | `/anav/frozen_plan_received` | `std_msgs/UInt64` | 局部控制器确认安装/清除冻结计划 |
+| `/anav/frozen_plan_ready` | `std_msgs/UInt64` | 局部控制器确认冻结计划已通过最终曲线与碰撞检查 |
 | `/anav/hybrid_astar/raw_path` | `nav_msgs/Path` | RViz 调试用 Hybrid A* 引导路径 |
 | `/topology_plan` | `nav_msgs/Path` | 当前拓扑路径 |
 | `/topology_markers` | `visualization_msgs/MarkerArray` | RViz 拓扑显示 |
@@ -117,6 +118,15 @@ GUI 或 `~/maps/autonav_params.yaml` 管理。
 
 GUI“导航参数”页显示每条拓扑边的运行时封锁次数、状态和剩余冷却时间。任务停止时可
 选择指定边清除运行时封锁记录；该操作不会解除 `topology.yaml` 中配置的永久禁用边。
+
+局部换边检查优先使用 `/collision_monitor/footprint`，其次使用 MoveBase 局部代价地图
+footprint；两者尚未加载时使用当前部署尺寸 `0.72 m × 0.50 m`。节点会在局部地图更新时
+继续尝试切换到优先级更高的 footprint，因此不依赖底盘、MoveBase 和 AutoNAV 的启动
+先后顺序。导航 padding、占用阈值和未知区策略取自碰撞监控参数。
+
+启用 Hybrid A* 重入后，`runnav` 先等待底盘稳定停车，再发布带局部地图快照和计划 ID
+的冻结引导计划。只有局部规划器先确认接收，再确认最终参考曲线通过生成与碰撞检查，
+任务才继续执行；任一步超时或拒绝都会保持停车并放弃该冻结计划。
 
 ## 点位记录
 
